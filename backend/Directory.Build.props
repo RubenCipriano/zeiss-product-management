@@ -1,0 +1,33 @@
+<Project>
+  <!-- Settings shared by every project in the solution. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Treat the build as the first quality gate. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- CS1591/CS1573: XML docs are written where they add value, not for every member or parameter. -->
+    <!-- CA1716: `Error` is the conventional name for the result-pattern error type; VB interop is not a concern. -->
+    <NoWarn>$(NoWarn);CS1591;CS1573;CA1716</NoWarn>
+
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <Authors>Ruben Cipriano</Authors>
+    <Product>Product Management</Product>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('Tests')) Or '$(MSBuildProjectName)' == 'ProductManagement.Testing'">
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- CA1707: underscores in test names are the readable convention (Method_Scenario_Outcome). -->
+    <!-- CA2007: ConfigureAwait is meaningless in test code. -->
+    <!-- CA1515: xUnit requires public test classes. -->
+    <NoWarn>$(NoWarn);CA1707;CA2007;CA1515;CA1861</NoWarn>
+  </PropertyGroup>
+</Project>

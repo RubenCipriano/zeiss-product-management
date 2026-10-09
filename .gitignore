@@ -1,0 +1,9 @@
+# OS / editor noise (backend/ and frontend/ have their own tool-specific .gitignore files)
+.DS_Store
+Thumbs.db
+.idea/
+.vs/
+*.swp
+
+# Local environment overrides for docker compose
+.env

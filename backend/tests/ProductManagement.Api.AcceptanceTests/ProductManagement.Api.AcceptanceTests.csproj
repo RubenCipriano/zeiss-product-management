@@ -1,10 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- Behaviour-driven acceptance tests (Gherkin via Reqnroll) executed against the real HTTP API. Requires Docker. -->
+
   <PropertyGroup>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
     <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
   </PropertyGroup>
 
@@ -13,11 +12,17 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Using Include="Xunit" />
+    <ProjectReference Include="..\ProductManagement.Testing\ProductManagement.Testing.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="xunit.v3.mtp-v2" Version="4.0.1" />
+    <PackageReference Include="xunit.v3.mtp-v2" />
+    <PackageReference Include="Reqnroll.xunit.v3" />
+    <PackageReference Include="Shouldly" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Shouldly" />
   </ItemGroup>
 
 </Project>
