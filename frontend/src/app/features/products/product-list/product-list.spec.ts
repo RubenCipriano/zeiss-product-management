@@ -80,6 +80,28 @@ describe('ProductList', () => {
     expect(api.adjustStock).toHaveBeenCalledWith(product, 'remove', 1, expect.any(String));
   });
 
+  it('moves the chosen number of units per click, and blocks removing more than is in stock', async () => {
+    const product = aProduct({ name: 'Frame', stockQuantity: 5 });
+    api.query.mockReturnValue(of(aPage([product])));
+    api.adjustStock.mockReturnValue(of({ ...product, stockQuantity: 15 }));
+
+    const fixture = await render();
+    const element = fixture.nativeElement as HTMLElement;
+    const step = element.querySelector<HTMLSelectElement>('[data-testid=stock-step]')!;
+    step.value = '10';
+    step.dispatchEvent(new Event('change'));
+    await fixture.whenStable();
+
+    expect(
+      element.querySelector<HTMLButtonElement>('button[aria-label="Remove 10 units of Frame"]')!
+        .disabled,
+    ).toBe(true);
+    element.querySelector<HTMLButtonElement>('button[aria-label="Add 10 units of Frame"]')!.click();
+    await fixture.whenStable();
+
+    expect(api.adjustStock).toHaveBeenCalledWith(product, 'add', 10, expect.any(String));
+  });
+
   it('offers only what a viewer may do: stock history, but no create, edit, delete or stock actions', async () => {
     api.query.mockReturnValue(of(aPage([aProduct({ name: 'Frame', stockQuantity: 5 })])));
 

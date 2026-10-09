@@ -185,7 +185,26 @@
               <th scope="col" class="px-4 py-3">Name</th>
               <th scope="col" class="px-4 py-3">Category</th>
               <th scope="col" class="px-4 py-3 text-right">Price</th>
-              <th scope="col" class="px-4 py-3">Stock</th>
+              <th scope="col" class="px-4 py-3">
+                <span class="flex items-center gap-2">
+                  Stock
+                  @if (auth.can('stock:write')) {
+                    <!-- How many units each + / - click moves (the API takes any quantity). -->
+                    <select
+                      class="rounded-md border border-slate-200 bg-white py-0.5 pr-6 pl-1.5 text-xs font-medium tracking-normal text-slate-700 normal-case"
+                      aria-label="Units per + / - click"
+                      title="Units per + / - click"
+                      [value]="stockStep()"
+                      (change)="setStockStep($event)"
+                      data-testid="stock-step"
+                    >
+                      @for (step of stockSteps; track step) {
+                        <option [value]="step">±{{ step }}</option>
+                      }
+                    </select>
+                  }
+                </span>
+              </th>
               <th scope="col" class="px-4 py-3">Last updated</th>
               <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
             </tr>
@@ -216,9 +235,9 @@
                       <button
                         type="button"
                         class="btn-icon"
-                        title="Remove 1"
-                        [attr.aria-label]="'Remove one unit of ' + product.name"
-                        [disabled]="product.stockQuantity === 0 || isPending(product.id)"
+                        [title]="'Remove ' + stockStep()"
+                        [attr.aria-label]="'Remove ' + unitsLabel() + ' of ' + product.name"
+                        [disabled]="product.stockQuantity < stockStep() || isPending(product.id)"
                         (click)="quickAdjust(product, 'remove')"
                       >
                         <app-icon name="minus" />
@@ -227,8 +246,8 @@
                       <button
                         type="button"
                         class="btn-icon"
-                        title="Add 1"
-                        [attr.aria-label]="'Add one unit of ' + product.name"
+                        [title]="'Add ' + stockStep()"
+                        [attr.aria-label]="'Add ' + unitsLabel() + ' of ' + product.name"
                         [disabled]="isPending(product.id)"
                         (click)="quickAdjust(product, 'add')"
                       >

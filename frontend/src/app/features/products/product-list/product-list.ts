@@ -112,6 +112,13 @@ export class ProductList {
   /** Products with a stock request in flight, so their quick buttons can't be double-clicked. */
   protected readonly pendingIds = signal<ReadonlySet<number>>(new Set());
 
+  /** Units moved by each + / - click. Any other amount: "Adjust stock…" in the row menu. */
+  protected readonly stockSteps = [1, 5, 10, 25, 100] as const;
+  protected readonly stockStep = signal(1);
+  protected readonly unitsLabel = computed(() =>
+    this.stockStep() === 1 ? 'one unit' : `${this.stockStep()} units`,
+  );
+
   constructor() {
     this.nameControl.valueChanges
       .pipe(
@@ -183,11 +190,15 @@ export class ProductList {
     });
   }
 
-  /** One-click +1 / -1. The API decides atomically whether the change is allowed. */
+  protected setStockStep(event: Event): void {
+    this.stockStep.set(Number((event.target as HTMLSelectElement).value));
+  }
+
+  /** One-click + / - by the selected step. The API decides atomically whether the change is allowed. */
   protected quickAdjust(product: Product, operation: StockOperation): void {
     this.setPending(product.id, true);
     this.store
-      .adjustStock(product, operation, 1, crypto.randomUUID())
+      .adjustStock(product, operation, this.stockStep(), crypto.randomUUID())
       .pipe(finalize(() => this.setPending(product.id, false)))
       .subscribe({ error: (error: ApiError) => this.notifications.error(error.message) });
   }
