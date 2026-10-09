@@ -154,11 +154,7 @@
   </section>
 
   <section class="card mt-4 overflow-hidden" aria-label="Products">
-    <div class="h-0.5 bg-slate-100">
-      @if (store.isLoading()) {
-        <div class="h-full w-full animate-pulse bg-brand-500"></div>
-      }
-    </div>
+    <app-progress-bar [active]="store.isLoading()" label="Loading products" />
 
     @if (store.error(); as error) {
       <div class="flex flex-col items-center gap-3 px-6 py-16 text-center" role="alert">
@@ -172,7 +168,14 @@
         </button>
       </div>
     } @else {
-      <div class="overflow-x-auto">
+      <!-- While another page or filter loads, the current rows stay (dimmed) so nothing jumps. The dimming starts
+           after 150 ms, so fast answers (most come from the cache) never flash. -->
+      <div
+        class="overflow-x-auto transition-opacity duration-200"
+        [class.opacity-50]="store.isChangingPage()"
+        [class.delay-150]="store.isChangingPage()"
+        [attr.aria-busy]="store.isLoading()"
+      >
         <table class="min-w-[56rem] w-full text-sm">
           <thead
             class="border-b border-slate-200 bg-slate-50/80 text-left text-xs font-semibold tracking-wide text-slate-500 uppercase"

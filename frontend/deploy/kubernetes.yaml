@@ -137,7 +137,7 @@ metadata:
     app.kubernetes.io/name: gateway
     app.kubernetes.io/part-of: product-management
 spec:
-  replicas: 2
+  # No `replicas`: the HorizontalPodAutoscaler below owns the count.
   strategy:
     type: RollingUpdate
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
@@ -177,7 +177,7 @@ spec:
             preStop:
               sleep: { seconds: 5 }
           resources:
-            requests: { cpu: 50m, memory: 32Mi }
+            requests: { cpu: 250m, memory: 32Mi }
             limits: { cpu: "1", memory: 128Mi }
           securityContext:
             allowPrivilegeEscalation: false
@@ -201,3 +201,28 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: gateway
+---
+# The gateway handles every request (and answers the cached ones itself), so it scales with traffic too: 2 to 6
+# replicas at 70 % of its CPU request. Needs metrics-server (scripts/cluster-addons.sh).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway
+  namespace: product-management
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 180

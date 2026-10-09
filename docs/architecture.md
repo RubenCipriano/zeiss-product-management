@@ -21,7 +21,7 @@ flowchart LR
     user([Browser / API client / k6]) -->|":8080 (LoadBalancer)"| gw
 
     subgraph frontend["frontend repository"]
-        gw["<b>gateway</b><br/>nginx ×2<br/>rate limit per IP · microcache 1 s<br/>edge cache for bundles"]
+        gw["<b>gateway</b><br/>nginx ×2–6 (HPA)<br/>rate limit per IP · microcache 1 s<br/>CSP · edge cache for bundles"]
         web["<b>web</b><br/>nginx ×2<br/>Angular static files"]
     end
 
@@ -65,13 +65,13 @@ badly. With `api-headless`, nginx knows every pod and balances each request itse
 
 | Object                         | Kind        | What it does |
 | ------------------------------ | ----------- | ------------ |
-| `gateway`                      | Deployment ×2 | nginx: TLS/edge point in production, per-IP rate limit, security headers, gzip, caches static files and API reads for 1 s, routes `/api` and `/`. |
+| `gateway`                      | Deployment, 2–6 (HPA) | nginx: TLS/edge point in production, per-IP rate limit, security headers, gzip, caches static files and API reads for 1 s, routes `/api` and `/`. |
 | `web`                          | Deployment ×2 | nginx serving the built Angular app; long cache for hashed bundles, no cache for `index.html`. |
 | `api`                          | Deployment, 2–8 (HPA) | The REST API. Stateless: anything shared (cache, idempotency keys, failed sign-ins) is in Redis, so any replica can serve any request. |
 | `postgres`                     | StatefulSet ×1 | PostgreSQL 18 with a PersistentVolumeClaim (`data-postgres-0`), so data survives pod restarts. The single source of truth. |
 | `redis`                        | Deployment ×1 | Redis 8, memory only (`--save ""`), `volatile-lru`. Losing it costs performance, never correctness. |
 | `db-migrate`                   | Job         | Runs `dotnet ProductManagement.Api.dll migrate` once per deployment, before the new API pods start. Replicas never race to migrate. |
-| `api` HPA                      | HorizontalPodAutoscaler | Adds API pods when their average CPU passes 60 % of the request, removes them after 3 minutes of lower load. |
+| `api` / `gateway` HPA          | HorizontalPodAutoscaler | Add pods when average CPU passes 60 % (API) / 70 % (gateway) of the request; remove them after 3 minutes of lower load. |
 | `metrics-server`               | Deployment (kube-system) | Reports pod CPU/memory to the HPA and to `kubectl top`. Installed by `scripts/cluster-addons.sh`. |
 | `k6-<scenario>`                | Job (temporary) | A load test run inside the cluster by `load-tests/run.sh`. |
 
@@ -108,14 +108,15 @@ sequenceDiagram
     else
         G->>A: forward to least busy pod
         A->>A: verify JWT (signature, issuer, audience, expiry)<br/>policy products:read · per-user rate limit
-        A->>R: GET generation, then GET list:{generation}:page=1
+        A->>R: MGET generations, GET count + page ids (versioned keys)
         alt cached
             R-->>A: JSON
         else
-            A->>P: SELECT … ORDER BY name, id LIMIT 20 (+ COUNT)
-            P-->>A: rows
-            A->>R: SET list:{generation}:page=1 (TTL)
+            A->>P: COUNT + page ids (one query per replica: single-flight)
+            P-->>A: ids
+            A->>R: SET (until the listing generation moves on)
         end
+        A->>P: the 20 rows by primary key (~1 ms: stock always current)
         A-->>G: 200
         G-->>C: 200 (X-Cache-Status: MISS)
     end
@@ -190,8 +191,8 @@ flowchart LR
 
 * **The API scales; the rest doesn't need to.** The API is stateless, so adding pods adds capacity. The gateway and
   web pods do very little work per request (2 each for availability).
-* **The database is the ceiling.** One PostgreSQL pod with 2 CPUs. The HPA's maximum (8) × the pool size (20) =
-  160 connections, below `max_connections` (300). Beyond that, capacity comes from the database: read replicas for
+* **The database is the ceiling.** One PostgreSQL pod with 2 CPUs. The HPA's maximum (8) × the pool size (10) =
+  80 connections: more would not add throughput, only queueing inside PostgreSQL. Beyond that, capacity comes from the database: read replicas for
   the list and search queries, a bigger instance, or a pooler (PgBouncer). See
   [load-test-results.md](load-test-results.md).
 * **Change the range without touching the frontend:**
@@ -237,5 +238,5 @@ Indexes that matter at scale (850,000 products, 5 million movements):
 | ----- | ------ |
 | `products (name, id)` | the default list, ordered by name then id (index scan, no sort). |
 | `products USING gin (name gin_trgm_ops)` | `search?name=` with `ILIKE '%…%'` anywhere in the name. |
-| `products (stock_quantity)` | `stock-level?min=&max=`. |
+| `products (stock_quantity, name, id)` | `stock-level?min=&max=`, already in the endpoint's order (0.1 ms instead of 184 ms with an index on stock alone). |
 | `stock_movements (product_id, occurred_at DESC, id DESC)` | a product's history, newest first. |

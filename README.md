@@ -5,7 +5,10 @@ A product and stock management system:
 * **Backend:** .NET 10 / ASP.NET Core Web API, Entity Framework Core and PostgreSQL, with a Redis read cache, JWT
   authentication (tokens issued by the API to registered consumers), role-based authorization and rate limiting.
 * **Frontend:** Angular 22 with Tailwind CSS, served behind an nginx gateway that also caches API reads.
-* **Deployment:** Kubernetes (Docker Desktop or MicroK8s), with k6 load tests run inside the cluster.
+* **Deployment:** Kubernetes (Docker Desktop or MicroK8s), with an autoscaled API (2–8 replicas) and k6 load
+  tests run inside the cluster, including one with ten teams on 850,000 products and 5 million stock movements.
+* **Stock ledger and idempotency:** every stock change is recorded with who made it; retried requests
+  (`Idempotency-Key`) are applied exactly once, whichever replica they reach.
 * **MCP server:** lets AI assistants search the catalogue and record stock movements, under the same rules as
   everyone else.
 
@@ -90,18 +93,26 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8080/api/products
 ```
                                    ┌───────────────────── namespace product-management ──────────────────────┐
  browser ──► gateway (nginx ×2) ──┬─► web (Angular static files ×2)                                         │
-   :8080     rate limit, per-     └─► api (ASP.NET Core ×2 … ×N) ──┬─► PostgreSQL (StatefulSet + volume)    │
-             request LB, caches:      issues + verifies JWTs       └─► Redis (read cache, sign-in throttle) │
-             static files + 1 s                                                                            │
+   :8080     rate limit, per-     └─► api (ASP.NET Core, 2–8, HPA) ┬─► PostgreSQL (StatefulSet + volume)    │
+             request LB, caches:      JWT, RBAC, idempotency       └─► Redis (cache, idempotency keys,     │
+             static files + 1 s                                         sign-in throttle)                 │
              API microcache           db-migrate Job (EF Core migrations, once per deployment)              │
                                    └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Scale the API without touching the frontend:
+Diagrams (topology, read path, stock change, scaling, data model) and **what each component does** (every
+Service, workload, Secret and policy): [docs/architecture.md](docs/architecture.md).
+
+The API scales on its own (HorizontalPodAutoscaler, 2–8 replicas at 60 % CPU; needs metrics-server:
+`scripts/cluster-addons.sh`). Change its range without touching the frontend:
 
 ```bash
-kubectl -n product-management scale deployment/api --replicas=4
+kubectl -n product-management patch hpa api -p '{"spec":{"minReplicas":4}}'
+kubectl -n product-management get hpa api -w
 ```
+
+Large dataset for scale testing: `load-tests/seed-bulk.sh` (850,000 products, 5 million stock movements, ~2
+minutes), checked by `load-tests/verify-data.sh`.
 
 ---
 
@@ -143,20 +154,20 @@ cd frontend && npm ci && npm start    # http://localhost:4200; /api proxied to :
 ## Tests
 
 ```bash
-cd backend && dotnet test --solution ProductManagement.sln     # 212 tests (Docker must be running)
-cd frontend && npm run test:ci                                   # 70 tests
+cd backend && dotnet test --solution ProductManagement.sln     # 232 tests (Docker must be running)
+cd frontend && npm run test:ci                                   # 92 tests
 load-tests/run.sh smoke                                          # against the running cluster
 ```
 
 | Suite                                 | Tests | What it proves |
 | ------------------------------------- | ----: | -------------- |
 | `Domain.UnitTests`                    | 32 | Invariants (six-digit ids, price precision, stock range); a failed update leaves no partial changes; the stock rule at its edges, including deltas that would overflow naive arithmetic. |
-| `Application.UnitTests`               | 55 | Use-case orchestration: validation first, no id consumed by invalid requests, version checks, conflicts mapped to 409/412, stock errors carry the available quantity; validators at their boundaries. |
-| `Api.IntegrationTests`                | 103 | Real HTTP against **real PostgreSQL and Redis** (Testcontainers). Every endpoint and the problem-details contract. **Concurrency:** 60 parallel orders on 25 units → exactly 25 succeed; no lost updates; two API instances never produce a duplicate id. **Cache:** hits, invalidation visible across replicas, 404s not cached, works with Redis down. **Security:** token endpoint (valid, invalid, missing, throttled, failed attempts adding up across two replicas); 30-case role × operation matrix; missing, expired, foreign and forged tokens; anonymous probes. **Rate limiting:** per user, stricter for writes, `Retry-After`. |
+| `Application.UnitTests`               | 59 | Use-case orchestration: validation first, no id consumed by invalid requests, version checks, conflicts mapped to 409/412, stock errors carry the available quantity; validators at their boundaries. |
+| `Api.IntegrationTests`                | 119 | Real HTTP against **real PostgreSQL and Redis** (Testcontainers). Every endpoint and the problem-details contract. **Concurrency:** 60 parallel orders on 25 units → exactly 25 succeed; no lost updates; two API instances never produce a duplicate id. **Ledger:** every kind of change recorded, ledger sum = stock under concurrency. **Idempotency:** 20 simultaneous copies over two replicas run once; a retry on the other replica is replayed; a retry after Redis lost the claim is still not applied twice (database guard), for stock changes and creates; reused or invalid keys refused; no Redis → refused rather than risk a duplicate. **Cache:** hits, invalidation visible across replicas, lists kept across stock changes yet showing current stock, 404s not cached, works with Redis down. **Security:** token endpoint (valid, invalid, missing, throttled, failed attempts adding up across two replicas); 30-case role × operation matrix; missing, expired, foreign and forged tokens; anonymous probes. **Rate limiting:** per user, stricter for writes, `Retry-After`. |
 | `Api.AcceptanceTests` (BDD, Reqnroll) | 10 | Gherkin scenarios from the user's point of view (`Features/*.feature`). |
 | `Mcp.UnitTests`                       | 12 | MCP tools → API contract, token caching (fake clock, concurrent callers), API errors surfaced to the assistant. |
-| Frontend (Vitest)                     | 70 | API client contract (URLs, `If-Match`, cache bypass after own changes), error normalisation, store (no duplicate requests, no flicker, background refresh paused in hidden tabs), auth (login against the token endpoint, session restore and expiry, role → permission mapping, guard, interceptor never leaks the token to other origins), login page (safe `returnUrl`, 401/429 messages), dialogs (validation, server field errors, 412 conflict + reload), role-specific UI, paginator, toasts. |
-| Load (k6, in cluster)                 | 6 scenarios | smoke, load (SLO thresholds), stress, spike, **stock consistency across replicas**, rate limiting. See the [results](docs/load-test-results.md). |
+| Frontend (Vitest)                     | 92 | API client contract (URLs, `If-Match`, `Idempotency-Key`, cache bypass after own changes), **browser cache** (fresh hit without a request, stale-while-revalidate, bypass, cleared after writes, LRU eviction), store (next-page prefetch, page change vs background refresh), pipes, progress bar, stock history dialog, a retried stock change reuses its key, login opened without `returnUrl`, error normalisation, store (no duplicate requests, no flicker, background refresh paused in hidden tabs), auth (login against the token endpoint, session restore and expiry, role → permission mapping, guard, interceptor never leaks the token to other origins), login page (safe `returnUrl`, 401/429 messages), dialogs (validation, server field errors, 412 conflict + reload), role-specific UI, paginator, toasts. |
+| Load (k6, in cluster)                 | 8 scenarios | smoke, load (SLO thresholds), stress, spike, **stock consistency across replicas**, rate limiting, **teams** (ten consumers on 850,000 products, 30 % duplicate retries, then ledger = applied changes; `PEAK=` turns it into a capacity staircase), **browse** (read capacity with a hot set). See the [results](docs/load-test-results.md). |
 
 CI (`.github/workflows/ci.yml`) runs:
 * build with warnings as errors, every test suite, lint and format checks;
@@ -325,7 +336,9 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
 | Rate limiting  | The gateway limits per IP and the API per user (stricter for writes); both answer `429` + `Retry-After` ([ADR 0010](docs/adr/0010-rate-limiting.md)). |
 | Network        | NetworkPolicies: the database and cache are reachable only from the API (and the migration Job); the API and web app only from the gateway. |
 | Containers     | Non-root, read-only root filesystem where possible, no capabilities, no privilege escalation, `RuntimeDefault` seccomp, resource limits. |
-| Edge           | Security headers (`nosniff`, `X-Frame-Options: DENY`, referrer policy), 1 MB body limit, `server_tokens off`. |
+| Edge           | Strict **Content-Security-Policy** (`'self'` only, no inline scripts, no framing), `Permissions-Policy`, COOP/CORP, `nosniff`, `X-Frame-Options: DENY`, referrer policy, 1 MB body limit, `server_tokens off` ([ADR 0019](docs/adr/0019-content-security-policy.md)). |
+| Privacy        | No third-party requests: the font is self-hosted (no user IPs sent to Google). The browser cache lives in memory only and is cleared on sign-out. |
+| Exactly-once   | Retries with an `Idempotency-Key` are answered from Redis; the ledger's unique `request_key` makes a second execution impossible even if Redis forgets ([ADR 0017](docs/adr/0017-idempotency-keys.md)). |
 | Errors         | Problem details never include stack traces or internals; serializer messages are hidden. |
 
 ---
@@ -340,7 +353,21 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
   ([ADR 0012](docs/adr/0012-gateway.md)).
 * **Two cache layers, two jobs:** nginx absorbs identical requests within a second; Redis is shared, invalidated
   on every write and keeps entries for minutes.
+* **Lists survive stock changes:** the page's ids and count are cached under a generation that only catalogue
+  edits move; the rows are read fresh by primary key, so the stock shown is always current
+  ([ADR 0008](docs/adr/0008-redis-cache.md)).
+* **Autoscaling:** HPA 2–8 replicas, with the pool sized so the maximum stays within what PostgreSQL can serve
+  ([ADR 0018](docs/adr/0018-autoscaling-and-scale-testing.md)).
+* **Browser cache:** pages already seen open instantly (stale-while-revalidate), the next page is prefetched, and
+  paging quickly cancels obsolete requests ([ADR 0007](docs/adr/0007-frontend-state.md)).
+* **Capacity on one 8-CPU laptop** (everything, load generator included, on the same machine): **5,200–5,500
+  req/s** of catalogue reads and **2,500 req/s** of the worst-case mix (25 % writes, uniform reads over 850,000
+  products), both with **0 errors**; at that point the machine's CPU is the limit, not a tier.
 * **Load test highlights** ([full results](docs/load-test-results.md)):
+  * **ten teams on 850,000 products**, 30 % of stock changes sent twice: **281 req/s, 0 errors, p95 13 ms**;
+    17,213 changes applied → exactly 17,213 ledger rows (no duplicate among 6,916 copies); the API scaled 3 → 7.
+    The first run at this scale failed (123 req/s, 12 % errors); measuring found an unindexed sort, a cache
+    invalidated by every stock change and too many connections, and fixing those got here;
   * p95 of **3 ms** at 150 req/s with 2 replicas;
   * **0 errors in 255k requests** up to ~1,000 req/s, on a single-node 4-vCPU cluster;
   * **300 concurrent orders for 100 units across replicas → exactly 100 sold, stock 0**;
@@ -383,6 +410,9 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 | [0013](docs/adr/0013-ui-tailwind-cdk.md) | Tailwind CSS + Angular CDK instead of Angular Material |
 | [0014](docs/adr/0014-mcp-server.md) | MCP server for AI assistants |
 | [0015](docs/adr/0015-load-testing.md) | Load testing with k6 inside the cluster |
+| [0016](docs/adr/0016-stock-ledger.md) | Stock ledger written in the same statement as the stock change |
+| [0017](docs/adr/0017-idempotency-keys.md) | Idempotency keys for create and stock changes |
+| [0018](docs/adr/0018-autoscaling-and-scale-testing.md) | Autoscaling and testing at scale |
 
 ---
 

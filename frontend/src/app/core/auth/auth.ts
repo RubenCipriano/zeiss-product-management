@@ -2,6 +2,7 @@ import { HttpClient } from '@angular/common/http';
 import { computed, inject, InjectionToken, Service, signal } from '@angular/core';
 import { Observable, map } from 'rxjs';
 import { API_BASE_URL } from '../config/api-config';
+import { ResponseCache } from '../http/response-cache';
 
 /** Permissions the UI can check. They mirror the API's authorization policies. */
 export type Permission = 'products:read' | 'stock:write' | 'products:write';
@@ -46,6 +47,7 @@ interface TokenResponse {
 export class Auth {
   private readonly http = inject(HttpClient);
   private readonly storage = inject(SESSION_STORAGE);
+  private readonly responseCache = inject(ResponseCache);
   private readonly tokenUrl = `${inject(API_BASE_URL)}/auth/token`;
 
   private readonly session = signal<Session | null>(this.restore());
@@ -91,6 +93,8 @@ export class Auth {
 
   logout(): void {
     clearTimeout(this.expiryTimer);
+    // Cached responses belong to this session: the next user must not see them.
+    this.responseCache.clear();
     this.storage.removeItem(STORAGE_KEY);
     this.session.set(null);
   }

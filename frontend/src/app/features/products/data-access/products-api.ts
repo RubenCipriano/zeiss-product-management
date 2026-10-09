@@ -1,7 +1,8 @@
-import { HttpClient, HttpHeaders, HttpParams } from '@angular/common/http';
+import { HttpClient, HttpContext, HttpHeaders, HttpParams } from '@angular/common/http';
 import { inject, Service } from '@angular/core';
 import { Observable } from 'rxjs';
 import { API_BASE_URL } from '../../../core/config/api-config';
+import { CLIENT_CACHE, LIST_CACHE_POLICY } from '../../../core/http/client-cache-interceptor';
 import { PagedResponse } from '../../../shared/models/paged-response';
 import {
   Product,
@@ -30,13 +31,18 @@ export class ProductsApi {
   ): Observable<PagedResponse<Product>> {
     let params = new HttpParams().set('page', page).set('pageSize', pageSize);
     const headers = fresh ? new HttpHeaders({ 'Cache-Control': 'no-cache' }) : undefined;
+    const context = cached();
 
     switch (filter.kind) {
       case 'all':
-        return this.http.get<PagedResponse<Product>>(this.baseUrl, { params, headers });
+        return this.http.get<PagedResponse<Product>>(this.baseUrl, { params, headers, context });
       case 'name':
         params = params.set('name', filter.name);
-        return this.http.get<PagedResponse<Product>>(`${this.baseUrl}/search`, { params, headers });
+        return this.http.get<PagedResponse<Product>>(`${this.baseUrl}/search`, {
+          params,
+          headers,
+          context,
+        });
       case 'stock':
         if (filter.min !== null) {
           params = params.set('min', filter.min);
@@ -47,6 +53,7 @@ export class ProductsApi {
         return this.http.get<PagedResponse<Product>>(`${this.baseUrl}/stock-level`, {
           params,
           headers,
+          context,
         });
     }
   }
@@ -96,9 +103,14 @@ export class ProductsApi {
     const params = new HttpParams().set('page', page).set('pageSize', pageSize);
     return this.http.get<PagedResponse<StockMovement>>(
       `${this.baseUrl}/${productId}/stock-movements`,
-      { params },
+      { params, context: cached() },
     );
   }
+}
+
+/** Reads are cached in the browser (see clientCacheInterceptor); writes empty that cache. */
+function cached(): HttpContext {
+  return new HttpContext().set(CLIENT_CACHE, LIST_CACHE_POLICY);
 }
 
 function idempotent(key: string): HttpHeaders {

@@ -53,10 +53,8 @@ server {
   gzip_vary on;
   gzip_types text/css application/javascript application/json application/problem+json image/svg+xml;
 
-  # Security headers for everything served through the gateway.
-  add_header X-Content-Type-Options "nosniff" always;
-  add_header X-Frame-Options "DENY" always;
-  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  # Security headers for everything served through the gateway (see the snippet).
+  include /etc/nginx/snippets/security-headers.conf;
 
   proxy_http_version 1.1;
   proxy_set_header Connection "";
@@ -101,9 +99,7 @@ server {
     proxy_cache_use_stale updating;
     proxy_cache_bypass $http_cache_control $http_pragma;
     add_header X-Cache-Status $upstream_cache_status always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    include /etc/nginx/snippets/security-headers.conf;
   }
 
   # Hashed bundles: served from the edge cache after the first request.
@@ -114,9 +110,7 @@ server {
     proxy_cache_use_stale error timeout updating;
     proxy_cache_lock on;
     add_header X-Cache-Status $upstream_cache_status always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    include /etc/nginx/snippets/security-headers.conf;
   }
 
   location / {

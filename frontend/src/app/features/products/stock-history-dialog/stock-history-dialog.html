@@ -13,6 +13,8 @@
     </button>
   </header>
 
+  <app-progress-bar [active]="history.isLoading()" label="Loading stock history" />
+
   @if (history.error()) {
     <p class="px-6 py-10 text-center text-sm text-red-700" role="alert">
       The history could not be loaded.
@@ -41,16 +43,16 @@
                 <td class="px-3 py-2.5">
                   <span
                     class="rounded-full px-2 py-0.5 text-xs font-medium"
-                    [class]="reasons[movement.reason].style"
+                    [class]="movement.reason | movementReason: 'badge'"
                   >
-                    {{ reasons[movement.reason].label }}
+                    {{ movement.reason | movementReason }}
                   </span>
                 </td>
                 <td
                   class="px-3 py-2.5 text-right font-medium tabular-nums"
                   [class]="movement.quantityChange < 0 ? 'text-red-700' : 'text-emerald-700'"
                 >
-                  {{ movement.quantityChange > 0 ? '+' : '' }}{{ movement.quantityChange }}
+                  {{ movement.quantityChange | signedNumber }}
                 </td>
                 <td class="px-3 py-2.5 text-right tabular-nums text-slate-900">
                   {{ movement.stockAfter }}

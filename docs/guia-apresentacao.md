@@ -318,10 +318,85 @@ distribui-se mal. Com o `api-headless`, o nginx conhece todos os pods e escolhe 
   caminho. `load-tests/verify-data.sh` confirma em segundos: IDs únicos, stock = ledger, totais acumulados certos.
 * **O que a escala revelou:** páginas muito fundas (página 40 000 = OFFSET 800 000) demoravam 1,3 s no SQL.
   Mudei a paginação para *late row lookup* (encontrar os 20 IDs pelo índice primeiro, depois ler só essas linhas):
-  0,5 s, sem mudar a API. O passo seguinte seria paginação por cursor (keyset), que é constante. O resto (primeiras
-  páginas, pesquisa, stock baixo, histórico) fica entre 15 e 175 ms sem cache, e ~3 ms com cache.
+  0,5 s, sem mudar a API. O passo seguinte seria paginação por cursor (keyset), que é constante.
+
+### 9.3 O teste "muitas equipas" (a história para contar)
+
+Dez consumers (lojas, armazéns, loja online) ao mesmo tempo sobre os 850 mil produtos: navegar, pesquisar, ver
+histórico e mexer no stock, metade em 50 produtos "quentes" que todos tocam. **30% das alterações de stock são
+enviadas duas vezes com a mesma `Idempotency-Key`** (retry ou duplo clique), muitas vezes para réplicas diferentes.
+
+| Corrida | Pedidos/s | Erros | p95 | CPU do PostgreSQL | Réplicas da API |
+| ------- | --------: | ----: | --: | ----------------- | --------------- |
+| 1. Como estava | 123 | 11,9% | 15,9 s | 2/2 (saturado) | 2 |
+| 2. + cache em duas partes, probes tolerantes | 211 | 6,6% | 8,5 s | 2/2 (saturado) | 2 → 6 |
+| 3. + índice certo, cache das contagens, pool 10 | **281** | **0%** | **13 ms** | 0,3/2 | 3 → 7 → desce |
+
+**O que cada corrida ensinou (é isto que vale a pena contar):**
+
+1. **Cada alteração de stock invalidava todas as listas em cache**, por isso a cache não servia para nada e cada
+   lista fazia `COUNT(*)` a 850 mil linhas. Além disso, o *readiness probe* (que verifica a BD, com 1 s de timeout)
+   falhava e as réplicas entravam e saíam do balanceador. → Cache em duas partes: *quais* produtos e *quantos*
+   (só muda quando se criam/editam/apagam produtos) e as linhas (lidas sempre frescas por chave primária). Probe
+   com 3 s e 30 s de tolerância.
+2. **Continuou saturado, e o HPA até piorou:** subiu para 6 réplicas, mas a API estava à *espera* da BD; mais
+   réplicas = mais ligações a disputar 2 cores. Medi com `pg_stat_activity` e `EXPLAIN ANALYZE`: a página de stock
+   baixo demorava **184 ms** (índice só em `stock_quantity`, depois ordenava por nome). → Índice
+   `(stock_quantity, name, id)`: **0,1 ms** (criado `CONCURRENTLY`, sem bloquear escritas). Contagens em cache
+   por lista e não por página. Pool de 10 ligações por réplica.
+3. **Passou com folga:** 0 erros, p95 de 13 ms, PostgreSQL a 15–20%.
+
+**Correção em todas as corridas, mesmo nas que falharam:** 17 213 alterações aplicadas → exatamente 17 213 linhas
+novas no ledger; 6 916 cópias duplicadas e nenhuma aplicada duas vezes; stock = soma do ledger nos 850 mil
+produtos. Na primeira corrida havia 1 linha a mais: um pedido que deu timeout no cliente *depois* de o servidor o
+aplicar, e o cliente nunca soube. É exatamente para isso que serve a `Idempotency-Key`: a partir da segunda corrida
+o k6 repete com a mesma chave quando não sabe o resultado, e a contagem ficou exata.
+
+**A frase para a entrevista:** *"Escalar a camada stateless só ajuda quando a camada partilhada tem folga. Medi,
+encontrei a causa (um índice e uma cache mal desenhada para escritas constantes) e corrigi a causa, em vez de
+juntar réplicas."*
 
 ---
+
+### 9.4 Capacidade: até onde vai um portátil (4 dígitos)
+
+Tudo na mesma máquina de 8 CPUs, incluindo o gerador de carga (k6), com os rate limits levantados para medir
+capacidade:
+
+| Perfil | Pedidos/s | Erros | Limite atingido |
+| ------ | --------: | ----: | --------------- |
+| Leitura com "hot set" (catálogo: primeiras páginas, produtos mais vistos, pesquisas populares) | **5 200 – 5 500** | 0% | CPU da máquina (7,6/8); 65% respondido pelo nginx |
+| Pior caso (25% escritas, leituras aleatórias sobre 850 mil produtos) | **2 500** | 0% | CPU da máquina (7,7/8) |
+
+**O que estes testes encontraram (a parte mais importante):**
+
+1. **Duplicados sob sobrecarga:** com a BD saturada, o cliente desistia, o gateway fechava a ligação e a API via o
+   cancelamento *depois* do commit; libertava a chave no Redis e o retry voltava a aplicar (~500 em 52 000).
+   O Redis sozinho não pode saber se houve commit. → **A chave vai para a linha do ledger com índice único, no
+   mesmo statement**: um segundo processamento viola o índice e o PostgreSQL desfaz tudo. Desde então: exato.
+2. **Cache stampede:** 882 `COUNT(*)` de ~2 s em simultâneo quando uma entrada expirava. → *single-flight* (um
+   só pedido à BD por réplica para a mesma chave) e TTL mais longo onde a invalidação é explícita.
+3. **Invalidação demasiado larga:** uma alteração de stock invalidava os detalhes de todos os produtos. → geração
+   por produto.
+4. **Redis com pouca memória (OOMKilled):** redimensionado; o reinício provou que a proteção na BD funciona.
+
+**Para chegar a 5 dígitos** (a resposta honesta): numa máquina só, que também gera a carga, não dá. As alavancas
+seguintes são (1) o gateway validar o token (ES256: a API assina, o gateway verifica com a chave pública) para a
+microcache ser partilhada por role e não por token, e (2) mais nós: API e gateway já escalam sozinhos (HPA), a BD
+iria para uma máquina própria com réplicas de leitura.
+
+### 9.5 Frontend: rapidez e segurança
+
+* **Paginar depressa:** barra de progresso fina, linhas atuais esbatidas (só depois de 150 ms, para não piscar) e
+  `aria-busy`; mudar de página cancela o pedido anterior.
+* **Cache no browser** (`ResponseCache` + interceptor): páginas já vistas abrem logo (*stale-while-revalidate*), a
+  página seguinte é pré-carregada. Só em memória, limpa no logout e depois de qualquer alteração.
+* **Organização:** pipes (`signedNumber`, `movementReason`), serviços (`ResponseCache`, `ProductsApi`,
+  `ProductsStore`), barrels `index.ts`. Componentes *standalone* em vez de NgModules (o padrão do Angular desde a
+  v19: cada componente importa só o que usa).
+* **Segurança:** Content-Security-Policy estrita (só `'self'`, sem scripts inline, sem iframes), Permissions-Policy,
+  COOP/CORP; a fonte passou a ser servida pela própria app (antes ia ao Google, o que enviava o IP de cada
+  utilizador a terceiros: RGPD).
 
 ## 10. Testes de carga (o que dizer sobre os resultados)
 
@@ -330,6 +405,7 @@ Corridos **dentro do cluster** (k6 como `Job`), numa VM com 4 vCPU:
 * **150 req/s** com 2 réplicas → p95 de **3 ms**, 0 erros.
 * **Correção:** 300 encomendas concorrentes para 100 unidades → **exatamente 100** vendidas, stock final 0.
 * **Até ~1000 req/s:** 0 erros em 255 mil pedidos.
+* **Dez equipas sobre 850 mil produtos:** ver secção 9.3 (281 req/s, 0 erros, p95 13 ms, zero duplicados).
 * **4 réplicas foi pior do que 2 → porquê?** O gargalo era o **PostgreSQL** (limitado a 1 CPU). Mais réplicas =
   mais ligações a competir pela mesma base de dados saturada → 282 erros de timeout. Dei 2 CPUs ao PostgreSQL e
   limitei o pool a 20 ligações por réplica: **0 erros** e p95 de 1,35 s → 0,78 s. O que sobra é o limite físico do
@@ -400,9 +476,9 @@ Redis partilhado com `SET NX`, por isso só uma réplica o executa e a outra dev
 instâncias nos testes de integração e no teste de carga `teams` (alterações aplicadas = linhas novas no ledger).
 
 **"E se o volume for de milhões?"**
-Testei com 850 mil produtos e 5 milhões de movimentos. Os índices certos (`(name, id)`, trigramas, `(product_id,
-occurred_at)`) mantêm as consultas normais em dezenas de ms; o único ponto fraco eram páginas muito fundas, que
-melhorei e cuja solução completa (keyset) está identificada. O limite seguinte é a base de dados, não a API.
+Testei com 850 mil produtos e 5 milhões de movimentos e dez equipas em simultâneo: 281 pedidos/s, 0 erros, p95 de
+13 ms, depois de três iterações guiadas por medições (secção 9.3). O ponto fraco que sobra são páginas muito fundas
+(a solução, keyset, está identificada). O limite seguinte é a base de dados, não a API.
 
 **"Porque é que o `If-Match` é opcional?"**
 Para a API ser fácil de experimentar (Swagger, curl). A UI envia-o sempre. Torná-lo obrigatório (428) é uma linha.

@@ -12,6 +12,7 @@ import { integer, orderedRange } from '../../../shared/forms/validators';
 import { ConfirmDialog, ConfirmDialogData } from '../../../shared/ui/confirm-dialog/confirm-dialog';
 import { Icon, IconName } from '../../../shared/ui/icon/icon';
 import { PageChange, Paginator } from '../../../shared/ui/paginator/paginator';
+import { ProgressBar } from '../../../shared/ui/progress-bar/progress-bar';
 import {
   LOW_STOCK_THRESHOLD,
   Product,
@@ -42,6 +43,7 @@ const FILTER_DEBOUNCE_MS = 300;
 @Component({
   selector: 'app-product-list',
   imports: [
+    ProgressBar,
     CurrencyPipe,
     DatePipe,
     ReactiveFormsModule,

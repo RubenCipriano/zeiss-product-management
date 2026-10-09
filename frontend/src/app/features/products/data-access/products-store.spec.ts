@@ -44,6 +44,38 @@ describe('ProductsStore', () => {
     expect(store.totalCount()).toBe(2);
   });
 
+  it('prefetches the next page once a page has loaded', async () => {
+    api.query.mockImplementation((query: ProductQuery) =>
+      of(aPage([lens, frame], { page: query.page, totalCount: 50 })),
+    );
+
+    await settle();
+
+    expect(api.query).toHaveBeenCalledWith({ filter: { kind: 'all' }, page: 2, pageSize: 20 });
+  });
+
+  it('does not prefetch past the last page', async () => {
+    await settle(); // 2 products: a single page
+
+    expect(api.query.mock.calls.some(([query]) => query.page === 2)).toBe(false);
+  });
+
+  it('reports a page change while the new page loads, but not a background refresh of the same page', async () => {
+    await settle();
+    const nextPage = new Subject<PagedResponse<Product>>();
+    api.query.mockReturnValue(nextPage);
+
+    store.reload({ fresh: false });
+    TestBed.tick();
+    expect(store.isLoading()).toBe(true);
+    expect(store.isChangingPage()).toBe(false);
+
+    store.setPage(2, 20);
+    TestBed.tick();
+    expect(store.isChangingPage()).toBe(true);
+    expect(store.products()).toEqual([lens, frame]); // the previous rows stay on screen meanwhile
+  });
+
   it('resets to the first page when the filter changes', async () => {
     store.setPage(3, 20);
     store.setFilter({ kind: 'name', name: 'lens' });

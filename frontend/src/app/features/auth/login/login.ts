@@ -16,7 +16,8 @@ export class Login {
   private readonly router = inject(Router);
 
   /** Where to go after signing in (set by the auth guard; bound from the query string). */
-  readonly returnUrl = input<string>('/products');
+  /** From the `returnUrl` query parameter. The router binds a missing parameter as undefined, not as a default. */
+  readonly returnUrl = input<string | undefined>();
 
   protected readonly signingIn = signal(false);
   protected readonly errorMessage = signal<string | null>(null);
@@ -54,6 +55,6 @@ export class Login {
   /** Only same-app paths: never redirect to another site after sign-in. */
   private safeReturnUrl(): string {
     const url = this.returnUrl();
-    return url.startsWith('/') && !url.startsWith('//') ? url : '/products';
+    return url?.startsWith('/') && !url.startsWith('//') ? url : '/products';
   }
 }

@@ -31,12 +31,18 @@ npm start          # http://localhost:4200, /api is proxied to http://localhost:
 
 ```
 src/app/
-  core/          app-wide services: auth (session, guard, interceptor), API base URL, ApiError + interceptor, notifications
-  shared/        reusable pieces: form validators/messages, PagedResponse, icon, paginator, toasts, ConfirmDialog
+  core/          app-wide services: auth (session, guard, interceptor), API base URL, ApiError + interceptor,
+                 browser response cache (ResponseCache + clientCacheInterceptor), notifications
+  shared/        reusable pieces: form validators/messages, PagedResponse,
+                 ui/ (icon, paginator, progress bar, toasts, ConfirmDialog; index.ts), pipes/ (signedNumber; index.ts)
   features/auth/login/  sign-in page
   features/products/
     data-access/ ProductsApi, CategoriesApi (HTTP), ProductsStore (signals + rxResource), models
+    pipes/       movementReason
     product-list/, product-form-dialog/, stock-adjust-dialog/, stock-history-dialog/, stock-status/
+
+Standalone components throughout (no NgModules, the Angular default since v19): each component imports exactly what
+it uses. Folders are grouped by feature; `index.ts` barrels keep imports short.
 src/testing/     test fixtures
 ```
 
@@ -44,5 +50,6 @@ src/testing/     test fixtures
 
 * `Dockerfile` + `nginx.conf`: the **web** image (static files only).
 * `gateway/`: the **gateway** image (nginx in front of everything: `/api` with a 1 s microcache, static files,
-  rate limiting, edge cache).
+  rate limiting, edge cache, Content-Security-Policy and the other security headers in `security-headers.conf`).
+  It autoscales (HPA, 2–6 replicas).
 * `deploy/kubernetes.yaml` + `deploy/deploy.sh`: deploys both to Kubernetes, independently of the backend.

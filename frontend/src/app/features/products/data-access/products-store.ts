@@ -2,14 +2,16 @@ import {
   computed,
   DestroyRef,
   DOCUMENT,
+  effect,
   inject,
   InjectionToken,
   linkedSignal,
   Service,
   signal,
+  untracked,
 } from '@angular/core';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { filter, forkJoin, interval, map, Observable, tap } from 'rxjs';
+import { combineLatest, filter, interval, map, Observable, tap } from 'rxjs';
 import { ApiError } from '../../../core/http/api-error';
 import { emptyPage, PagedResponse } from '../../../shared/models/paged-response';
 import {
@@ -54,19 +56,40 @@ export class ProductsStore {
   private nextLoadFresh = false;
   private summaryFresh = false;
 
+  /**
+   * Each result remembers the query it answers. Changing the query cancels the request in flight, so paging quickly
+   * never lets an older page overwrite a newer one.
+   */
   private readonly productsResource = rxResource({
     params: () => this.query(),
-    stream: ({ params }) => this.api.query(params, this.consumeFresh()),
+    stream: ({ params }) =>
+      this.api.query(params, this.consumeFresh()).pipe(map((page) => ({ query: params, page }))),
+  });
+
+  private readonly loaded = linkedSignal<
+    { query: ProductQuery; page: PagedResponse<Product> } | undefined,
+    { query: ProductQuery | null; page: PagedResponse<Product> }
+  >({
+    source: () => (this.productsResource.hasValue() ? this.productsResource.value() : undefined),
+    computation: (current, previous) =>
+      current ?? previous?.value ?? { query: null, page: emptyPage(DEFAULT_PAGE_SIZE) },
   });
 
   /**
    * The last successfully loaded page. While a new query or a reload is in flight (or after it fails) the
    * previous page stays on screen, so the table and paginator don't flash empty between requests.
    */
-  readonly page = linkedSignal<PagedResponse<Product> | undefined, PagedResponse<Product>>({
-    source: () => (this.productsResource.hasValue() ? this.productsResource.value() : undefined),
-    computation: (current, previous) => current ?? previous?.value ?? emptyPage(DEFAULT_PAGE_SIZE),
-  }).asReadonly();
+  readonly page = computed(() => this.loaded().page);
+
+  /**
+   * True while the screen shows a different page or filter than the one requested (the user is paging or filtering),
+   * as opposed to a background refresh of the same page. The UI dims the table only in this case.
+   */
+  readonly isChangingPage = computed(
+    () => this.isLoading() && !sameQuery(this.loaded().query, this.query()),
+  );
+
+  private lastPrefetch = '';
 
   /**
    * Counts for the summary cards. They come from the same list endpoints with `pageSize=1` (only `totalCount` is
@@ -74,7 +97,8 @@ export class ProductsStore {
    */
   private readonly summaryResource = rxResource({
     stream: () =>
-      forkJoin({
+      // combineLatest (not forkJoin): cached counts show at once, refreshed counts replace them.
+      combineLatest({
         all: this.api.query({ filter: { kind: 'all' }, page: 1, pageSize: 1 }, this.summaryFresh),
         low: this.api.query(
           { filter: { kind: 'stock', min: 0, max: LOW_STOCK_THRESHOLD }, page: 1, pageSize: 1 },
@@ -115,6 +139,20 @@ export class ProductsStore {
         // Background refreshes may be served by the gateway's microcache.
         .subscribe(() => this.reload({ fresh: false }));
     }
+
+    // Prefetch the next page once a page has loaded, so "next" is usually instant (served by the browser cache).
+    effect(() => {
+      const { query, page } = this.loaded();
+      if (!query || query.page * query.pageSize >= page.totalCount) {
+        return;
+      }
+      const next = { ...query, page: query.page + 1 };
+      const key = JSON.stringify(next);
+      if (key !== this.lastPrefetch) {
+        this.lastPrefetch = key;
+        untracked(() => this.api.query(next).subscribe({ error: () => undefined }));
+      }
+    });
   }
 
   setFilter(filter: ProductFilter): void {
@@ -168,13 +206,20 @@ export class ProductsStore {
    */
   private applyChange(updated: Product): void {
     if (this.productsResource.hasValue()) {
-      this.productsResource.value.update((page) => ({
-        ...page,
-        items: page.items.map((item) => (item.id === updated.id ? updated : item)),
+      this.productsResource.value.update((loaded) => ({
+        ...loaded,
+        page: {
+          ...loaded.page,
+          items: loaded.page.items.map((item) => (item.id === updated.id ? updated : item)),
+        },
       }));
     }
     this.reload();
   }
+}
+
+function sameQuery(a: ProductQuery | null, b: ProductQuery): boolean {
+  return a !== null && JSON.stringify(a) === JSON.stringify(b);
 }
 
 function toApiError(error: unknown): ApiError | null {

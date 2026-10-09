@@ -7,6 +7,7 @@ FROM nginxinc/nginx-unprivileged:1.29-alpine
 
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY default.conf.template /etc/nginx/templates/default.conf.template
+COPY security-headers.conf /etc/nginx/snippets/security-headers.conf
 
 # Defaults; override them in the Kubernetes Deployment.
 ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \

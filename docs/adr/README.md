@@ -22,3 +22,4 @@ Short records of the decisions that shape this codebase: the context, the decisi
 | 0016 | [Stock ledger written in the same statement as the stock change](0016-stock-ledger.md) |
 | 0017 | [Idempotency keys for create and stock changes](0017-idempotency-keys.md)   |
 | 0018 | [Autoscaling and testing at scale](0018-autoscaling-and-scale-testing.md)   |
+| 0019 | [Content Security Policy and no third-party assets](0019-content-security-policy.md) |
