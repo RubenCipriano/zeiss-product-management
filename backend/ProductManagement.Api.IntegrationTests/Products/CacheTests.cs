@@ -23,8 +23,12 @@ public sealed class CacheTests(ApiFixture fixture) : ApiTestBase(fixture)
         await RenameDirectlyInDatabaseAsync(product.Id, "Changed in the database");
         (await Api.GetProductAsync(product.Id)).Name.ShouldBe("Original name"); // still served from the cache
 
-        // Any write through the API (here: to a different product) moves the cache to a new generation.
+        // A write to a different product leaves this product's entry alone: invalidation is per product...
         (await Api.AddToStockAsync(other.Id, 1)).Dispose();
+        (await Api.GetProductAsync(product.Id)).Name.ShouldBe("Original name");
+
+        // ...and a write to this product, even a stock change, invalidates it.
+        (await Api.AddToStockAsync(product.Id, 1)).Dispose();
         (await Api.GetProductAsync(product.Id)).Name.ShouldBe("Changed in the database");
     }
 

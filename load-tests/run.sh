@@ -5,7 +5,9 @@
 #   load-tests/run.sh smoke | load | stress | spike | stock-consistency | rate-limit | teams
 #   RATE=300 load-tests/run.sh load
 #   PEAK=2000 load-tests/run.sh stress
-#   RATE=600 load-tests/run.sh teams      # after load-tests/seed-bulk.sh; also verifies the data afterwards
+#   RATE=300 load-tests/run.sh teams      # after load-tests/seed-bulk.sh; also verifies the data afterwards
+#   PEAK=5000 load-tests/run.sh teams     # capacity staircase up to 5,000 iterations/s, rate limits lifted
+#   PEAK=12000 load-tests/run.sh browse   # read capacity with a hot set (edge and Redis caches), limits lifted
 #
 # Stress and spike runs measure capacity, not throttling: the gateway's per-IP limit (all k6 traffic comes from one
 # pod IP) and the API's per-user limits (k6 simulates only 10 users) are raised for the duration of the test and
@@ -25,7 +27,12 @@ K6_IMAGE="${K6_IMAGE:-grafana/k6:2.3.0}"
 relax_limits=false
 relax_gateway=false
 if [[ "$SCENARIO" == "stress" || "$SCENARIO" == "spike" ]]; then relax_limits=true; relax_gateway=true; fi
-if [[ "$SCENARIO" == "teams" ]]; then relax_gateway=true; fi
+if [[ "$SCENARIO" == "browse" ]]; then relax_limits=true; relax_gateway=true; fi
+if [[ "$SCENARIO" == "teams" ]]; then
+  relax_gateway=true
+  # A capacity run measures the system, not the per-consumer limits that protect it from one abusive client.
+  if [[ -n "${PEAK:-}" ]]; then relax_limits=true; fi
+fi
 
 sql() {
   kubectl -n "$NAMESPACE" exec postgres-0 -- sh -c 'psql -X -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' psql "$1"
@@ -92,13 +99,13 @@ spec:
           args: ["run", "--quiet", "/scripts/$SCENARIO.js"]
           env:
             - { name: BASE_URL, value: "http://gateway.product-management.svc.cluster.local:8080" }
-            - { name: RATE, value: "${RATE:-150}" }
-            - { name: PEAK, value: "${PEAK:-800}" }
+            - { name: RATE, value: "${RATE:-$([[ "$SCENARIO" == browse ]] || echo 150)}" }
+            - { name: PEAK, value: "${PEAK:-$([[ "$SCENARIO" == teams || "$SCENARIO" == browse ]] || echo 800)}" }
             - { name: ID_MIN, value: "${id_range%% *}" }
             - { name: ID_MAX, value: "${id_range##* }" }
           resources:
             requests: { cpu: 500m, memory: 256Mi }
-            limits: { cpu: "2", memory: 1Gi }
+            limits: { cpu: "${K6_CPU:-2}", memory: 2Gi }
           volumeMounts:
             - { name: scripts, mountPath: /scripts }
             - { name: lib, mountPath: /scripts/lib }

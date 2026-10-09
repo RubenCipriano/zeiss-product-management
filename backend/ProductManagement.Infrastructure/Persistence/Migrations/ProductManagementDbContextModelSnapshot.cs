@@ -138,11 +138,11 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                     NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Name"), "gin");
                     NpgsqlIndexBuilderExtensions.HasOperators(b.HasIndex("Name"), new[] { "gin_trgm_ops" });
 
-                    b.HasIndex("StockQuantity")
-                        .HasDatabaseName("ix_products_stock_quantity");
-
                     b.HasIndex("Name", "Id")
                         .HasDatabaseName("ix_products_name_id");
+
+                    b.HasIndex("StockQuantity", "Name", "Id")
+                        .HasDatabaseName("ix_products_stock_quantity_name_id");
 
                     b.ToTable("products", null, t =>
                         {
@@ -187,12 +187,22 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(20)")
                         .HasColumnName("reason");
 
+                    b.Property<string>("RequestKey")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("request_key");
+
                     b.Property<int>("StockAfter")
                         .HasColumnType("integer")
                         .HasColumnName("stock_after");
 
                     b.HasKey("Id")
                         .HasName("pk_stock_movements");
+
+                    b.HasIndex("RequestKey")
+                        .IsUnique()
+                        .HasDatabaseName("ix_stock_movements_request_key")
+                        .HasFilter("request_key IS NOT NULL");
 
                     b.HasIndex("ProductId", "OccurredAt", "Id")
                         .IsDescending(false, true, true)

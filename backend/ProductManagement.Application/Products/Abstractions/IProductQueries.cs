@@ -29,4 +29,7 @@ public interface IProductQueries
         int? max,
         PageQuery page,
         CancellationToken cancellationToken);
+
+    /// <summary>The product created by the request with this idempotency key, if any.</summary>
+    Task<ProductResponse?> FindCreatedByRequestAsync(string requestKey, CancellationToken cancellationToken);
 }

@@ -23,11 +23,23 @@ public interface IProductRepository
     /// <see cref="StockMovement"/>. Change and ledger entry are a single SQL statement, so one never happens without
     /// the other. Runs right away; it does not wait for the unit of work.
     /// </summary>
-    /// <returns>The stock after the change, or <c>null</c> if the product does not exist or the rule was not met.</returns>
-    Task<int?> TryAdjustStockAsync(
+    /// <param name="requestKey">The request's idempotency key, recorded on the movement under a unique index.</param>
+    Task<StockAdjustmentOutcome> TryAdjustStockAsync(
         int id,
         int delta,
         string performedBy,
+        string? requestKey,
         DateTimeOffset now,
         CancellationToken cancellationToken);
+}
+
+public enum StockAdjustmentOutcome
+{
+    /// <summary>The product does not exist or the stock rule was not met; nothing changed. (The default value.)</summary>
+    NotApplied,
+
+    Applied,
+
+    /// <summary>This request (same idempotency key) was applied before; nothing changed now.</summary>
+    AlreadyApplied,
 }

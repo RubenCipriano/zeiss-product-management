@@ -17,6 +17,18 @@ import { BASE_URL } from './lib/config.js';
 import { api, signIn, tokenForVu } from './lib/api.js';
 
 const RATE = Number(__ENV.RATE || 300); // iterations per second at the plateau (stays within the per-consumer limits)
+// PEAK set: a capacity staircase instead of a plateau, in five one-minute steps up to PEAK (run.sh lifts the rate
+// limits for it). Where latency and errors start to climb is the system's capacity.
+const PEAK = Number(__ENV.PEAK || 0);
+const STAGES = PEAK
+  ? [0.2, 0.4, 0.6, 0.8, 1].flatMap((share) => [
+      { target: Math.round(PEAK * share), duration: '15s' },
+      { target: Math.round(PEAK * share), duration: '45s' },
+    ])
+  : [
+      { target: RATE, duration: '1m' },
+      { target: RATE, duration: '4m' },
+    ];
 const ID_MIN = Number(__ENV.ID_MIN || 100000);
 const ID_MAX = Number(__ENV.ID_MAX || 950000);
 const HOT_PRODUCTS = 50; // products every team changes: maximum contention on the same rows
@@ -35,13 +47,9 @@ export const options = {
       executor: 'ramping-arrival-rate',
       startRate: 20,
       timeUnit: '1s',
-      preAllocatedVUs: 100,
-      maxVUs: 600,
-      stages: [
-        { target: RATE, duration: '1m' },
-        { target: RATE, duration: '4m' },
-        { target: 0, duration: '30s' },
-      ],
+      preAllocatedVUs: PEAK ? 500 : 100,
+      maxVUs: PEAK ? 3000 : 600,
+      stages: [...STAGES, { target: 0, duration: '30s' }],
     },
   },
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)'],

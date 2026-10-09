@@ -31,9 +31,11 @@ stringData:
   POSTGRES_DB: product_management
   POSTGRES_USER: product_management
   POSTGRES_PASSWORD: product_management
-  # Pool size per API replica. Keep (max replicas x pool) below PostgreSQL's max_connections (8 x 20 = 160 < 300).
-  # More connections than PostgreSQL has cores to serve them only add contention (see docs/load-test-results.md).
-  connection-string: Host=postgres.product-management.svc.cluster.local;Port=5432;Database=product_management;Username=product_management;Password=product_management;Maximum Pool Size=20;GSS Encryption Mode=Disable
+  # Pool size per API replica: 10, so even at the autoscaler's maximum (8 replicas) PostgreSQL sees at most 80
+  # connections. A database serves only a few queries per CPU core at a time; more connections than that do not add
+  # throughput, they make every query slower (measured: 6 replicas x 20 connections on 2 cores queued even
+  # primary-key reads for seconds). Excess requests wait in the API's pool instead, which is cheaper.
+  connection-string: Host=postgres.product-management.svc.cluster.local;Port=5432;Database=product_management;Username=product_management;Password=product_management;Maximum Pool Size=10;GSS Encryption Mode=Disable
 ---
 apiVersion: v1
 kind: Secret
@@ -182,7 +184,9 @@ data:
   SignInThrottle__MaxFailures: "10"
   SignInThrottle__Window: "00:01:00"
   # How long a stored Idempotency-Key response is replayed, and how long an unfinished request holds its key.
-  Idempotency__KeyLifetime: "1.00:00:00"
+  # 1 hour covers real retries; after that a retry is still never applied twice (the database's unique request key),
+  # it is just answered with the current state instead of the stored response.
+  Idempotency__KeyLifetime: "01:00:00"
   Idempotency__InProgressTimeout: "00:01:00"
 ---
 # ------------------------------------------------------------------------------------------------- PostgreSQL
@@ -232,7 +236,10 @@ spec:
           envFrom:
             - secretRef:
                 name: database-credentials
-          args: ["-c", "max_connections=300", "-c", "shared_buffers=128MB"]
+          # pg_stat_statements: per-query time and call counts, how the load-test bottlenecks were found
+          # (SELECT query, calls, total_exec_time FROM pg_stat_statements ORDER BY total_exec_time DESC).
+          args: ["-c", "max_connections=300", "-c", "shared_buffers=256MB",
+                 "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track=top"]
           readinessProbe:
             exec:
               command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
@@ -242,9 +249,10 @@ spec:
               command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             periodSeconds: 15
             failureThreshold: 6
+          # The database is the tier that limits throughput (docs/load-test-results.md): it gets the most CPU.
           resources:
-            requests: { cpu: 500m, memory: 256Mi }
-            limits: { cpu: "2", memory: 768Mi }
+            requests: { cpu: "1", memory: 512Mi }
+            limits: { cpu: "4", memory: 1Gi }
           volumeMounts:
             # PostgreSQL 18 images keep data under /var/lib/postgresql/<major>/.
             - name: data
@@ -301,7 +309,7 @@ spec:
           image: redis:8-alpine
           # A pure cache: no persistence. `volatile-lru` only ever evicts keys that have a TTL, so the
           # cache-generation counter (no TTL) can never be evicted.
-          args: ["--maxmemory", "128mb", "--maxmemory-policy", "volatile-lru", "--save", "", "--appendonly", "no"]
+          args: ["--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru", "--save", "", "--appendonly", "no"]
           ports:
             - name: redis
               containerPort: 6379
@@ -314,8 +322,9 @@ spec:
               port: redis
             periodSeconds: 15
           resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits: { cpu: 500m, memory: 192Mi }
+            # maxmemory + headroom for connection buffers under load (192Mi was OOMKilled at 2,500 requests/s).
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 384Mi }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -517,7 +526,7 @@ spec:
 ---
 # Adds API replicas when their average CPU passes 60% of the request (200m), removes them when load drops.
 # Scale-up reacts within ~30 s; scale-down waits 3 minutes of lower load so a short lull does not remove capacity
-# that is needed again a moment later. The ceiling (8) is set by the database: 8 replicas x 20 connections.
+# that is needed again a moment later. The ceiling (8) is set by the database: 8 replicas x 10 connections.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

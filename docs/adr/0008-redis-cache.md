@@ -19,19 +19,25 @@ on replica A must never leave replica B serving stale data.
 * Every committed write increments the generation (`INCR`): `UnitOfWork.SaveChangesAsync` when products changed,
   and `ProductRepository.TryAdjustStockAsync` after a successful atomic UPDATE. Old entries are never read again
   and expire through their TTL (5 min items, 1 min lists).
-* **Two generations, because writes differ in what they change** (added after the scale test in
-  [0018](0018-autoscaling-and-scale-testing.md)):
-  * the **data** generation moves on with every write. Product details, stock-level lists and stock histories
-    are keyed by it;
-  * the **listing** generation moves on only when products are created, edited or deleted. It versions *which*
-    products a list or search contains and in what order, and *how many* match. A stock change cannot alter any of
-    that.
+* **Three kinds of generation, because writes differ in what they change** (added after the scale tests in
+  [0018](0018-autoscaling-and-scale-testing.md)). Each entry's key embeds the generations it depends on, read in one
+  `MGET`:
 
-  The full list and name searches are therefore cached in two parts: the page's ids and the total count under the
-  listing generation (`…:l1791551739:products:all:ids:p1:s20`), and the rows read fresh by primary key on every
-  request. On 850,000 products the first part is the expensive one (a count and an index walk: 50–170 ms), the
-  second costs ~1 ms. With a constant stream of stock changes from many teams, lists stay cached and still show
-  the current stock.
+  | Generation | Moves on when | Versions |
+  | ---------- | ------------- | -------- |
+  | data | any write | stock-level lists (membership depends on stock) |
+  | listing | products created, edited, deleted | the full list and searches: *which* products, in what order, *how many* |
+  | product (one per product, 1 h TTL) | that product changes, stock included | its details and its stock history (together with the listing generation) |
+
+  A stock change therefore invalidates one product's entries and the stock-level lists, nothing else. The full list
+  and searches are cached in parts: the count (once per list), the page's ids (per page) and the rows, read fresh
+  by primary key on every request (~1 ms). On 850,000 products the first two are the expensive part (a count and an
+  index walk: 50–170 ms). Under a constant stream of stock changes lists stay cached and still show current stock.
+* **Single-flight.** Concurrent misses for the same entry run one query per replica (`SingleFlight`); the others
+  wait for its result. Without it, an expired popular entry was recomputed by every request in flight at once:
+  882 simultaneous `COUNT(*)` over 850,000 rows, ~2 s each, in one capacity run.
+* Listing entries live 10 minutes (they are invalidated explicitly; the TTL only bounds memory); details 5 minutes;
+  stock-level lists and histories 1 minute.
 * **Race-safe by construction:** readers fetch the generation *before* querying the database. If a write commits in
   between, the reader's possibly-stale result is stored under the old generation, which nobody reads any more. The
   classic "delete key after write" approach does not have this property: a slow reader can re-insert the old value
@@ -46,8 +52,8 @@ on replica A must never leave replica B serving stale data.
 
 ## Consequences
 
-* Product edits invalidate every cached list; stock changes invalidate only details, stock-level lists and
-  histories. Invalidation stays O(1). Under a write-heavy load the hit rate of those drops, but correctness never
+* Product edits invalidate every cached list and detail; a stock change invalidates one product's entries and the
+  stock-level lists. Invalidation stays O(1). Under a write-heavy load the hit rate of those drops, but correctness never
   depends on it.
 * Before the split, every stock change invalidated every list, so under the teams load test the cache was nearly
   useless and each list request ran `COUNT(*)` over 850,000 rows: PostgreSQL saturated at 2 CPUs

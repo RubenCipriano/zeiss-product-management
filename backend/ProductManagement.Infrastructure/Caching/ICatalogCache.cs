@@ -1,17 +1,21 @@
 namespace ProductManagement.Infrastructure.Caching;
 
 /// <summary>
-/// Cache for product read models, invalidated by <em>generation</em>: every key embeds a generation number, and a
-/// write increments it. Entries of older generations are never read again and expire on their own. See
-/// docs/adr/0008-redis-cache.md.
+/// Cache for product read models, invalidated by <em>generation</em>: every key embeds the generations its value
+/// depends on, and a write increments them. Entries of older generations are never read again and expire on their
+/// own. See docs/adr/0008-redis-cache.md.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Two generations, because writes differ in what they change. <see cref="CacheGeneration.Data"/> moves on with
-/// every write. <see cref="CacheGeneration.Listing"/> only moves when products are created, edited or deleted: it
-/// versions which products a list or search contains and in what order, which a stock change cannot affect. Under a
-/// constant stream of stock changes, the expensive part of a list (finding the page and counting the matches) stays
-/// cached.
+/// Writes differ in what they change, so there are three kinds of generation:
+/// <list type="bullet">
+/// <item><description><b>data</b>: moves on with every write (lists filtered by stock);</description></item>
+/// <item><description><b>listing</b>: moves on only when products are created, edited or deleted (which products a
+/// list or search contains, in what order, and how many);</description></item>
+/// <item><description><b>product</b> (one per product): moves on when that product changes, stock included (its
+/// details and history).</description></item>
+/// </list>
+/// A stock change therefore invalidates one product's entries and the stock-level lists, and nothing else.
 /// </para>
 /// <para>
 /// Implementations must <b>fail open</b>: if the cache is unreachable, reads fall back to the database and nothing
@@ -20,8 +24,11 @@ namespace ProductManagement.Infrastructure.Caching;
 /// </remarks>
 internal interface ICatalogCache
 {
-    /// <summary>The current generation, or <c>null</c> when the cache is unavailable (callers then bypass it).</summary>
-    Task<long?> GetGenerationAsync(CacheGeneration generation);
+    /// <summary>
+    /// The version an entry in this scope is stored under (made of the generations it depends on, read in one round
+    /// trip), or <c>null</c> when the cache is unavailable (callers then bypass it).
+    /// </summary>
+    Task<string?> GetVersionAsync(CacheScope scope, int productId = 0);
 
     Task<T?> GetAsync<T>(string key)
         where T : class;
@@ -30,16 +37,19 @@ internal interface ICatalogCache
         where T : class;
 
     /// <summary>Makes the entries affected by a committed write obsolete. Call after the commit.</summary>
-    Task InvalidateAsync(CatalogChange change);
+    Task InvalidateAsync(CatalogChange change, IReadOnlyCollection<int> productIds);
 }
 
-internal enum CacheGeneration
+internal enum CacheScope
 {
-    /// <summary>Anything a read returns, stock included. Moves on with every write.</summary>
+    /// <summary>Depends on everything, stock included: the data generation.</summary>
     Data,
 
-    /// <summary>Which products exist, with their names: membership and order of lists and searches.</summary>
+    /// <summary>Depends on which products exist and their names: the listing generation.</summary>
     Listing,
+
+    /// <summary>Depends on one product: the listing generation and that product's generation.</summary>
+    Product,
 }
 
 internal enum CatalogChange

@@ -30,6 +30,9 @@ sed "s#localhost:32000/product-management/api:latest#$IMAGE_REF#g" "$HERE/kubern
 echo "==> Waiting for PostgreSQL and Redis"
 kubectl -n "$NAMESPACE" rollout status statefulset/postgres --timeout=300s
 kubectl -n "$NAMESPACE" rollout status deployment/redis --timeout=180s
+# Query statistics (preloaded by the StatefulSet's args); an operations tool, so not part of the app's migrations.
+kubectl -n "$NAMESPACE" exec postgres-0 -- sh -c \
+  'psql -X -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"' >/dev/null
 
 echo "==> Waiting for database migrations"
 kubectl -n "$NAMESPACE" wait --for=condition=complete job/db-migrate --timeout=300s

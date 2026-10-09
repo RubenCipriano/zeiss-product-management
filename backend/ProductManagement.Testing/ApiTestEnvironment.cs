@@ -85,6 +85,9 @@ public sealed class ApiTestEnvironment : IAsyncDisposable
         await _infrastructure.FlushCacheAsync();
     }
 
+    /// <summary>Empties Redis only, as if it had restarted: cache entries and idempotency claims are gone.</summary>
+    public Task FlushCacheAsync() => _infrastructure.FlushCacheAsync();
+
     public async ValueTask DisposeAsync()
     {
         foreach (var instance in _additionalInstances)

@@ -47,6 +47,38 @@ public sealed class IdempotencyTests(ApiFixture fixture) : ApiTestBase(fixture)
     }
 
     [Fact]
+    public async Task ARetryWhoseClaimRedisHasLost_IsStillNotAppliedTwice()
+    {
+        // The case the load test found: the change committed, but the claim in Redis was released or lost (the client
+        // went away mid-request, or Redis restarted). The database's unique request key is the backstop.
+        var product = await Api.CreateProductAsync(TestProducts.CreateRequest(stockQuantity: 10));
+        var url = $"api/products/{product.Id}/decrement-stock/3";
+
+        using var first = await SendAsync(Api, HttpMethod.Post, url, "order-lost-claim");
+        await Environment.FlushCacheAsync();
+        using var retry = await SendAsync(Api, HttpMethod.Post, url, "order-lost-claim");
+
+        first.StatusCode.ShouldBe(HttpStatusCode.OK);
+        retry.StatusCode.ShouldBe(HttpStatusCode.OK);
+        retry.Headers.Contains("Idempotent-Replayed").ShouldBeFalse(); // not from Redis: the database refused it
+        (await ReadAsync<ProductResponse>(retry)).StockQuantity.ShouldBe(7);
+        (await CountAsync($"SELECT count(*) FROM stock_movements WHERE product_id = {product.Id} AND reason = 'StockRemoved'")).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task ACreateRetriedAfterRedisLostTheClaim_ReturnsTheSameProduct()
+    {
+        var request = TestProducts.CreateRequest(name: "Created once");
+
+        using var first = await SendAsync(Api, HttpMethod.Post, "api/products", "create-lost-claim", request);
+        await Environment.FlushCacheAsync();
+        using var retry = await SendAsync(Api, HttpMethod.Post, "api/products", "create-lost-claim", request);
+
+        (await ReadAsync<ProductResponse>(retry)).Id.ShouldBe((await ReadAsync<ProductResponse>(first)).Id);
+        (await CountAsync("SELECT count(*) FROM products WHERE name = 'Created once'")).ShouldBe(1);
+    }
+
+    [Fact]
     public async Task TheSameRequestFiredConcurrently_IsExecutedExactlyOnce()
     {
         using var replicaB = Environment.CreateClientForAdditionalInstance();

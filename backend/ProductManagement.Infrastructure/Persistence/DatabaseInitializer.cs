@@ -44,7 +44,7 @@ public static partial class DatabaseInitializer
 
         LogApplyingMigrations(logger);
         await context.Database.MigrateAsync(cancellationToken);
-        await scope.ServiceProvider.GetRequiredService<ICatalogCache>().InvalidateAsync(CatalogChange.Products);
+        await scope.ServiceProvider.GetRequiredService<ICatalogCache>().InvalidateAsync(CatalogChange.Products, []);
         LogDatabaseReady(logger);
     }
 

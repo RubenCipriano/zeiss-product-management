@@ -6,6 +6,8 @@ namespace ProductManagement.Infrastructure.Persistence.Configurations;
 
 internal sealed class StockMovementConfiguration : IEntityTypeConfiguration<StockMovement>
 {
+    public const string RequestKeyIndexName = "ix_stock_movements_request_key";
+
     public void Configure(EntityTypeBuilder<StockMovement> builder)
     {
         builder.ToTable("stock_movements", table =>
@@ -24,6 +26,17 @@ internal sealed class StockMovementConfiguration : IEntityTypeConfiguration<Stoc
         builder.Property(movement => movement.PerformedBy)
             .HasMaxLength(StockMovement.PerformedByMaxLength)
             .IsRequired();
+
+        builder.Property(movement => movement.RequestKey)
+            .HasMaxLength(StockMovement.RequestKeyMaxLength);
+
+        // Exactly-once, enforced by the database: one movement per idempotent request. A second execution of the same
+        // request (its Redis claim lost or released after the commit) violates this index, and PostgreSQL rolls back
+        // the whole statement, the stock change included. Partial: only requests that sent a key.
+        builder.HasIndex(movement => movement.RequestKey)
+            .IsUnique()
+            .HasFilter("request_key IS NOT NULL")
+            .HasDatabaseName(RequestKeyIndexName);
 
         // The history belongs to the product: deleting a product deletes its history.
         builder.HasOne<Product>()

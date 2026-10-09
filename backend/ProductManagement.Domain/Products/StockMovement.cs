@@ -26,6 +26,8 @@ public sealed class StockMovement
 {
     public const int PerformedByMaxLength = 100;
 
+    public const int RequestKeyMaxLength = 300;
+
     // Required by EF Core for materialization.
     private StockMovement()
     {
@@ -46,14 +48,26 @@ public sealed class StockMovement
 
     public DateTimeOffset OccurredAt { get; private set; }
 
+    /// <summary>
+    /// The idempotency key of the request that made this change (scoped to the consumer), if it sent one. Unique:
+    /// the database refuses a second movement for the same request, so a request is never applied twice.
+    /// </summary>
+    public string? RequestKey { get; private set; }
+
     public static StockMovement Record(
         int productId,
         int quantityChange,
         int stockAfter,
         StockMovementReason reason,
         string performedBy,
-        DateTimeOffset occurredAt)
+        DateTimeOffset occurredAt,
+        string? requestKey = null)
     {
+        if (requestKey is { Length: > RequestKeyMaxLength })
+        {
+            throw new DomainException($"The request key cannot exceed {RequestKeyMaxLength} characters.");
+        }
+
         if (stockAfter < 0)
         {
             throw new DomainException("Stock cannot become negative.");
@@ -67,6 +81,7 @@ public sealed class StockMovement
             Reason = reason,
             PerformedBy = Guard.AgainstInvalidText(performedBy, PerformedByMaxLength, nameof(PerformedBy)),
             OccurredAt = occurredAt,
+            RequestKey = requestKey,
         };
     }
 }

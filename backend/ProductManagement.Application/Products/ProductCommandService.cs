@@ -56,8 +56,23 @@ internal sealed partial class ProductCommandService(
             product.StockQuantity,
             StockMovementReason.InitialStock,
             actor.Name,
-            product.CreatedAt));
-        await unitOfWork.SaveChangesAsync(cancellationToken);
+            product.CreatedAt,
+            actor.RequestKey));
+        try
+        {
+            await unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+        catch (DuplicateRequestException) when (actor.RequestKey is not null)
+        {
+            // Created before by this same request: answer with that product instead of a second one.
+            var original = await productQueries.FindCreatedByRequestAsync(actor.RequestKey, CancellationToken.None);
+            if (original is not null)
+            {
+                return original;
+            }
+
+            throw;
+        }
 
         LogProductCreated(product.Id, product.StockQuantity);
         return await LoadAsync(product.Id, cancellationToken);
@@ -181,16 +196,19 @@ internal sealed partial class ProductCommandService(
         }
 
         var delta = operation == StockOperation.Remove ? -quantity : quantity;
-        var stockAfter = await products.TryAdjustStockAsync(
+        var outcome = await products.TryAdjustStockAsync(
             id,
             delta,
             actor.Name,
+            actor.RequestKey,
             timeProvider.GetUtcNow(),
             cancellationToken);
-        var adjusted = stockAfter is not null;
+        // Applied before by this same request (its first answer was lost): the change stands, report success.
+        var adjusted = outcome is StockAdjustmentOutcome.Applied or StockAdjustmentOutcome.AlreadyApplied;
 
-        // The current state tells us both what to return on success and why it failed otherwise.
-        var current = await productQueries.GetByIdAsync(id, cancellationToken);
+        // The current state tells us both what to return on success and why it failed otherwise. Not cancellable:
+        // once the change may have been committed, the request finishes, so its outcome can be recorded and replayed.
+        var current = await productQueries.GetByIdAsync(id, CancellationToken.None);
         if (current is null)
         {
             return ProductErrors.NotFound(id);

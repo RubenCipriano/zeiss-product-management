@@ -20,27 +20,35 @@ internal sealed partial class RedisCatalogCache(
 
     private IDatabase Database => redis.GetDatabase();
 
-    private RedisKey GenerationKey(CacheGeneration generation) => generation switch
-    {
-        CacheGeneration.Listing => $"{_prefix}:catalog:listing-generation",
-        _ => $"{_prefix}:catalog:generation",
-    };
+    private readonly TimeSpan _productGenerationTtl = options.Value.ProductGenerationTtl;
 
-    public async Task<long?> GetGenerationAsync(CacheGeneration generation)
+    private RedisKey DataGeneration => $"{_prefix}:catalog:generation";
+
+    private RedisKey ListingGeneration => $"{_prefix}:catalog:listing-generation";
+
+    private RedisKey ProductGeneration(int productId) => $"{_prefix}:catalog:product:{productId}:generation";
+
+    public async Task<string?> GetVersionAsync(CacheScope scope, int productId = 0)
     {
-        var key = GenerationKey(generation);
+        RedisKey[] keys = scope switch
+        {
+            CacheScope.Listing => [ListingGeneration],
+            CacheScope.Product => [ListingGeneration, ProductGeneration(productId)],
+            _ => [DataGeneration],
+        };
+
         try
         {
-            var value = await Database.StringGetAsync(key);
-            if (value.HasValue)
+            var values = await Database.StringGetAsync(keys);
+            if (values.Any(value => !value.HasValue))
             {
-                return (long)value;
+                // First use, or the counter expired or was lost. Start from the clock instead of 0, so a version is
+                // never reused for a different state. Only the first writer wins (NX).
+                await Task.WhenAll(keys.Select(StartAsync));
+                values = await Database.StringGetAsync(keys);
             }
 
-            // First use, or Redis lost its data. Start from the clock instead of 0, so a generation number is never
-            // reused for a different state of the catalogue. Only the first writer wins (NX).
-            await Database.StringSetAsync(key, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), when: When.NotExists);
-            return (long)await Database.StringGetAsync(key);
+            return string.Join('.', values.Select(value => (long)value));
         }
         catch (Exception exception) when (IsCacheFailure(exception))
         {
@@ -77,15 +85,19 @@ internal sealed partial class RedisCatalogCache(
         }
     }
 
-    public async Task InvalidateAsync(CatalogChange change)
+    public async Task InvalidateAsync(CatalogChange change, IReadOnlyCollection<int> productIds)
     {
+        var keys = new List<RedisKey> { DataGeneration };
+        if (change == CatalogChange.Products)
+        {
+            keys.Add(ListingGeneration);
+        }
+
+        keys.AddRange(productIds.Select(ProductGeneration));
         try
         {
-            await IncrementAsync(GenerationKey(CacheGeneration.Data));
-            if (change == CatalogChange.Products)
-            {
-                await IncrementAsync(GenerationKey(CacheGeneration.Listing));
-            }
+            // Pipelined: one round trip's latency for all counters.
+            await Task.WhenAll(keys.Select(IncrementAsync));
         }
         catch (Exception exception) when (IsCacheFailure(exception))
         {
@@ -94,12 +106,20 @@ internal sealed partial class RedisCatalogCache(
         }
     }
 
-    // A missing generation starts from the clock here too (INCR alone would start it at 1).
+    // A missing counter starts from the clock here too (INCR alone would start it at 1).
     private async Task IncrementAsync(RedisKey key)
     {
-        await Database.StringSetAsync(key, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), when: When.NotExists);
+        await StartAsync(key);
         await Database.StringIncrementAsync(key);
     }
+
+    // Per-product counters expire (there can be one per product); the catalogue-wide ones do not.
+    private Task StartAsync(RedisKey key) =>
+        Database.StringSetAsync(
+            key,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            key == DataGeneration || key == ListingGeneration ? null : _productGenerationTtl,
+            When.NotExists);
 
     private RedisKey Key(string key) => $"{_prefix}:{key}";
 

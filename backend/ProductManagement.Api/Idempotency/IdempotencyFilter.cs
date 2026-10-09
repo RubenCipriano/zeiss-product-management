@@ -26,6 +26,9 @@ internal sealed class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsF
 {
     public const string HeaderName = "Idempotency-Key";
     public const string ReplayedHeaderName = "Idempotent-Replayed";
+
+    /// <summary>HttpContext item holding the consumer-scoped key, read by <c>ICurrentActor.RequestKey</c>.</summary>
+    public const string RequestKeyItem = "IdempotencyRequestKey";
     public const int MaxKeyLength = 128;
 
     private static readonly SearchValues<char> AllowedKeyCharacters =
@@ -55,6 +58,8 @@ internal sealed class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsF
         }
 
         var scopedKey = $"{http.User.FindFirst("sub")?.Value ?? "anonymous"}:{key}";
+        // Also recorded with the change in the database (unique), the backstop if this claim is ever lost.
+        http.Items[RequestKeyItem] = scopedKey;
         var fingerprint = await FingerprintAsync(http.Request);
         var claim = await store.TryBeginAsync(scopedKey, fingerprint, http.RequestAborted);
 

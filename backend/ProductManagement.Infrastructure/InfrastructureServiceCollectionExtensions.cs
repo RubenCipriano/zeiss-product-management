@@ -58,6 +58,7 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddScoped<IProductRepository, ProductRepository>();
         services.AddScoped<ProductQueries>();
         services.AddScoped<IProductQueries, CachingProductQueries>();
+        services.AddSingleton<SingleFlight>();
         services.AddScoped<IProductIdGenerator, PostgresProductIdGenerator>();
         services.AddScoped<ICategoryQueries, CategoryQueries>();
 

@@ -42,8 +42,8 @@ export const api = {
   get: (token, id) => http.get(`${BASE_URL}/api/products/${id}`, params(token, 'GET /products/{id}')),
   search: (token, name) =>
     http.get(`${BASE_URL}/api/products/search?name=${encodeURIComponent(name)}`, params(token, 'GET /products/search')),
-  stockLevel: (token, min, max) =>
-    http.get(`${BASE_URL}/api/products/stock-level?min=${min}&max=${max}`, params(token, 'GET /products/stock-level')),
+  stockLevel: (token, min, max, page = 1) =>
+    http.get(`${BASE_URL}/api/products/stock-level?min=${min}&max=${max}&page=${page}`, params(token, 'GET /products/stock-level')),
   categories: (token) => http.get(`${BASE_URL}/api/categories`, params(token, 'GET /categories')),
   decrement: (token, id, quantity = 1, expectedStatuses = [200, 409]) =>
     http.post(`${BASE_URL}/api/products/${id}/decrement-stock/${quantity}`, null,
