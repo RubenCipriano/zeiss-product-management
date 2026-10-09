@@ -1,4 +1,5 @@
-# Build context: ./backend (see docker-compose.yml). Directory.*.props and global.json must be in the context.
+# API image. Build from this folder:  docker build -t product-management/api:local .
+# The same image also runs the database migrations (`migrate` command), see deploy/k8s/base/api/migrate-job.yaml.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src

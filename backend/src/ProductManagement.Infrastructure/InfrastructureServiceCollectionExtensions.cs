@@ -1,9 +1,11 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using StackExchange.Redis;
 using ProductManagement.Application.Categories.Abstractions;
 using ProductManagement.Application.Common.Persistence;
 using ProductManagement.Application.Products.Abstractions;
+using ProductManagement.Infrastructure.Caching;
 using ProductManagement.Infrastructure.Categories;
 using ProductManagement.Infrastructure.Persistence;
 using ProductManagement.Infrastructure.Persistence.Seeding;
@@ -13,7 +15,7 @@ namespace ProductManagement.Infrastructure;
 
 public static class InfrastructureServiceCollectionExtensions
 {
-    public const string DatabaseHealthCheckTag = "ready";
+    public const string ReadinessHealthCheckTag = "ready";
 
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
@@ -50,13 +52,43 @@ public static class InfrastructureServiceCollectionExtensions
 
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.AddScoped<IProductRepository, ProductRepository>();
-        services.AddScoped<IProductQueries, ProductQueries>();
+        services.AddScoped<ProductQueries>();
+        services.AddScoped<IProductQueries, CachingProductQueries>();
         services.AddScoped<IProductIdGenerator, PostgresProductIdGenerator>();
         services.AddScoped<ICategoryQueries, CategoryQueries>();
 
-        services.AddHealthChecks()
-            .AddDbContextCheck<ProductManagementDbContext>("database", tags: [DatabaseHealthCheckTag]);
+        var healthChecks = services.AddHealthChecks()
+            .AddDbContextCheck<ProductManagementDbContext>("database", tags: [ReadinessHealthCheckTag]);
+
+        AddCatalogCache(services, configuration, healthChecks);
 
         return services;
+    }
+
+    private static void AddCatalogCache(
+        IServiceCollection services,
+        IConfiguration configuration,
+        IHealthChecksBuilder healthChecks)
+    {
+        services.Configure<CacheOptions>(configuration.GetSection(CacheOptions.SectionName));
+
+        var redisConnectionString = configuration.GetConnectionString(CacheOptions.ConnectionStringName);
+        if (string.IsNullOrWhiteSpace(redisConnectionString))
+        {
+            services.AddSingleton<ICatalogCache, NullCatalogCache>();
+            return;
+        }
+
+        var redisOptions = ConfigurationOptions.Parse(redisConnectionString);
+        // Start even if Redis is down and keep reconnecting in the background; fail fast per call so a slow or
+        // missing cache costs milliseconds, not seconds (the queries then fall back to the database).
+        redisOptions.AbortOnConnectFail = false;
+        redisOptions.ConnectTimeout = Math.Min(redisOptions.ConnectTimeout, 2_000);
+        redisOptions.SyncTimeout = Math.Min(redisOptions.SyncTimeout, 500);
+        redisOptions.AsyncTimeout = Math.Min(redisOptions.AsyncTimeout, 500);
+
+        services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisOptions));
+        services.AddSingleton<ICatalogCache, RedisCatalogCache>();
+        healthChecks.AddCheck<RedisHealthCheck>("cache", tags: [ReadinessHealthCheckTag]);
     }
 }

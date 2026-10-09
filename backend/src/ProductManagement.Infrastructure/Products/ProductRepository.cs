@@ -1,11 +1,12 @@
 using Microsoft.EntityFrameworkCore;
 using ProductManagement.Application.Products.Abstractions;
 using ProductManagement.Domain.Products;
+using ProductManagement.Infrastructure.Caching;
 using ProductManagement.Infrastructure.Persistence;
 
 namespace ProductManagement.Infrastructure.Products;
 
-internal sealed class ProductRepository(ProductManagementDbContext context) : IProductRepository
+internal sealed class ProductRepository(ProductManagementDbContext context, ICatalogCache cache) : IProductRepository
 {
     public Task<Product?> GetByIdAsync(int id, CancellationToken cancellationToken) =>
         context.Products.SingleOrDefaultAsync(product => product.Id == id, cancellationToken);
@@ -34,6 +35,12 @@ internal sealed class ProductRepository(ProductManagementDbContext context) : IP
                     .SetProperty(product => product.UpdatedAt, now),
                 cancellationToken);
 
-        return affectedRows == 1;
+        if (affectedRows != 1)
+        {
+            return false;
+        }
+
+        await cache.InvalidateAsync();
+        return true;
     }
 }

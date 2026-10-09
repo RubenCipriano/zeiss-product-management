@@ -27,5 +27,5 @@ public sealed class TestRunHooks
     }
 
     [BeforeScenario]
-    public static Task ResetDatabaseAsync() => Environment.ResetDatabaseAsync();
+    public static Task ResetAsync() => Environment.ResetAsync();
 }

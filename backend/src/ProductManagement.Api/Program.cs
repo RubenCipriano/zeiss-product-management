@@ -34,8 +34,17 @@ app.MapControllers();
 app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
 {
-    Predicate = check => check.Tags.Contains(InfrastructureServiceCollectionExtensions.DatabaseHealthCheckTag),
+    Predicate = check => check.Tags.Contains(InfrastructureServiceCollectionExtensions.ReadinessHealthCheckTag),
 });
+
+// `dotnet ProductManagement.Api.dll migrate`: apply migrations and exit. Used by the Kubernetes migration Job, so
+// schema changes run once per deployment instead of on every replica start.
+const string MigrateCommand = "migrate";
+if (args.Contains(MigrateCommand, StringComparer.OrdinalIgnoreCase))
+{
+    await app.Services.MigrateDatabaseAsync();
+    return;
+}
 
 await app.Services.InitializeDatabaseAsync();
 await app.RunAsync();
