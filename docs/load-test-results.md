@@ -8,6 +8,25 @@ itself (about 0.5 CPU at peak), the gateway, PostgreSQL and every API replica sh
 numbers are a lower bound for a real cluster. Comparisons between runs, and the correctness checks, are the
 point.
 
+## Docker Desktop cluster (final setup)
+
+Re-run on Docker Desktop's single-node Kubernetes, with tokens from the API's own endpoint and the gateway's 1 s
+microcache for API reads:
+
+| Run | API replicas | Requests | Errors | p50 | p95 | Result |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| smoke | 2 | 227 | 0 | 3.1 ms | 35 ms | ✅ |
+| load, 150 req/s | 2 | 21,616 | 0 | 1.9 ms | **3.6 ms** | ✅ SLO; **38 % of product GETs answered by the nginx microcache** |
+| stock-consistency | 2 | 320 (20 were retries after `429`) | 0 unexpected | 5.7 ms | 105 ms | ✅ exactly 100 sold, 200 × 409, final stock 0 |
+
+The first consistency run counted 5 `429` responses as unexpected: 30 simultaneous orders exceed the per-user write
+limit, and the API throttled them as designed. The scenario now behaves like a well-behaved client: it waits for
+`Retry-After` and retries, so all 300 orders are processed and correctness is checked on every one of them.
+
+## MicroK8s runs (capacity investigation)
+
+The runs below were made earlier on MicroK8s (Multipass VM, 4 vCPU / 6 GB), before the API issued its own tokens.
+
 ## Summary
 
 | Run | API replicas | Target | Requests | Errors | p50 | p95 | Result |

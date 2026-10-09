@@ -14,6 +14,8 @@ everyone. Limits must also hold with several replicas behind a load balancer.
 | **Gateway** (nginx `limit_req`) | client IP     | 200 req/s, burst 400, `/api` only  | Cheap, early rejection of floods before they reach the API |
 | **API** (ASP.NET Core rate limiter) | user (`sub`), IP if anonymous | 50 req/s, burst 100 | Fairness between users; protects each replica |
 | **API, writes**        | user                   | 10 req/s, burst 20                 | Stricter for state-changing endpoints        |
+| **API, token endpoint** | client IP             | 20 req/min per replica             | Slows secret guessing                         |
+| **Failed sign-ins** (Redis) | client IP         | 10 failures/min, **cluster-wide**  | Blocks secret guessing however requests are spread over replicas ([0009](0009-authentication-authorization.md)) |
 
 * Token buckets allow short bursts (a page load fires several requests) but cap sustained rates.
 * Rejections are `429` problem details with `errorCode: rate_limited` and a `Retry-After` header.

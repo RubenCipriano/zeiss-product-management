@@ -12,7 +12,7 @@ Short records of the decisions that shape this codebase: the context, the decisi
 | 0006 | [PostgreSQL as the database](0006-postgresql.md)                             |
 | 0007 | [Frontend state with signals and `rxResource`](0007-frontend-state.md)       |
 | 0008 | [Redis read cache with generation-based invalidation](0008-redis-cache.md)  |
-| 0009 | [Authentication (OIDC) and permission-based RBAC](0009-authentication-authorization.md) |
+| 0009 | [API-issued JWTs for registered consumers, permission-based RBAC](0009-authentication-authorization.md) |
 | 0010 | [Rate limiting in two layers](0010-rate-limiting.md)                         |
 | 0011 | [Kubernetes deployment, one manifest per project](0011-kubernetes-deployment.md) |
 | 0012 | [nginx gateway in front of the application](0012-gateway.md)                 |

@@ -1,6 +1,6 @@
 // Correctness under load: many concurrent orders, spread over all API replicas, for one product with limited
 // stock. Exactly `STOCK` orders may succeed, the rest must be rejected with 409, and the final stock must be 0.
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 import { Counter } from 'k6/metrics';
 import { api, createProducts, deleteProducts, signIn, tokenForVu } from './lib/api.js';
 
@@ -34,7 +34,12 @@ export function setup() {
 }
 
 export default function ({ tokens, id }) {
-  const response = api.decrement(tokenForVu(tokens), id, 1);
+  // A well-behaved client: when rate limited, wait as told and retry, so every order is eventually processed.
+  let response = api.decrement(tokenForVu(tokens), id, 1, [200, 409, 429]);
+  for (let attempt = 0; response.status === 429 && attempt < 10; attempt++) {
+    sleep(Number(response.headers['Retry-After'] || 1));
+    response = api.decrement(tokenForVu(tokens), id, 1, [200, 409, 429]);
+  }
   if (response.status === 200) {
     succeeded.add(1);
   } else if (response.status === 409) {

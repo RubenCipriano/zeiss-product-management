@@ -12,8 +12,9 @@ A documentação técnica "oficial" (em inglês, para os avaliadores) está no [
 > Os pontos críticos do enunciado são dois: IDs de 6 dígitos únicos com várias instâncias, e stock correto com
 > pedidos concorrentes. Resolvi-os na base de dados: uma *sequence* para os IDs e um UPDATE condicional atómico
 > para o stock. Testei-os com testes de integração contra PostgreSQL real e com testes de carga em Kubernetes com
-> várias réplicas. Para produção, acrescentei autenticação OIDC (Keycloak) com RBAC, rate limiting, cache Redis,
-> um gateway nginx, deploy em Kubernetes separado por frontend e backend, e um servidor MCP para assistentes de IA."
+> várias réplicas. Para produção, acrescentei autenticação JWT emitida pela própria API a consumers registados,
+> RBAC, rate limiting, cache Redis, um gateway nginx com cache, deploy em Kubernetes (Docker Desktop) separado
+> por frontend e backend, e um servidor MCP para assistentes de IA."
 
 ---
 
@@ -123,8 +124,28 @@ conflito e teria de repetir (trabalho O(N²)), e o cliente veria erros em pedido
 
 ## 6. Segurança (pedido para produção)
 
-* **Autenticação:** Keycloak (OIDC). O browser faz login com **Authorization Code + PKCE** (`oidc-client-ts`). A API
-  só valida o **JWT** (assinatura com as chaves do Keycloak, issuer, audience e validade) e nunca vê passwords.
+* **Autenticação simples, sem Identity Provider externo:** a própria API emite e verifica os JWT.
+  * **Consumers:** cada cliente da API (os utilizadores da UI, o servidor MCP, os testes de carga) é um *consumer*
+    registado, com `clientId`, secret e roles. Estão em configuração (um Secret do Kubernetes montado como
+    `consumers.json`), e do secret guarda-se **apenas o hash PBKDF2** (com salt, 100 mil iterações). O comando
+    `dotnet ProductManagement.Api.dll hash-secret <secret>` gera o hash.
+  * **Endpoint de token:** `POST /api/auth/token` com `{ clientId, clientSecret }` devolve um **JWT assinado com
+    HMAC-SHA256**, com `iss`, `aud`, `sub`, `roles`, `exp` e `jti`, válido 1 hora.
+  * **Verificação:** em cada pedido a API verifica a assinatura, o algoritmo (só HS256), o issuer, a audience e a
+    validade.
+  * **Várias réplicas:** a mesma chave (num Secret) é partilhada por todas, por isso um token emitido por uma é aceite
+    por todas.
+  * **Porque não Keycloak?** Para uma API e meia dúzia de clientes conhecidos, um IdP é mais uma peça a operar sem
+    resolver nenhum problema. Se um dia houver SSO ou muitos sistemas, troca-se o emissor; a verificação na API
+    mantém-se.
+  * **Erros de login:** um cliente desconhecido e um secret errado dão **a mesma resposta** (401 `invalid_client`) e
+    demoram o mesmo tempo (comparação em tempo constante), para não revelar que clientes existem.
+  * **Força bruta:** 10 falhas por minuto por IP, contadas no **Redis** e partilhadas por todas as réplicas → 429,
+    mesmo com o secret certo.
+    * *Porque Redis?* O rate limit normal é por réplica, e ao testar no cluster vi 22 tentativas a passar sem bloqueio
+      porque se dividiam pelas réplicas. Foi esse problema real que levou a esta decisão.
+  * **Limitação assumida:** um JWT não se revoga antes de expirar. Mitigação: validade curta e rotação da chave; o
+    passo seguinte seria uma deny-list de `jti` no Redis.
 * **Autorização (RBAC):** os endpoints pedem **permissões**, não roles. O mapeamento role → permissão está num só
   sítio:
 
@@ -174,24 +195,40 @@ conflito e teria de repetir (trabalho O(N²)), e o cliente veria erros em pedido
   teclado nos menus). Saiu o Angular Material: bundle inicial de 121 → 91 kB.
 * **Erros:** um interceptor converte tudo em `ApiError`. Os formulários mostram os erros de validação do servidor no
   campo certo, e o 412 mostra "alguém alterou este produto — Reload latest".
-* **Login:** o guard manda para o Keycloak e o interceptor junta o token **só** aos pedidos `/api` (nunca a outros
-  domínios). Num 401 volta a pedir login.
+* **Login:**
+  * a página de login chama `POST /api/auth/token`;
+  * a sessão fica no `sessionStorage`: aguenta um reload, acaba quando se fecha o separador ou o token expira;
+  * o guard manda para `/login?returnUrl=...`, e só aceita voltar a caminhos da própria app (nunca a outro site);
+  * o interceptor junta o token **só** aos pedidos `/api`;
+  * num 401 termina a sessão e volta ao login.
 
 ---
 
 ## 9. Kubernetes, gateway e réplicas
 
 * **Um YAML e um Dockerfile por projeto** (`backend/deploy`, `frontend/deploy`), cada um com o seu `deploy.sh`, como
-  se fossem repositórios separados. O contrato entre eles é só de nomes: o namespace, os serviços `api-headless` e
-  `keycloak`, e a label `gateway`.
+  se fossem repositórios separados. O contrato entre eles é só de nomes: o namespace, o serviço `api-headless` e a
+  label `gateway`.
+* **Cluster no Docker Desktop:** Kubernetes ativado no Docker Desktop, onde se veem os pods. O gateway é um serviço
+  `LoadBalancer` em http://localhost:8080. Os mesmos YAML também correm em MicroK8s (usado no CI).
 * **Escalar só o backend:** `kubectl -n product-management scale deployment/api --replicas=4`, sem mexer no
   frontend. O nginx aponta para o serviço **headless** da API com `resolve` e volta a resolver o DNS a cada 5 s. Vê
   cada pod individualmente e distribui **por pedido** (`least_conn`). Num teste, 200 pedidos ficaram
   50/50/50/50 pelas 4 réplicas.
   * *Porque não um Service normal?* O Service normal distribui por ligação TCP; com keep-alive, as ligações ficam
     "presas" aos pods antigos.
-* **Gateway nginx à frente:** uma só origem para app, `/api` e `/auth` (sem CORS), cache das bundles, gzip,
-  headers de segurança, rate limit por IP e retry noutra réplica se uma falhar a ligar.
+* **Gateway nginx à frente:** uma só origem para a app e a `/api` (sem CORS), cache das bundles, gzip, headers de
+  segurança, rate limit por IP e retry noutra réplica se uma falhar a ligar.
+* **Cache nginx das leituras da API (microcache de 1 s):** GETs iguais dentro de 1 segundo são respondidos pelo
+  nginx sem chegar à API. No teste de carga, 38% dos GET de produtos.
+  * *É seguro:* a chave da cache inclui o token, por isso uma resposta nunca é dada a outro utilizador, e quem não
+    tem token nunca recebe nada da cache.
+  * *É correto para o utilizador:* depois de uma alteração sua, a app pede com `Cache-Control: no-cache` e vê logo o
+    resultado.
+* **Duas caches, dois papéis:**
+  * **nginx:** absorve repetições dentro de 1 segundo, sem custo para a API;
+  * **Redis:** partilhado pelas réplicas e invalidado a cada escrita, guarda durante minutos e poupa a base de
+    dados.
 * **Zero downtime:** `maxUnavailable: 0`, probes (readiness inclui a base de dados) e `preStop` de 5 s.
 * **Imagens:** cada deploy gera uma tag imutável (commit + timestamp). No MicroK8s vai para o registry interno; no
   Docker Desktop usa a imagem local.
@@ -241,6 +278,17 @@ endpoints tratam erros da mesma forma através do `ApiControllerBase`.
 É o PostgreSQL que garante: um UPDATE condicional atómico mais um `CHECK (stock >= 0)`. O número de réplicas não
 interessa, e está provado com testes concorrentes e com o teste de carga.
 
+**"Porque não usaste um Identity Provider (Keycloak, Entra ID)?"**
+Para uma API e poucos clientes conhecidos, um IdP é mais uma peça a operar, proteger e explicar, sem resolver nenhum
+problema que este sistema tenha. A API emite JWT assinados com HMAC, com uma chave partilhada pelas réplicas e os
+secrets guardados só em hash. Se um dia for preciso SSO ou outros serviços a verificar tokens, troco para um IdP ou
+para RS256 + JWKS, e a verificação na API mantém-se.
+
+**"Como evitas força bruta no login?"**
+Com um limite por réplica e, sobretudo, um contador de falhas por IP no Redis, partilhado por todas as réplicas:
+10 falhas por minuto e o IP fica bloqueado com 429. Descobri esta necessidade ao testar no cluster: com 2 réplicas,
+o limite por réplica deixava passar o dobro das tentativas.
+
 **"E se o Redis cair?"**
 A API continua a funcionar a partir da base de dados (falha aberta), o health fica "Degraded" e as réplicas continuam
 em serviço. Há um teste para isto.
@@ -269,6 +317,8 @@ O .NET 10 *é* o .NET Core: a Microsoft deixou cair o "Core" do nome no .NET 5. 
 
 1. `scripts/deploy-all.sh` → abrir http://localhost:8080 e mostrar o Docker Desktop → Kubernetes com os pods.
 2. Login como `viewer`: só leitura. Logout e login como `manager`: criar, editar e ajustar stock.
+   No terminal: `curl -X POST localhost:8080/api/auth/token ...` → mostrar o JWT (no jwt.io: `sub`, `roles`, `exp`).
+   Depois, 3 GETs seguidos com o mesmo token → `X-Cache-Status: MISS … HIT` (cache nginx).
 3. Abrir uma edição em dois separadores e gravar nos dois → o segundo recebe o banner de conflito (412).
 4. `kubectl -n product-management scale deployment/api --replicas=4` → mostrar os pods novos e que a app continua
    a funcionar.

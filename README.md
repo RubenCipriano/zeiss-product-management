@@ -2,9 +2,9 @@
 
 A product and stock management system:
 
-* **Backend:** .NET 10 / ASP.NET Core Web API, Entity Framework Core and PostgreSQL, with a Redis read cache,
-  Keycloak (OIDC) authentication, role-based authorization and rate limiting.
-* **Frontend:** Angular 22 with Tailwind CSS, served behind an nginx gateway.
+* **Backend:** .NET 10 / ASP.NET Core Web API, Entity Framework Core and PostgreSQL, with a Redis read cache, JWT
+  authentication (tokens issued by the API to registered consumers), role-based authorization and rate limiting.
+* **Frontend:** Angular 22 with Tailwind CSS, served behind an nginx gateway that also caches API reads.
 * **Deployment:** Kubernetes (Docker Desktop or MicroK8s), with k6 load tests run inside the cluster.
 * **MCP server:** lets AI assistants search the catalogue and record stock movements, under the same rules as
   everyone else.
@@ -38,9 +38,9 @@ A product and stock management system:
 
 Everything runs on Kubernetes. Pick one of two local clusters; the manifests are identical.
 
-### Option A: Docker Desktop's Kubernetes (everything visible in Docker Desktop)
+### Option A: Docker Desktop's Kubernetes (recommended; everything visible in Docker Desktop)
 
-1. Docker Desktop → **Settings → Kubernetes → Enable Kubernetes** → Apply & restart.
+1. Docker Desktop → **Settings → Kubernetes → Enable Kubernetes** → Apply & restart (single-node, `kubeadm`).
 2. Deploy (the backend first, then the frontend; each can also be deployed on its own):
 
    ```bash
@@ -61,29 +61,39 @@ kubectl -n product-management port-forward service/gateway 8080:8080     # http:
 
 ### Sign in
 
-| User      | Password  | Role          | Can                                    |
-| --------- | --------- | ------------- | -------------------------------------- |
-| `viewer`  | `viewer`  | `viewer`      | browse and search                      |
-| `clerk`   | `clerk`   | `stock-clerk` | + add and remove stock                 |
-| `manager` | `manager` | `manager`     | + create, edit and delete products     |
+The API issues its own JWTs to **registered API consumers** (client id + secret). The web app's login page, the MCP
+server and the load tests all use `POST /api/auth/token`. Local demo consumers:
 
-Demo users exist only in the local realm (`backend/deploy/kubernetes.yaml`).
+| Client id / user | Secret      | Role          | Can                                    |
+| ---------------- | ----------- | ------------- | -------------------------------------- |
+| `viewer`         | `viewer`    | `viewer`      | browse and search                      |
+| `clerk`          | `clerk`     | `stock-clerk` | + add and remove stock                 |
+| `manager`        | `manager`   | `manager`     | + create, edit and delete products     |
+| `mcp-server`     | `mcp-local-dev-secret` | `stock-clerk` | the MCP server               |
 
-| What                             | How |
-| -------------------------------- | --- |
-| Application                      | http://localhost:8080 |
-| Swagger UI                       | `kubectl -n product-management port-forward service/api 5080:8080` → http://localhost:5080/swagger |
-| Keycloak admin (`admin`/`admin`) | http://localhost:8080/auth/admin |
+They are defined (with PBKDF2 hashes only) in `backend/deploy/kubernetes.yaml` and `appsettings.Development.json`.
+
+```bash
+# Get a token and call the API from a terminal
+TOKEN=$(curl -s -X POST localhost:8080/api/auth/token -H 'Content-Type: application/json' \
+  -d '{"clientId":"manager","clientSecret":"manager"}' | jq -r .accessToken)
+curl -H "Authorization: Bearer $TOKEN" localhost:8080/api/products
+```
+
+| What        | How |
+| ----------- | --- |
+| Application | http://localhost:8080 |
+| Swagger UI  | `kubectl -n product-management port-forward service/api 5080:8080` → http://localhost:5080/swagger (click *Authorize* and paste a token) |
 
 ### What gets deployed
 
 ```
                                    ┌───────────────────── namespace product-management ──────────────────────┐
  browser ──► gateway (nginx ×2) ──┬─► web (Angular static files ×2)                                         │
-   :8080     rate limit, cache,   ├─► api (ASP.NET Core ×2 … ×N) ──┬─► PostgreSQL (StatefulSet + volume)    │
-             per-request LB       │                                └─► Redis (cache)                        │
-                                  └─► Keycloak (/auth, OIDC) ◄── the API fetches its signing keys           │
-                                      db-migrate Job (EF Core migrations, once per deployment)              │
+   :8080     rate limit, per-     └─► api (ASP.NET Core ×2 … ×N) ──┬─► PostgreSQL (StatefulSet + volume)    │
+             request LB, caches:      issues + verifies JWTs       └─► Redis (read cache, sign-in throttle) │
+             static files + 1 s                                                                            │
+             API microcache           db-migrate Job (EF Core migrations, once per deployment)              │
                                    └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -117,7 +127,7 @@ dotnet run --project backend/ProductManagement.Api
 **Frontend:**
 
 ```bash
-cd frontend && npm ci && npm start    # http://localhost:4200; /api proxied to :5080, Keycloak on :8080
+cd frontend && npm ci && npm start    # http://localhost:4200; /api proxied to :5080
 ```
 
 | Script                 | Purpose |
@@ -133,8 +143,8 @@ cd frontend && npm ci && npm start    # http://localhost:4200; /api proxied to :
 ## Tests
 
 ```bash
-cd backend && dotnet test --solution ProductManagement.sln     # 205 tests (Docker must be running)
-cd frontend && npm run test:ci                                   # 63 tests
+cd backend && dotnet test --solution ProductManagement.sln     # 212 tests (Docker must be running)
+cd frontend && npm run test:ci                                   # 70 tests
 load-tests/run.sh smoke                                          # against the running cluster
 ```
 
@@ -142,10 +152,10 @@ load-tests/run.sh smoke                                          # against the r
 | ------------------------------------- | ----: | -------------- |
 | `Domain.UnitTests`                    | 32 | Invariants (six-digit ids, price precision, stock range); a failed update leaves no partial changes; the stock rule at its edges, including deltas that would overflow naive arithmetic. |
 | `Application.UnitTests`               | 55 | Use-case orchestration: validation first, no id consumed by invalid requests, version checks, conflicts mapped to 409/412, stock errors carry the available quantity; validators at their boundaries. |
-| `Api.IntegrationTests`                | 96 | Real HTTP against **real PostgreSQL and Redis** (Testcontainers). Every endpoint and the problem-details contract. **Concurrency:** 60 parallel orders on 25 units → exactly 25 succeed; no lost updates; two API instances never produce a duplicate id. **Cache:** hits, invalidation visible across replicas, 404s not cached, works with Redis down. **Security:** 30-case role × operation matrix; missing, expired, foreign and forged tokens; anonymous probes. **Rate limiting:** per user, stricter for writes, `Retry-After`. |
+| `Api.IntegrationTests`                | 103 | Real HTTP against **real PostgreSQL and Redis** (Testcontainers). Every endpoint and the problem-details contract. **Concurrency:** 60 parallel orders on 25 units → exactly 25 succeed; no lost updates; two API instances never produce a duplicate id. **Cache:** hits, invalidation visible across replicas, 404s not cached, works with Redis down. **Security:** token endpoint (valid, invalid, missing, throttled, failed attempts adding up across two replicas); 30-case role × operation matrix; missing, expired, foreign and forged tokens; anonymous probes. **Rate limiting:** per user, stricter for writes, `Retry-After`. |
 | `Api.AcceptanceTests` (BDD, Reqnroll) | 10 | Gherkin scenarios from the user's point of view (`Features/*.feature`). |
 | `Mcp.UnitTests`                       | 12 | MCP tools → API contract, token caching (fake clock, concurrent callers), API errors surfaced to the assistant. |
-| Frontend (Vitest)                     | 63 | API client contract (URLs, `If-Match`), error normalisation, store (no duplicate requests, no flicker, background refresh paused in hidden tabs), auth (role → permission mapping, guard, interceptor never leaks the token to other origins), dialogs (validation, server field errors, 412 conflict + reload), role-specific UI, paginator, toasts. |
+| Frontend (Vitest)                     | 70 | API client contract (URLs, `If-Match`, cache bypass after own changes), error normalisation, store (no duplicate requests, no flicker, background refresh paused in hidden tabs), auth (login against the token endpoint, session restore and expiry, role → permission mapping, guard, interceptor never leaks the token to other origins), login page (safe `returnUrl`, 401/429 messages), dialogs (validation, server field errors, 412 conflict + reload), role-specific UI, paginator, toasts. |
 | Load (k6, in cluster)                 | 6 scenarios | smoke, load (SLO thresholds), stress, spike, **stock consistency across replicas**, rate limiting. See the [results](docs/load-test-results.md). |
 
 CI (`.github/workflows/ci.yml`) runs:
@@ -171,7 +181,7 @@ CI (`.github/workflows/ci.yml`) runs:
 | EF Core code-first migrations                               | `backend/ProductManagement.Infrastructure/Persistence/Migrations` (generated by `dotnet ef`), applied by a Kubernetes Job |
 | Database seeding                                            | Categories via `HasData`; sample products via `UseSeeding`/`UseAsyncSeeding` |
 | Angular frontend; reflects changes made through the API     | `frontend/`: every endpoint used; refetch after changes + background refresh ([ADR 0007](docs/adr/0007-frontend-state.md)) |
-| Unit tests for various scenarios                            | 99 backend unit tests + 63 frontend tests (plus 106 integration and acceptance tests) |
+| Unit tests for various scenarios                            | 99 backend unit tests + 70 frontend tests (plus 113 integration and acceptance tests) |
 | *Optional:* BDD tests                                       | `ProductManagement.Api.AcceptanceTests` (Reqnroll / Gherkin) |
 | Documentation for running locally                           | This README and [`docs/`](docs) |
 
@@ -193,12 +203,13 @@ ProductManagement.Mcp ──(HTTP)──► the API, through the gateway
 | `Domain`         | `Product`, `Category`, invariants, `ProductRules` (single source of limits), the stock rule as an expression. No dependencies. |
 | `Application`    | Use cases (`ProductQueryService`, `ProductCommandService`), contracts, FluentValidation, `Result`/`Error`, ports (`IProductRepository`, `IProductQueries`, `IProductIdGenerator`, `IUnitOfWork`). |
 | `Infrastructure` | `DbContext`, configurations, migrations, repositories and queries, sequence-based id generator, **Redis cache decorator**, seeding, health checks. |
-| `Api`            | Thin controllers, HTTP mapping (status codes, ETag/If-Match, problem details), **authentication, authorization policies, rate limiting**, OpenAPI, health endpoints, the `migrate` command. |
+| `Api`            | Thin controllers, HTTP mapping (status codes, ETag/If-Match, problem details), **token endpoint, JWT verification, authorization policies, rate limiting**, OpenAPI, health endpoints, the `migrate` and `hash-secret` commands. |
 | `Mcp`            | MCP server for AI assistants; a client of the HTTP API. |
 
 A request end to end (`PUT /api/products/{id}`):
 
-1. **Gateway:** checks the per-IP limit and picks the least busy API replica.
+1. **Gateway:** checks the per-IP limit and picks the least busy API replica (reads may be answered from its
+   1 s microcache).
 2. **API pipeline:** validates the JWT, applies the per-user limit (stricter for writes) and checks the
    `products:write` permission.
 3. **Controller:** parses `If-Match` and calls the use case. It has no other logic.
@@ -220,7 +231,8 @@ A request end to end (`PUT /api/products/{id}`):
 
 ```
 src/app/
-  core/       auth (OIDC, guard, interceptor), http (ApiError + interceptor), config, notifications
+  core/       auth (session, guard, interceptor), http (ApiError + interceptor), config, notifications
+  features/auth/login/  sign-in page
   shared/     forms (validators, messages), models, ui (icon, paginator, toasts, confirm dialog)
   features/products/
     data-access/  ProductsApi, CategoriesApi, ProductsStore (signals + rxResource), models
@@ -234,10 +246,12 @@ Angular CDK for accessible dialogs and menus ([ADR 0013](docs/adr/0013-ui-tailwi
 
 ## API reference
 
-Base path `/api`. Every endpoint requires a bearer token (see [Security](#security)). The full schema is in Swagger.
+Base path `/api`. Every endpoint except the token endpoint requires a bearer token (see [Security](#security)). The
+full schema is in Swagger.
 
 | Method | Path                                              | Permission       | Success                        | Errors             |
 | ------ | ------------------------------------------------- | ---------------- | ------------------------------ | ------------------ |
+| POST   | `/auth/token` `{ clientId, clientSecret }`        | anonymous        | 200 `{ accessToken, tokenType, expiresIn }` | 400, 401, 429 |
 | GET    | `/products?page=&pageSize=`                       | `products:read`  | 200 `PagedResponse<Product>`   | 400                |
 | GET    | `/products/{id}`                                  | `products:read`  | 200 `Product` + `ETag`         | 404                |
 | GET    | `/products/search?name=&page=&pageSize=`          | `products:read`  | 200 `PagedResponse<Product>`   | 400                |
@@ -278,7 +292,9 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
 | `product.stock_limit_exceeded`    | 409    | stock would exceed 1,000,000 |
 | `product.concurrent_modification` | 409    | changed between read and write (no `If-Match` sent) |
 | `product.version_mismatch`        | 412    | `If-Match` no longer matches: reload and retry |
+| `invalid_client`                  | 401    | wrong client id or secret (deliberately not saying which) |
 | `rate_limited`                    | 429    | see `Retry-After` |
+| `too_many_failed_attempts`        | 429    | too many failed sign-ins from this IP; see `Retry-After` |
 | `http_<status>`                   | any    | framework errors: `http_401`, `http_403`, `http_404` (unknown route), ... |
 | `internal_error`                  | 500    | details only in the logs (correlate with `traceId`) |
 
@@ -288,9 +304,10 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
 
 | Concern        | How |
 | -------------- | --- |
-| Authentication | Keycloak (OIDC). The browser uses Authorization Code + PKCE (`oidc-client-ts`). The API validates the JWT signature, issuer, audience and lifetime, and never sees passwords ([ADR 0009](docs/adr/0009-authentication-authorization.md)). |
+| Authentication | The API issues HS256 JWTs to registered consumers at `POST /api/auth/token` and verifies signature, algorithm, issuer, audience and lifetime on every request. Consumer secrets are stored only as PBKDF2 hashes; unknown client and wrong secret are indistinguishable; one signing key (Kubernetes Secret) for all replicas ([ADR 0009](docs/adr/0009-authentication-authorization.md)). |
 | Authorization  | Permission policies (`products:read`, `stock:write`, `products:write`) mapped from roles (`viewer`, `stock-clerk`, `manager`) in one place. Secure by default: an endpoint without a policy still requires a signed-in user. The UI hides what a role can't do, and the API enforces it. |
-| Machine access | The MCP server uses its own service account (client credentials) with only the `stock-clerk` role. |
+| Machine access | The MCP server is its own consumer (`mcp-server`) with only the `stock-clerk` role. |
+| Brute force    | Failed sign-ins are counted per IP in Redis across all replicas: 10 per minute, then `429` even with the right secret. |
 | Rate limiting  | The gateway limits per IP and the API per user (stricter for writes); both answer `429` + `Retry-After` ([ADR 0010](docs/adr/0010-rate-limiting.md)). |
 | Network        | NetworkPolicies: the database and cache are reachable only from the API (and the migration Job); the API and web app only from the gateway. |
 | Containers     | Non-root, read-only root filesystem where possible, no capabilities, no privilege escalation, `RuntimeDefault` seccomp, resource limits. |
@@ -304,7 +321,11 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
 * **Redis cache:** cache-aside with generation-based invalidation, shared by all replicas, fails open
   ([ADR 0008](docs/adr/0008-redis-cache.md)).
 * **nginx gateway:** per-request balancing over the API's headless Service (new replicas are picked up within 5 s),
-  edge cache for the bundles, gzip, keep-alive pools ([ADR 0012](docs/adr/0012-gateway.md)).
+  edge cache for the bundles, **1 s microcache for API reads** (keyed per token, bypassed after the user's own
+  changes; 38 % of product GETs served by nginx in the load test), gzip, keep-alive pools
+  ([ADR 0012](docs/adr/0012-gateway.md)).
+* **Two cache layers, two jobs:** nginx absorbs identical requests within a second; Redis is shared, invalidated
+  on every write and keeps entries for minutes.
 * **Load test highlights** ([full results](docs/load-test-results.md)):
   * p95 of **3 ms** at 150 req/s with 2 replicas;
   * **0 errors in 255k requests** up to ~1,000 req/s, on a single-node 4-vCPU cluster;
@@ -341,7 +362,7 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 | [0006](docs/adr/0006-postgresql.md) | PostgreSQL, tested against the real engine |
 | [0007](docs/adr/0007-frontend-state.md) | Frontend state with signals and `rxResource` |
 | [0008](docs/adr/0008-redis-cache.md) | Redis read cache with generation-based invalidation |
-| [0009](docs/adr/0009-authentication-authorization.md) | OIDC authentication and permission-based RBAC |
+| [0009](docs/adr/0009-authentication-authorization.md) | API-issued JWTs for registered consumers, permission-based RBAC |
 | [0010](docs/adr/0010-rate-limiting.md) | Rate limiting in two layers |
 | [0011](docs/adr/0011-kubernetes-deployment.md) | Kubernetes deployment, one manifest per project |
 | [0012](docs/adr/0012-gateway.md) | nginx gateway in front of the application |
@@ -361,7 +382,8 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 * All list endpoints are paged (default 20, maximum 100).
 * Categories are reference data, seeded by the migration and read-only through the API.
 * Deletion is a hard delete. Ids are never reused.
-* Three roles cover the business (`viewer`, `stock-clerk`, `manager`). Users are managed in the identity provider.
+* Three roles cover the business (`viewer`, `stock-clerk`, `manager`). The set of callers is small and known, so
+  consumers live in configuration rather than in a user database or an external identity provider.
 
 ---
 
@@ -376,7 +398,9 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 | Global cache generation (any write invalidates all cached reads) | Simple and race-free across replicas. It costs hit rate under heavy writes, as the load tests measured. |
 | In-memory API rate limiter | Fairness per replica with no extra network hop. Global quotas would need Redis; the gateway provides the coarse cluster-wide limit. |
 | Real PostgreSQL and Redis in tests (Docker required) | In-memory fakes would hide exactly the behaviour under test. |
-| Keycloak in dev mode inside the cluster | One-command local setup. Production uses a managed or production-mode identity provider. |
+| The API issues its own tokens (no identity provider) | One API and a handful of known callers: an IdP would add a component without solving a problem here. HS256 with one shared key is the simplest secure option while only the API verifies tokens ([0009](docs/adr/0009-authentication-authorization.md)). |
+| Stateless JWTs (no revocation list) | No session store; a 1-hour lifetime and key rotation bound the risk. A `jti` deny-list in Redis is the next step if needed. |
+| 1 s nginx microcache | Up to 1 s of staleness for repeated reads, in exchange for absorbing bursts; never shared between tokens and bypassed after the user's own changes. |
 | Polling instead of push in the UI | Works across replicas with no extra infrastructure, at the cost of up to 15 s of staleness. |
 
 ---
@@ -396,8 +420,9 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 * **Secrets** from a secret manager (External Secrets, Vault or Sealed Secrets) instead of values in the manifests.
 * **TLS** at the edge (cert-manager) with HSTS, and a Content-Security-Policy (which needs Angular's
   `inlineCritical` turned off).
-* **Managed PostgreSQL** (or CloudNativePG) with backups, PgBouncer and read replicas; Keycloak in production mode
-  with its own database.
+* **Managed PostgreSQL** (or CloudNativePG) with backups, PgBouncer and read replicas.
+* **Preserve client IPs** at the load balancer (`externalTrafficPolicy: Local` / PROXY protocol) so per-IP limits
+  apply per caller; consider RS256 + JWKS if other services need to verify tokens; a `jti` deny-list for revocation.
 * **Observability:** OpenTelemetry traces and metrics (ASP.NET Core, EF Core, Npgsql, Redis), with dashboards and
   alerts on the SLOs used by the load tests.
 * A **HorizontalPodAutoscaler** for the API, once the database has headroom.
@@ -422,7 +447,7 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 │   ├── ProductManagement.{Domain,Application,Mcp}.UnitTests/
 │   ├── ProductManagement.Api.IntegrationTests/ · ProductManagement.Api.AcceptanceTests/
 │   ├── ProductManagement.Testing/            # shared test infrastructure
-│   └── deploy/                               # kubernetes.yaml + deploy.sh (API, PostgreSQL, Redis, Keycloak)
+│   └── deploy/                               # kubernetes.yaml + deploy.sh (API, PostgreSQL, Redis, auth secrets)
 ├── frontend/                                 # Angular workspace (its own repository in real life)
 │   ├── Dockerfile · nginx.conf               # web image (static files)
 │   ├── gateway/                              # nginx gateway image (Dockerfile, config template)
@@ -440,8 +465,8 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 | -------- | ----- |
 | Backend  | .NET 10, ASP.NET Core, EF Core 10, Npgsql, FluentValidation, StackExchange.Redis, JWT bearer, rate limiting, OpenAPI + Swagger UI |
 | Data     | PostgreSQL 18, Redis 8 |
-| Identity | Keycloak 26 (OIDC) |
-| Frontend | Angular 22 (standalone, zoneless, signals), Tailwind CSS 4, Angular CDK, oidc-client-ts, Vitest, ESLint, Prettier |
+| Security | JWT (HS256) issued by the API, PBKDF2 secret hashes, ASP.NET Core authorization and rate limiting |
+| Frontend | Angular 22 (standalone, zoneless, signals), Tailwind CSS 4, Angular CDK, Vitest, ESLint, Prettier |
 | AI       | Model Context Protocol C# SDK |
 | Testing  | xUnit v3 (Microsoft Testing Platform), Shouldly, NSubstitute, Testcontainers, Respawn, Reqnroll, k6 |
 | Delivery | Docker, Kubernetes (Docker Desktop / MicroK8s), nginx, GitHub Actions |

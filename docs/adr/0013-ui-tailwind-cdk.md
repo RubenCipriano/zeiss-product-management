@@ -19,7 +19,6 @@ requested, without giving up accessibility (focus management, keyboard navigatio
 
 ## Consequences
 
-* Smaller bundles: initial 121 kB → 91 kB gzip before sign-in support (107 kB with `oidc-client-ts`); the product
-  page went from 72 kB to 40 kB.
+* Smaller bundles: initial 121 kB → 91 kB gzip; the product page went from 72 kB to 40 kB.
 * We own a few components that Material provided (paginator, toasts). They are small and covered by tests.
 * Styling is co-located with markup; reviewers see the design in the template without jumping to SCSS files.

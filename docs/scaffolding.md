@@ -104,7 +104,7 @@ Then, from `frontend/`:
 ng add @angular/material      # theme in styles.scss, fonts in index.html (later replaced by Tailwind + CDK)
 ng add angular-eslint         # eslint.config.js and the `ng lint` target
 ng add tailwindcss            # src/tailwind.css, .postcssrc.json, angular.json styles
-ng generate environments      # environment.ts / environment.development.ts + fileReplacements
+ng generate environments      # used for the Keycloak URLs; removed again with Keycloak
 
 # Building blocks (CLI conventions: Angular 22 file naming, OnPush by default, matching .spec.ts files)
 ng g interceptor core/http/api-error
@@ -120,6 +120,7 @@ ng g component   shared/ui/confirm-dialog
 ng g service     core/auth/auth
 ng g guard       core/auth/auth --functional
 ng g interceptor core/auth/auth
+ng g component   features/auth/login
 ```
 
 ### What was changed after generation
@@ -129,7 +130,7 @@ ng g interceptor core/auth/auth
 | `app.ts` / `app.html` (welcome page) | Replaced with the application shell (toolbar + `<router-outlet>`).                                     |
 | `app.routes.ts` (empty)            | `/products` lazy-loaded, redirects for `''` and unknown paths.                                            |
 | `styles.scss` (Material theme)     | Removed; design tokens and primitives in `src/tailwind.css`.                                                |
-| `app.config.ts`                    | App initializer that completes the OIDC sign-in, `provideHttpClient(withFetch(), withInterceptors([authInterceptor, apiErrorInterceptor]))`, Material defaults (later removed) (outlined fields, Material Symbols icons), EUR currency. |
+| `app.config.ts`                    | Router input binding (login `returnUrl`), `provideHttpClient(withFetch(), withInterceptors([authInterceptor, apiErrorInterceptor]))`, Material defaults (later removed) (outlined fields, Material Symbols icons), EUR currency. |
 | `angular.json`                     | `proxyConfig` for `ng serve` (`/api` → `http://localhost:5080`).                                          |
 | `package.json`                     | `lint`, `test:ci`, `format`, `format:check` scripts. `engines` pins the supported Node versions.          |
 | Generated `*.spec.ts` ("should create") | Replaced with behaviour-focused tests (HTTP contract, store behaviour, dialogs, list).               |
