@@ -1,0 +1,114 @@
+# Gateway: the single entry point. Everything the browser needs comes through here, from one origin:
+#   /api/*   -> API replicas (per-request load balancing, rate limiting)
+#   /auth/*  -> identity provider (Keycloak)
+#   /*       -> web (static Angular app), with an edge cache for the immutable bundles
+#
+# ${VARIABLES} are filled from the container environment at startup (see Dockerfile).
+
+# Kubernetes DNS, taken from /etc/resolv.conf (NGINX_ENTRYPOINT_LOCAL_RESOLVERS). Names are re-resolved every
+# 5 s, so API replicas added or removed by `kubectl scale` are picked up without restarting the gateway.
+resolver ${NGINX_LOCAL_RESOLVERS} valid=5s ipv6=off;
+resolver_timeout 2s;
+
+# The API's headless Service returns one DNS record per ready pod; `resolve` keeps the list current and
+# least_conn sends each request to the replica with the fewest in-flight requests.
+upstream api {
+  zone api 64k;
+  least_conn;
+  server ${API_UPSTREAM} resolve;
+  keepalive 64;
+}
+
+upstream web {
+  zone web 64k;
+  server ${WEB_UPSTREAM} resolve;
+  keepalive 16;
+}
+
+upstream identity {
+  zone identity 64k;
+  server ${IDENTITY_UPSTREAM} resolve;
+  keepalive 16;
+}
+
+# Per-client-IP rate limit for the API (coarse protection in front of the API's own per-user limits).
+limit_req_zone $binary_remote_addr zone=api_per_ip:10m rate=${GATEWAY_RATE_LIMIT_RPS}r/s;
+limit_req_status 429;
+limit_req_log_level warn;
+
+# Edge cache for the web app's hashed static files.
+proxy_cache_path /tmp/static-cache levels=1:2 keys_zone=static_cache:10m max_size=256m inactive=7d use_temp_path=off;
+
+map $http_upgrade $connection_upgrade {
+  default upgrade;
+  ''      '';
+}
+
+server {
+  listen 8080;
+  server_name _;
+
+  client_max_body_size 1m;
+
+  gzip on;
+  gzip_comp_level 5;
+  gzip_min_length 1024;
+  gzip_proxied any;
+  gzip_vary on;
+  gzip_types text/css application/javascript application/json application/problem+json image/svg+xml;
+
+  # Security headers for everything served through the gateway.
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+  proxy_http_version 1.1;
+  proxy_set_header Connection "";
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header X-Forwarded-Host $host;
+  proxy_set_header X-Forwarded-Port $server_port;
+  proxy_connect_timeout 3s;
+  proxy_read_timeout 30s;
+  # A replica that fails or times out before sending a response is retried on another one (idempotent methods only).
+  proxy_next_upstream error timeout http_502 http_503;
+  proxy_next_upstream_tries 2;
+
+  location = /healthz {
+    access_log off;
+    default_type text/plain;
+    return 200 "ok\n";
+  }
+
+  # ^~ : prefix matches win over the static-file regex below (e.g. /auth/resources/*.css belongs to Keycloak).
+  location ^~ /api/ {
+    limit_req zone=api_per_ip burst=${GATEWAY_RATE_LIMIT_BURST} nodelay;
+    proxy_pass http://api;
+  }
+
+  location ^~ /auth/ {
+    proxy_pass http://identity;
+    proxy_buffer_size 128k;
+    proxy_buffers 4 256k;
+    proxy_busy_buffers_size 256k;
+  }
+
+  # Hashed bundles: served from the edge cache after the first request.
+  location ~* \.(?:js|css|woff2?|ico|svg|png)$ {
+    proxy_pass http://web;
+    proxy_cache static_cache;
+    proxy_cache_valid 200 7d;
+    proxy_cache_use_stale error timeout updating;
+    proxy_cache_lock on;
+    add_header X-Cache-Status $upstream_cache_status always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  }
+
+  location / {
+    proxy_pass http://web;
+  }
+}

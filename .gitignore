@@ -7,3 +7,6 @@ Thumbs.db
 
 # Local environment overrides for docker compose
 .env
+
+# Local cluster credentials (scripts/cluster-up.sh)
+.kube/

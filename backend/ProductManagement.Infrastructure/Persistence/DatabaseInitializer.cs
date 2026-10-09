@@ -40,11 +40,37 @@ public static partial class DatabaseInitializer
         var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>()
             .CreateLogger(typeof(DatabaseInitializer));
 
+        await WaitForDatabaseAsync(context, logger, cancellationToken);
+
         LogApplyingMigrations(logger);
         await context.Database.MigrateAsync(cancellationToken);
         await scope.ServiceProvider.GetRequiredService<ICatalogCache>().InvalidateAsync();
         LogDatabaseReady(logger);
     }
+
+    /// <summary>
+    /// In Kubernetes the migration Job can start before PostgreSQL accepts connections; wait for it instead of failing.
+    /// </summary>
+    private static async Task WaitForDatabaseAsync(
+        ProductManagementDbContext context,
+        ILogger logger,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 30;
+        for (var attempt = 1; !await context.Database.CanConnectAsync(cancellationToken); attempt++)
+        {
+            if (attempt == maxAttempts)
+            {
+                throw new InvalidOperationException($"The database is still unreachable after {maxAttempts} attempts.");
+            }
+
+            LogWaitingForDatabase(logger, attempt, maxAttempts);
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+        }
+    }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Waiting for the database (attempt {Attempt} of {MaxAttempts})")]
+    private static partial void LogWaitingForDatabase(ILogger logger, int attempt, int maxAttempts);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Applying database migrations")]
     private static partial void LogApplyingMigrations(ILogger logger);

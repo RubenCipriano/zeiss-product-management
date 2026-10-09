@@ -1,7 +1,10 @@
+# Web image: the compiled Angular app served by unprivileged nginx.
+# Build from this folder:  docker build -t product-management/web:local .
+
 FROM node:24-alpine AS build
 WORKDIR /app
 
-# Install dependencies in their own layer so they are cached until the lockfile changes.
+# Dependencies in their own layer, cached until the lockfile changes.
 COPY package.json package-lock.json ./
 RUN npm ci
 

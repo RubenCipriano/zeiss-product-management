@@ -3,3 +3,5 @@ dist
 .angular
 .vscode
 coverage
+gateway
+deploy

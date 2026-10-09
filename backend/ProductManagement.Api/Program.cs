@@ -63,7 +63,17 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
 const string MigrateCommand = "migrate";
 if (args.Contains(MigrateCommand, StringComparer.OrdinalIgnoreCase))
 {
-    await app.Services.MigrateDatabaseAsync();
+    try
+    {
+        await app.Services.MigrateDatabaseAsync();
+    }
+    catch (Exception exception)
+    {
+        // Exit cleanly with a failure code so the Job controller retries it.
+        app.Logger.LogCritical(exception, "Database migration failed");
+        Environment.ExitCode = 1;
+    }
+
     return;
 }
 

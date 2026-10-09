@@ -35,7 +35,7 @@ jobs:
       - name: Build (warnings are errors)
         run: dotnet build ProductManagement.sln --configuration Release --no-restore
 
-      # Integration and acceptance tests start PostgreSQL with Testcontainers; Docker is available on the runner.
+      # Integration and acceptance tests start PostgreSQL and Redis with Testcontainers (Docker is on the runner).
       - name: Test
         run: dotnet test --solution ProductManagement.sln --configuration Release --no-build
 
@@ -60,11 +60,49 @@ jobs:
       - run: npm run test:ci
       - run: npm run build
 
-  containers:
-    name: Container images
+  manifests:
+    name: Kubernetes manifests
     runs-on: ubuntu-latest
-    needs: [backend, frontend]
     steps:
       - uses: actions/checkout@v7
-      - name: Build images
-        run: docker compose build
+      - name: Validate against the Kubernetes schemas
+        run: |
+          docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:v0.7.0 \
+            -strict -summary -kubernetes-version 1.34.0 \
+            /work/backend/deploy/kubernetes.yaml /work/frontend/deploy/kubernetes.yaml
+
+  e2e:
+    name: Deploy to MicroK8s + smoke test
+    runs-on: ubuntu-latest
+    needs: [backend, frontend, manifests]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install MicroK8s
+        run: |
+          sudo snap install microk8s --classic --channel=1.34/stable
+          sudo microk8s status --wait-ready --timeout 300
+          sudo microk8s enable dns hostpath-storage registry
+          sudo microk8s kubectl -n container-registry rollout status deployment/registry --timeout=300s
+          mkdir -p .kube && sudo microk8s config > .kube/microk8s
+          echo "KUBECONFIG=$PWD/.kube/microk8s" >> "$GITHUB_ENV"
+
+      # Each project deploys itself, exactly as it would from its own repository.
+      - name: Deploy backend
+        run: backend/deploy/deploy.sh
+
+      - name: Deploy frontend
+        run: frontend/deploy/deploy.sh
+
+      - name: Smoke test (k6, in cluster)
+        run: load-tests/run.sh smoke
+
+      - name: Stock consistency under concurrent load (k6, in cluster)
+        run: load-tests/run.sh stock-consistency
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n product-management get pods -o wide
+          kubectl -n product-management get events --sort-by=.lastTimestamp | tail -50
+          kubectl -n product-management logs deployment/api --tail=200 || true
