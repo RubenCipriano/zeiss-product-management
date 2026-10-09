@@ -175,6 +175,9 @@ data:
   RateLimiting__WritesPerSecond: "10"
   RateLimiting__WriteBurst: "20"
   RateLimiting__TokenRequestsPerMinute: "20"
+  # Failed sign-ins per client IP per minute, counted cluster-wide in Redis.
+  SignInThrottle__MaxFailures: "10"
+  SignInThrottle__Window: "00:01:00"
 ---
 # ------------------------------------------------------------------------------------------------- PostgreSQL
 apiVersion: v1

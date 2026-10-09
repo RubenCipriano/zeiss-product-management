@@ -84,6 +84,25 @@ public sealed class TokenEndpointTests(ApiFixture fixture) : ApiTestBase(fixture
         statuses.Skip(3).ShouldAllBe(status => status == HttpStatusCode.TooManyRequests);
     }
 
+    [Fact]
+    public async Task FailedAttempts_AreCountedAcrossReplicas_AndBlockTheCallerEvenWithTheRightSecret()
+    {
+        var settings = new Dictionary<string, string> { ["SignInThrottle:MaxFailures"] = "3" };
+        using var replicaA = Environment.CreateClientForInstanceWith(settings, role: null);
+        using var replicaB = Environment.CreateClientForInstanceWith(settings, role: null);
+
+        (await RequestTokenAsync(replicaA, TestTokens.ConsumerId, "guess-1")).Dispose();
+        (await RequestTokenAsync(replicaA, TestTokens.ConsumerId, "guess-2")).Dispose();
+        (await RequestTokenAsync(replicaB, TestTokens.ConsumerId, "guess-3")).Dispose();
+
+        // Three failures in total, spread over two replicas: the caller is now blocked everywhere.
+        using var blocked = await RequestTokenAsync(replicaB, TestTokens.ConsumerId, TestTokens.ConsumerSecret);
+
+        blocked.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+        blocked.Headers.RetryAfter.ShouldNotBeNull();
+        (await ReadProblemAsync(blocked)).ErrorCode.ShouldBe("too_many_failed_attempts");
+    }
+
     private static Task<HttpResponseMessage> RequestTokenAsync(ProductApiClient client, string clientId, string secret) =>
         client.Http.PostAsJsonAsync("api/auth/token", new { clientId, clientSecret = secret }, CancellationToken);
 }
