@@ -41,6 +41,8 @@ export class StockAdjustDialog {
   ];
 
   protected readonly product = this.data.product;
+  /** One key for this dialog: resubmitting after an error can never apply the movement twice. */
+  private readonly idempotencyKey = crypto.randomUUID();
   protected readonly saving = signal(false);
   protected readonly errorMessage = signal<string | null>(null);
 
@@ -90,7 +92,7 @@ export class StockAdjustDialog {
     this.setSaving(true);
     this.errorMessage.set(null);
 
-    this.store.adjustStock(this.product, operation, quantity!).subscribe({
+    this.store.adjustStock(this.product, operation, quantity!, this.idempotencyKey).subscribe({
       next: (updated) => this.dialogRef.close(updated),
       error: (error: ApiError) => {
         this.setSaving(false);

@@ -27,6 +27,10 @@ import {
   StockAdjustDialog,
   StockAdjustDialogData,
 } from '../stock-adjust-dialog/stock-adjust-dialog';
+import {
+  StockHistoryDialog,
+  StockHistoryDialogData,
+} from '../stock-history-dialog/stock-history-dialog';
 import { StockStatus } from '../stock-status/stock-status';
 
 const FILTER_DEBOUNCE_MS = 300;
@@ -170,11 +174,18 @@ export class ProductList {
       );
   }
 
+  protected openHistory(product: Product): void {
+    this.dialog.open<void, StockHistoryDialogData, StockHistoryDialog>(StockHistoryDialog, {
+      data: { product },
+      backdropClass: 'dialog-backdrop',
+    });
+  }
+
   /** One-click +1 / -1. The API decides atomically whether the change is allowed. */
   protected quickAdjust(product: Product, operation: StockOperation): void {
     this.setPending(product.id, true);
     this.store
-      .adjustStock(product, operation, 1)
+      .adjustStock(product, operation, 1, crypto.randomUUID())
       .pipe(finalize(() => this.setPending(product.id, false)))
       .subscribe({ error: (error: ApiError) => this.notifications.error(error.message) });
   }

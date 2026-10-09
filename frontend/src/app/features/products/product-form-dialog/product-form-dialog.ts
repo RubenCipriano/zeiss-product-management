@@ -56,6 +56,8 @@ export class ProductFormDialog {
     inject<ProductFormDialogData>(DIALOG_DATA).product ?? null,
   );
   protected readonly isEdit = computed(() => this.editing() !== null);
+  /** One key for this dialog: resubmitting (e.g. after a network error) can never create a second product. */
+  private readonly idempotencyKey = crypto.randomUUID();
   protected readonly saving = signal(false);
   protected readonly errorMessage = signal<string | null>(null);
   /** Set when the product changed on the server since it was opened (HTTP 412). */
@@ -111,7 +113,9 @@ export class ProductFormDialog {
 
     const input = this.toInput();
     const product = this.editing();
-    const request$ = product ? this.store.update(product, input) : this.store.create(input);
+    const request$ = product
+      ? this.store.update(product, input)
+      : this.store.create(input, this.idempotencyKey);
 
     this.setSaving(true);
     this.errorMessage.set(null);

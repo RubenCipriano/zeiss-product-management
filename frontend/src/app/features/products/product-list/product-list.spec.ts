@@ -77,10 +77,10 @@ describe('ProductList', () => {
       .click();
     await fixture.whenStable();
 
-    expect(api.adjustStock).toHaveBeenCalledWith(product, 'remove', 1);
+    expect(api.adjustStock).toHaveBeenCalledWith(product, 'remove', 1, expect.any(String));
   });
 
-  it('offers only what a viewer may do: no create, edit, delete or stock actions', async () => {
+  it('offers only what a viewer may do: stock history, but no create, edit, delete or stock actions', async () => {
     api.query.mockReturnValue(of(aPage([aProduct({ name: 'Frame', stockQuantity: 5 })])));
 
     const fixture = await render(['products:read']);
@@ -89,7 +89,13 @@ describe('ProductList', () => {
     expect(element.textContent).toContain('Frame');
     expect(element.textContent).not.toContain('New product');
     expect(element.querySelector('button[aria-label="Remove one unit of Frame"]')).toBeNull();
-    expect(element.querySelector('button[aria-label="Actions for Frame"]')).toBeNull();
+
+    element.querySelector<HTMLButtonElement>('button[aria-label="Actions for Frame"]')!.click();
+    await fixture.whenStable();
+    const menu = [...document.querySelectorAll('[role=menuitem]')].map((item) =>
+      item.textContent!.trim(),
+    );
+    expect(menu).toEqual(['Stock history']);
   });
 
   it('lets a stock clerk change stock but not create products', async () => {

@@ -74,7 +74,7 @@ describe('ProductsStore', () => {
     api.query.mockReturnValue(of(aPage([updated, frame])));
     const calls = listRequests();
 
-    store.adjustStock(lens, 'remove', 1).subscribe();
+    store.adjustStock(lens, 'remove', 1, 'key').subscribe();
 
     expect(store.products()[0].stockQuantity).toBe(4);
     await settle();
@@ -105,7 +105,7 @@ describe('ProductsStore', () => {
     await settle();
     api.adjustStock.mockReturnValue(of({ ...lens, stockQuantity: 4 }));
 
-    store.adjustStock(lens, 'remove', 1).subscribe();
+    store.adjustStock(lens, 'remove', 1, 'key').subscribe();
     await settle();
 
     const tableRequests = api.query.mock.calls.filter(([query]) => query.pageSize !== 1);

@@ -60,7 +60,7 @@ describe('StockAdjustDialog', () => {
     await enterQuantity(fixture, 3);
     submit(fixture);
 
-    expect(store.adjustStock).toHaveBeenCalledWith(product, 'remove', 3);
+    expect(store.adjustStock).toHaveBeenCalledWith(product, 'remove', 3, expect.any(String));
     expect(dialogRef.close).toHaveBeenCalledWith(updated);
   });
 
@@ -92,6 +92,22 @@ describe('StockAdjustDialog', () => {
     ).toContain('Only 9 available.');
     expect(dialogRef.close).not.toHaveBeenCalled();
     expect(dialogRef.disableClose).toBe(false);
+  });
+
+  it('retries with the same idempotency key, so a retried change is never applied twice', async () => {
+    const fixture = await open();
+    store.adjustStock.mockReturnValueOnce(
+      throwError(() => new ApiError(0, 'network_error', 'Offline')),
+    );
+    store.adjustStock.mockReturnValueOnce(of({ ...product, stockQuantity: 6 }));
+
+    await enterQuantity(fixture, 3);
+    submit(fixture);
+    await fixture.whenStable();
+    submit(fixture);
+
+    const [first, second] = store.adjustStock.mock.calls;
+    expect(second[3]).toBe(first[3]);
   });
 
   it('does not call the API for an invalid quantity', async () => {

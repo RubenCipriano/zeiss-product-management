@@ -240,7 +240,7 @@
                   {{ product.updatedAt | date: 'short' }}
                 </td>
                 <td class="px-4 py-3 text-right">
-                  @if (auth.can('stock:write') || auth.can('products:write')) {
+                  @if (auth.can('products:read')) {
                     <button
                       type="button"
                       class="btn-icon"
@@ -251,6 +251,15 @@
                     </button>
                     <ng-template #actions>
                       <div class="menu" cdkMenu>
+                        <button
+                          type="button"
+                          class="menu-item"
+                          cdkMenuItem
+                          (cdkMenuItemTriggered)="openHistory(product)"
+                        >
+                          <app-icon name="history" class="text-slate-400" />
+                          Stock history
+                        </button>
                         @if (auth.can('stock:write')) {
                           <button
                             type="button"

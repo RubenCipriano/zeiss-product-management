@@ -87,13 +87,16 @@ describe('ProductFormDialog', () => {
     });
     await submit(fixture);
 
-    expect(store.create).toHaveBeenCalledWith({
-      name: 'Frame',
-      description: null,
-      price: 10.5,
-      stockQuantity: 3,
-      categoryId: 1,
-    });
+    expect(store.create).toHaveBeenCalledWith(
+      {
+        name: 'Frame',
+        description: null,
+        price: 10.5,
+        stockQuantity: 3,
+        categoryId: 1,
+      },
+      expect.any(String),
+    );
     expect(dialogRef.close).toHaveBeenCalledWith(created);
   });
 

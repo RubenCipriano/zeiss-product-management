@@ -60,6 +60,9 @@ const ICONS = {
   ban: { paths: ['m4.9 4.9 14.2 14.2'], circles: [[12, 12, 10]] },
   trendingDown: { paths: ['M16 17h6v-6', 'm22 17-8.5-8.5-5 5L2 7'] },
   arrowUpDown: { paths: ['m21 16-4 4-4-4', 'M17 20V4', 'm3 8 4-4 4 4', 'M7 4v16'] },
+  history: {
+    paths: ['M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8', 'M3 3v5h5', 'M12 7v5l4 2'],
+  },
   inbox: {
     paths: [
       'M22 12h-6l-2 3h-4l-2-3H2',

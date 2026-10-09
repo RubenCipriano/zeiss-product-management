@@ -3,7 +3,13 @@ import { inject, Service } from '@angular/core';
 import { Observable } from 'rxjs';
 import { API_BASE_URL } from '../../../core/config/api-config';
 import { PagedResponse } from '../../../shared/models/paged-response';
-import { Product, ProductInput, ProductQuery, StockOperation } from './product-models';
+import {
+  Product,
+  ProductInput,
+  ProductQuery,
+  StockMovement,
+  StockOperation,
+} from './product-models';
 
 /**
  * Typed client for the products endpoints. Stateless: it only maps calls to HTTP. Errors arrive as
@@ -49,8 +55,12 @@ export class ProductsApi {
     return this.http.get<Product>(`${this.baseUrl}/${id}`);
   }
 
-  create(input: ProductInput): Observable<Product> {
-    return this.http.post<Product>(this.baseUrl, input);
+  /**
+   * @param idempotencyKey one key per user action: if the request is retried (double click, network error, a retry
+   * reaching another server), the API applies it only once.
+   */
+  create(input: ProductInput, idempotencyKey: string): Observable<Product> {
+    return this.http.post<Product>(this.baseUrl, input, { headers: idempotent(idempotencyKey) });
   }
 
   /** Sends the version the user edited as `If-Match`: if someone else changed it meanwhile, the API answers 412. */
@@ -70,10 +80,29 @@ export class ProductsApi {
     product: Pick<Product, 'id'>,
     operation: StockOperation,
     quantity: number,
+    idempotencyKey: string,
   ): Observable<Product> {
     const action = operation === 'remove' ? 'decrement-stock' : 'add-to-stock';
-    return this.http.post<Product>(`${this.baseUrl}/${product.id}/${action}/${quantity}`, null);
+    return this.http.post<Product>(`${this.baseUrl}/${product.id}/${action}/${quantity}`, null, {
+      headers: idempotent(idempotencyKey),
+    });
   }
+
+  stockMovements(
+    productId: number,
+    page: number,
+    pageSize: number,
+  ): Observable<PagedResponse<StockMovement>> {
+    const params = new HttpParams().set('page', page).set('pageSize', pageSize);
+    return this.http.get<PagedResponse<StockMovement>>(
+      `${this.baseUrl}/${productId}/stock-movements`,
+      { params },
+    );
+  }
+}
+
+function idempotent(key: string): HttpHeaders {
+  return new HttpHeaders({ 'Idempotency-Key': key });
 }
 
 function ifMatch(version: number): HttpHeaders {

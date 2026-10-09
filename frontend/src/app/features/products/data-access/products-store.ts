@@ -133,8 +133,8 @@ export class ProductsStore {
     this.summaryResource.reload();
   }
 
-  create(input: ProductInput): Observable<Product> {
-    return this.api.create(input).pipe(tap(() => this.reload()));
+  create(input: ProductInput, idempotencyKey: string): Observable<Product> {
+    return this.api.create(input, idempotencyKey).pipe(tap(() => this.reload()));
   }
 
   update(product: Product, input: ProductInput): Observable<Product> {
@@ -145,9 +145,14 @@ export class ProductsStore {
     return this.api.delete(product).pipe(tap(() => this.reload()));
   }
 
-  adjustStock(product: Product, operation: StockOperation, quantity: number): Observable<Product> {
+  adjustStock(
+    product: Product,
+    operation: StockOperation,
+    quantity: number,
+    idempotencyKey: string,
+  ): Observable<Product> {
     return this.api
-      .adjustStock(product, operation, quantity)
+      .adjustStock(product, operation, quantity, idempotencyKey)
       .pipe(tap((updated) => this.applyChange(updated)));
   }
 

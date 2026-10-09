@@ -67,8 +67,28 @@ describe('ProductsApi', () => {
     ['remove', '/api/products/123456/decrement-stock/3'],
     ['add', '/api/products/123456/add-to-stock/3'],
   ] as const)('maps the %s stock operation to its endpoint', (operation, url) => {
-    api.adjustStock({ id: 123456 }, operation, 3).subscribe();
+    api.adjustStock({ id: 123456 }, operation, 3, 'key-1').subscribe();
 
-    httpTesting.expectOne({ method: 'POST', url });
+    const request = httpTesting.expectOne({ method: 'POST', url });
+    expect(request.request.headers.get('Idempotency-Key')).toBe('key-1');
+  });
+
+  it('sends the idempotency key on create', () => {
+    const input = { name: 'Frame', description: null, price: 10, stockQuantity: 1, categoryId: 2 };
+
+    api.create(input, 'key-2').subscribe();
+
+    const request = httpTesting.expectOne({ method: 'POST', url: '/api/products' });
+    expect(request.request.headers.get('Idempotency-Key')).toBe('key-2');
+  });
+
+  it("pages through a product's stock movements", () => {
+    api.stockMovements(123456, 2, 25).subscribe();
+
+    const request = httpTesting.expectOne(
+      (req) => req.url === '/api/products/123456/stock-movements',
+    );
+    expect(request.request.params.get('page')).toBe('2');
+    expect(request.request.params.get('pageSize')).toBe('25');
   });
 });

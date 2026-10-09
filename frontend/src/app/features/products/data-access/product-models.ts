@@ -44,6 +44,18 @@ export interface ProductQuery {
 
 export type StockOperation = 'remove' | 'add';
 
+export type StockMovementReason = 'InitialStock' | 'StockAdded' | 'StockRemoved' | 'Correction';
+
+/** One entry of a product's stock history. */
+export interface StockMovement {
+  id: number;
+  quantityChange: number;
+  stockAfter: number;
+  reason: StockMovementReason;
+  performedBy: string;
+  occurredAt: string;
+}
+
 /** Business limits, kept in line with `ProductRules` in the backend (the API re-validates anyway). */
 export const PRODUCT_LIMITS = {
   nameMaxLength: 200,
