@@ -22,7 +22,7 @@ public interface IProductCommandService
 
     Task<Result> DeleteAsync(int id, uint? expectedVersion, CancellationToken cancellationToken);
 
-    Task<Result<ProductResponse>> RemoveStockAsync(int id, int quantity, CancellationToken cancellationToken);
+    Task<Result<ProductResponse>> DecrementStockAsync(int id, int quantity, CancellationToken cancellationToken);
 
-    Task<Result<ProductResponse>> AddStockAsync(int id, int quantity, CancellationToken cancellationToken);
+    Task<Result<ProductResponse>> AddToStockAsync(int id, int quantity, CancellationToken cancellationToken);
 }

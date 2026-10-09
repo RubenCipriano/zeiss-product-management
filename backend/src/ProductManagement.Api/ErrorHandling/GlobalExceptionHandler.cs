@@ -41,17 +41,18 @@ internal sealed partial class GlobalExceptionHandler(
             LogUnhandledException(exception, httpContext.Request.Method, httpContext.Request.Path);
         }
 
+        var problem = new ProblemDetails { Status = statusCode, Title = title };
+        if (statusCode >= StatusCodes.Status500InternalServerError)
+        {
+            problem.Extensions["errorCode"] = "internal_error";
+        }
+
         httpContext.Response.StatusCode = statusCode;
         return await problemDetailsService.TryWriteAsync(new ProblemDetailsContext
         {
             HttpContext = httpContext,
             Exception = exception,
-            ProblemDetails = new ProblemDetails
-            {
-                Status = statusCode,
-                Title = title,
-                Extensions = { ["errorCode"] = statusCode >= 500 ? "internal_error" : "bad_request" },
-            },
+            ProblemDetails = problem,
         });
     }
 

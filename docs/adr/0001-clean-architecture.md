@@ -35,7 +35,7 @@ Controllers only translate HTTP into a use-case call and a `Result` back into HT
 
 ## Consequences
 
-* Business rules can be unit-tested without a database or web host (85 unit tests).
+* Business rules can be unit-tested without a database or web host (87 unit tests).
 * Swapping the database or adding another delivery mechanism (gRPC, messaging) touches one layer.
 * Some mapping/indirection that a single-project CRUD app would not need. This is acceptable for a codebase meant to grow.
 * Request/response DTOs live in the Application layer and are reused by the API, so they are not duplicated.

@@ -124,6 +124,9 @@ public sealed class ProductsController(
         return result.IsSuccess ? NoContent() : Problem(result.Error);
     }
 
+    // {quantity} has no route constraint on purpose: a non-numeric value is a malformed input (400), whereas
+    // a non-numeric {id} simply does not identify a product (404).
+
     /// <summary>
     /// Removes <paramref name="quantity"/> units from stock. Atomic: fails with 409 instead of going below zero.
     /// </summary>
@@ -137,7 +140,7 @@ public sealed class ProductsController(
         int quantity,
         CancellationToken cancellationToken)
     {
-        var result = await productCommands.RemoveStockAsync(id, quantity, cancellationToken);
+        var result = await productCommands.DecrementStockAsync(id, quantity, cancellationToken);
         return result.IsSuccess ? OkWithEntityTag(result.Value) : Problem(result.Error);
     }
 
@@ -154,7 +157,7 @@ public sealed class ProductsController(
         int quantity,
         CancellationToken cancellationToken)
     {
-        var result = await productCommands.AddStockAsync(id, quantity, cancellationToken);
+        var result = await productCommands.AddToStockAsync(id, quantity, cancellationToken);
         return result.IsSuccess ? OkWithEntityTag(result.Value) : Problem(result.Error);
     }
 

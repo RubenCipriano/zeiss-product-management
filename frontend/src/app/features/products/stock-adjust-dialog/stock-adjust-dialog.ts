@@ -10,7 +10,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { ApiError } from '../../../core/http/api-error';
 import { integer } from '../../../shared/forms/validators';
 import { validationMessage } from '../../../shared/forms/validation-message';
-import { PRODUCT_LIMITS, Product, StockOperation } from '../data-access/product.models';
+import { PRODUCT_LIMITS, Product, StockOperation } from '../data-access/product-models';
 import { ProductsStore } from '../data-access/products-store';
 import { StockStatus } from '../stock-status/stock-status';
 
@@ -86,15 +86,21 @@ export class StockAdjustDialog {
     }
 
     const { operation, quantity } = this.form.getRawValue();
-    this.saving.set(true);
+    this.setSaving(true);
     this.errorMessage.set(null);
 
     this.store.adjustStock(this.product, operation, quantity!).subscribe({
       next: (updated) => this.dialogRef.close(updated),
       error: (error: ApiError) => {
-        this.saving.set(false);
+        this.setSaving(false);
         this.errorMessage.set(error.fieldError('quantity') ?? error.message);
       },
     });
+  }
+
+  /** While a request is in flight the dialog cannot be dismissed, so its outcome is never lost. */
+  private setSaving(saving: boolean): void {
+    this.saving.set(saving);
+    this.dialogRef.disableClose = saving;
   }
 }

@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using ProductManagement.Api.Http;
 using ProductManagement.Application.Categories;
+using ProductManagement.Application.Categories.Contracts;
 
 namespace ProductManagement.Api.Controllers;
 

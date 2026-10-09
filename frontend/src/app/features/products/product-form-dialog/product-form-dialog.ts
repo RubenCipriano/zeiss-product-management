@@ -12,7 +12,7 @@ import { ApiError } from '../../../core/http/api-error';
 import { integer, maxDecimals, notBlank } from '../../../shared/forms/validators';
 import { validationMessage } from '../../../shared/forms/validation-message';
 import { CategoriesApi } from '../data-access/categories-api';
-import { PRODUCT_LIMITS, Product, ProductInput } from '../data-access/product.models';
+import { PRODUCT_LIMITS, Product, ProductInput } from '../data-access/product-models';
 import { ProductsApi } from '../data-access/products-api';
 import { ProductsStore } from '../data-access/products-store';
 
@@ -126,7 +126,7 @@ export class ProductFormDialog {
     const product = this.editing();
     const request$ = product ? this.store.update(product, input) : this.store.create(input);
 
-    this.saving.set(true);
+    this.setSaving(true);
     this.errorMessage.set(null);
     request$.subscribe({
       next: (saved) => this.dialogRef.close(saved),
@@ -141,21 +141,21 @@ export class ProductFormDialog {
       return;
     }
 
-    this.saving.set(true);
+    this.setSaving(true);
     this.productsApi.getById(product.id).subscribe({
       next: (latest) => {
         this.editing.set(latest);
         this.fillForm(latest);
         this.conflict.set(false);
         this.errorMessage.set(null);
-        this.saving.set(false);
+        this.setSaving(false);
       },
       error: (error: ApiError) => this.handleError(error),
     });
   }
 
   private handleError(error: ApiError): void {
-    this.saving.set(false);
+    this.setSaving(false);
 
     if (error.status === 412) {
       this.conflict.set(true);
@@ -202,5 +202,11 @@ export class ProductFormDialog {
       stockQuantity: value.stockQuantity!,
       categoryId: value.categoryId!,
     };
+  }
+
+  /** While a request is in flight the dialog cannot be dismissed, so its outcome is never lost. */
+  private setSaving(saving: boolean): void {
+    this.saving.set(saving);
+    this.dialogRef.disableClose = saving;
   }
 }

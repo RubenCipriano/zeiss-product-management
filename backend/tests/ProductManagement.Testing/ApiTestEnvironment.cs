@@ -21,8 +21,6 @@ public sealed class ApiTestEnvironment : IAsyncDisposable
 
     public ProductManagementApiFactory Factory { get; }
 
-    public string ConnectionString => _database.ConnectionString;
-
     public static async Task<ApiTestEnvironment> StartAsync()
     {
         var database = new PostgresDatabase();

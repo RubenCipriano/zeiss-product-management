@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Net.Mime;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
@@ -41,7 +43,7 @@ internal static class ApiServiceCollectionExtensions
 
                 return new BadRequestObjectResult(problem)
                 {
-                    ContentTypes = { ApiControllerBase.ProblemJsonContentType },
+                    ContentTypes = { ApiControllerBase.ProblemJsonContentType, MediaTypeNames.Application.Json },
                 };
             };
         });
@@ -51,6 +53,12 @@ internal static class ApiServiceCollectionExtensions
             {
                 context.ProblemDetails.Instance ??=
                     $"{context.HttpContext.Request.Method} {context.HttpContext.Request.Path}";
+
+                // Every problem carries an errorCode. Framework-generated ones (unknown route, 405, 415, ...)
+                // get a generic "http_<status>" code; application errors set their own, more specific code.
+                context.ProblemDetails.Extensions.TryAdd(
+                    "errorCode",
+                    string.Create(CultureInfo.InvariantCulture, $"http_{context.ProblemDetails.Status ?? context.HttpContext.Response.StatusCode}"));
                 context.HttpContext.Features.Get<IHttpActivityFeature>()?.Activity
                     .SetTag("problem.status", context.ProblemDetails.Status);
             });

@@ -117,6 +117,15 @@ public sealed class ProductCrudTests(ApiFixture fixture) : ApiTestBase(fixture)
     }
 
     [Fact]
+    public async Task List_WithAPageNumberLargeEnoughToOverflowTheOffset_ReturnsBadRequestNotServerError()
+    {
+        using var response = await Api.ListAsync(page: int.MaxValue / 50, pageSize: 100);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        (await ReadProblemAsync(response)).Errors!.ShouldContainKey("page");
+    }
+
+    [Fact]
     public async Task List_WithInvalidPaging_ReturnsBadRequest()
     {
         using var response = await Api.ListAsync(page: 0, pageSize: 1000);

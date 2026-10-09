@@ -19,7 +19,8 @@ insufficient stock, version mismatch) easy to see and test.
   framework-generated errors, plus:
   * `errorCode`: a stable, machine-readable code (`validation_failed`, `product.not_found`,
     `product.insufficient_stock`, `product.stock_limit_exceeded`, `product.version_mismatch`,
-    `product.concurrent_modification`, `internal_error`);
+    `product.concurrent_modification`, `internal_error`; framework errors such as an unknown route get
+    `http_<status>`, e.g. `http_404`);
   * `errors`: field → messages (camelCase, matching the JSON the client sent);
   * extra context where useful (`requested`, `available`, `maximum` for stock conflicts).
 * Model-binding errors (malformed JSON, `page=abc`) are reshaped to the same format. The redundant "request field is

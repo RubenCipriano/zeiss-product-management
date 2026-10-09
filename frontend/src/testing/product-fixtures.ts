@@ -1,5 +1,5 @@
 import { PagedResponse } from '../app/shared/models/paged-response';
-import { Product } from '../app/features/products/data-access/product.models';
+import { Product } from '../app/features/products/data-access/product-models';
 
 /** Builds a valid product; tests override only what matters to them. */
 export function aProduct(overrides: Partial<Product> = {}): Product {

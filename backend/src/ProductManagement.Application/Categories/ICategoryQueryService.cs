@@ -1,3 +1,5 @@
+using ProductManagement.Application.Categories.Contracts;
+
 namespace ProductManagement.Application.Categories;
 
 public interface ICategoryQueryService

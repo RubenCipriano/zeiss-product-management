@@ -4,6 +4,7 @@ import {
   DOCUMENT,
   inject,
   InjectionToken,
+  linkedSignal,
   Service,
   signal,
 } from '@angular/core';
@@ -18,7 +19,7 @@ import {
   ProductInput,
   ProductQuery,
   StockOperation,
-} from './product.models';
+} from './product-models';
 import { ProductsApi } from './products-api';
 
 /**
@@ -52,12 +53,14 @@ export class ProductsStore {
     stream: ({ params }) => this.api.query(params),
   });
 
-  /** The last successfully loaded page (kept while a reload is in flight to avoid flicker). */
-  readonly page = computed<PagedResponse<Product>>(() =>
-    this.productsResource.hasValue()
-      ? this.productsResource.value()
-      : emptyPage(this.query().pageSize),
-  );
+  /**
+   * The last successfully loaded page. While a new query or a reload is in flight (or after it fails) the
+   * previous page stays on screen, so the table and paginator don't flash empty between requests.
+   */
+  readonly page = linkedSignal<PagedResponse<Product> | undefined, PagedResponse<Product>>({
+    source: () => (this.productsResource.hasValue() ? this.productsResource.value() : undefined),
+    computation: (current, previous) => current ?? previous?.value ?? emptyPage(DEFAULT_PAGE_SIZE),
+  }).asReadonly();
 
   readonly products = computed(() => this.page().items);
   readonly totalCount = computed(() => this.page().totalCount);
@@ -102,7 +105,7 @@ export class ProductsStore {
 
   adjustStock(product: Product, operation: StockOperation, quantity: number): Observable<Product> {
     return this.api
-      .adjustStock(product.id, operation, quantity)
+      .adjustStock(product, operation, quantity)
       .pipe(tap((updated) => this.applyChange(updated)));
   }
 

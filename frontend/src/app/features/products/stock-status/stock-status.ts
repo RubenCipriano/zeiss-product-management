@@ -1,5 +1,5 @@
 import { Component, computed, input } from '@angular/core';
-import { LOW_STOCK_THRESHOLD } from '../data-access/product.models';
+import { LOW_STOCK_THRESHOLD } from '../data-access/product-models';
 
 type StockLevel = 'out' | 'low' | 'ok';
 

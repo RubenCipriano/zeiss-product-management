@@ -1,7 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using ProductManagement.Application.Categories;
+using ProductManagement.Application.Categories.Abstractions;
 using ProductManagement.Application.Common.Persistence;
 using ProductManagement.Application.Products.Abstractions;
 using ProductManagement.Infrastructure.Categories;
@@ -11,7 +11,7 @@ using ProductManagement.Infrastructure.Products;
 
 namespace ProductManagement.Infrastructure;
 
-public static class DependencyInjection
+public static class InfrastructureServiceCollectionExtensions
 {
     public const string DatabaseHealthCheckTag = "ready";
 

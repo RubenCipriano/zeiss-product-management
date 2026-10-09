@@ -12,6 +12,8 @@ public sealed class QueryValidatorTests
     [InlineData(0, 20, false)]
     [InlineData(1, 0, false)]
     [InlineData(1, PageQuery.MaxPageSize + 1, false)]
+    [InlineData(PageQuery.MaxPage, PageQuery.MaxPageSize, true)]
+    [InlineData(PageQuery.MaxPage + 1, 1, false)] // would overflow the SQL OFFSET
     public void PageQuery_EnforcesPageAndPageSizeLimits(int page, int pageSize, bool isValid)
     {
         new PageQueryValidator().Validate(new PageQuery { Page = page, PageSize = pageSize }).IsValid.ShouldBe(isValid);

@@ -1,4 +1,6 @@
-namespace ProductManagement.Application.Categories;
+using ProductManagement.Application.Categories.Contracts;
+
+namespace ProductManagement.Application.Categories.Abstractions;
 
 /// <summary>
 /// Read-only access to categories (implemented with no-tracking queries).

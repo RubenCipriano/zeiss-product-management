@@ -58,7 +58,7 @@ describe('ProductsApi', () => {
     ['remove', '/api/products/123456/decrement-stock/3'],
     ['add', '/api/products/123456/add-to-stock/3'],
   ] as const)('maps the %s stock operation to its endpoint', (operation, url) => {
-    api.adjustStock(123456, operation, 3).subscribe();
+    api.adjustStock({ id: 123456 }, operation, 3).subscribe();
 
     httpTesting.expectOne({ method: 'POST', url });
   });

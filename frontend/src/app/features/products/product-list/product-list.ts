@@ -24,7 +24,7 @@ import {
   Product,
   ProductFilterKind,
   StockOperation,
-} from '../data-access/product.models';
+} from '../data-access/product-models';
 import { ProductsStore } from '../data-access/products-store';
 import {
   ProductFormDialog,

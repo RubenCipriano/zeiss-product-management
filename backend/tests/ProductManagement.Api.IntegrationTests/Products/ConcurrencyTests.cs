@@ -68,7 +68,7 @@ public sealed class ConcurrencyTests(ApiFixture fixture) : ApiTestBase(fixture)
     }
 
     [Fact]
-    public async Task ConcurrentEdits_WithIfMatch_TheSecondWriterIsToldToReload()
+    public async Task Update_WithAnETagMadeStaleByAnotherEdit_IsRejectedAndKeepsTheOtherEdit()
     {
         var original = await Api.CreateProductAsync(TestProducts.CreateRequest(name: "Original"));
         var etag = $"\"{original.Version}\"";

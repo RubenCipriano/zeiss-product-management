@@ -43,10 +43,12 @@ Content-Type: application/json
   "categoryId": 999
 }
 
-### Update a product (If-Match is optional; use the ETag from GET to enable the lost-update check)
+### Update a product
+# Optional lost-update protection: copy the ETag from "Get one product" and add it as a header, e.g.
+# If-Match: "1234"
+# A stale value is rejected with 412 Precondition Failed.
 PUT {{baseUrl}}/api/products/{{productId}}
 Content-Type: application/json
-If-Match: "0"
 
 {
   "name": "Single Vision Lens 1.5 (updated)",

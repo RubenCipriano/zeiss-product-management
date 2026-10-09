@@ -2,7 +2,6 @@ using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using ProductManagement.Api.Configuration;
 using ProductManagement.Application;
 using ProductManagement.Infrastructure;
-using InfrastructureRegistration = ProductManagement.Infrastructure.DependencyInjection;
 using ProductManagement.Infrastructure.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -35,7 +34,7 @@ app.MapControllers();
 app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
 app.MapHealthChecks("/health/ready", new HealthCheckOptions
 {
-    Predicate = check => check.Tags.Contains(InfrastructureRegistration.DatabaseHealthCheckTag),
+    Predicate = check => check.Tags.Contains(InfrastructureServiceCollectionExtensions.DatabaseHealthCheckTag),
 });
 
 await app.Services.InitializeDatabaseAsync();

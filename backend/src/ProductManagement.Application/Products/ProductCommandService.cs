@@ -1,6 +1,6 @@
 using FluentValidation;
 using Microsoft.Extensions.Logging;
-using ProductManagement.Application.Categories;
+using ProductManagement.Application.Categories.Abstractions;
 using ProductManagement.Application.Common.Persistence;
 using ProductManagement.Application.Common.Results;
 using ProductManagement.Application.Common.Validation;
@@ -135,10 +135,10 @@ internal sealed partial class ProductCommandService(
         return Result.Success();
     }
 
-    public Task<Result<ProductResponse>> RemoveStockAsync(int id, int quantity, CancellationToken cancellationToken) =>
+    public Task<Result<ProductResponse>> DecrementStockAsync(int id, int quantity, CancellationToken cancellationToken) =>
         AdjustStockAsync(id, quantity, StockOperation.Remove, cancellationToken);
 
-    public Task<Result<ProductResponse>> AddStockAsync(int id, int quantity, CancellationToken cancellationToken) =>
+    public Task<Result<ProductResponse>> AddToStockAsync(int id, int quantity, CancellationToken cancellationToken) =>
         AdjustStockAsync(id, quantity, StockOperation.Add, cancellationToken);
 
     /// <summary>

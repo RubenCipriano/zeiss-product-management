@@ -30,6 +30,10 @@ WHERE  id = @id
   current state once, to tell those cases apart (404 vs 409) and to return the updated product or the available quantity.
 * Bounds are computed in C#, so the SQL never computes `stock + delta` and cannot overflow.
 * A database `CHECK (stock_quantity BETWEEN 0 AND 1000000)` is the last line of defence for any other write path.
+* The follow-up read is a separate statement. A product deleted in the instant between the UPDATE and the read
+  reports 404 even though the stock change applied, and the `available` figure in a 409 can already be slightly out of
+  date. Both are harmless (the stock invariant itself is never at risk). If exactness ever mattered, the UPDATE could
+  return the row itself (`UPDATE … RETURNING`) through raw SQL.
 
 Verified by `ConcurrencyTests` (60 parallel orders for 25 units → exactly 25 succeed, stock ends at 0; mixed +/−
 requests lose nothing) and by the BDD scenario *"Simultaneous orders never oversell"*.

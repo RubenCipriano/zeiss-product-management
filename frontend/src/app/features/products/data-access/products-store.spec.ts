@@ -1,7 +1,9 @@
 import { TestBed } from '@angular/core/testing';
 import { ApplicationRef } from '@angular/core';
-import { of, throwError } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import { aPage, aProduct } from '../../../../testing/product-fixtures';
+import { PagedResponse } from '../../../shared/models/paged-response';
+import { Product } from './product-models';
 import { ApiError } from '../../../core/http/api-error';
 import { ProductsApi } from './products-api';
 import { PRODUCTS_AUTO_REFRESH_MS, ProductsStore } from './products-store';
@@ -73,12 +75,74 @@ describe('ProductsStore', () => {
     expect(api.query.mock.calls.length).toBe(calls + 1);
   });
 
+  it('keeps showing the previous page while a new query is loading', async () => {
+    await settle();
+    // As the template does: the page is read (rendered) before the query changes.
+    expect(store.products()).toEqual([lens, frame]);
+    const pending = new Subject<PagedResponse<Product>>();
+    api.query.mockReturnValue(pending);
+
+    store.setFilter({ kind: 'name', name: 'frame' });
+    TestBed.tick();
+
+    expect(store.isLoading()).toBe(true);
+    expect(store.products()).toEqual([lens, frame]);
+    expect(store.totalCount()).toBe(2);
+
+    pending.next(aPage([frame]));
+    pending.complete();
+    await settle();
+    expect(store.products()).toEqual([frame]);
+  });
+
   it('exposes load failures as ApiError', async () => {
     api.query.mockReturnValue(throwError(() => new ApiError(0, 'network_error', 'Offline')));
     store.setFilter({ kind: 'stock', min: 0, max: 0 });
     await settle();
 
     expect(store.error()?.code).toBe('network_error');
-    expect(store.products()).toEqual([]);
+  });
+});
+
+describe('ProductsStore auto-refresh', () => {
+  let query: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    query = vi.fn(() => of(aPage([])));
+    TestBed.configureTestingModule({
+      providers: [
+        ProductsStore,
+        { provide: ProductsApi, useValue: { query } },
+        { provide: PRODUCTS_AUTO_REFRESH_MS, useValue: 1_000 },
+      ],
+    });
+    TestBed.inject(ProductsStore);
+    TestBed.tick();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('re-fetches periodically so changes made by others show up', () => {
+    expect(query).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(1_000);
+    TestBed.tick();
+    vi.advanceTimersByTime(1_000);
+    TestBed.tick();
+
+    expect(query).toHaveBeenCalledTimes(3);
+  });
+
+  it('pauses while the browser tab is hidden', () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+
+    vi.advanceTimersByTime(5_000);
+    TestBed.tick();
+
+    expect(query).toHaveBeenCalledTimes(1);
   });
 });

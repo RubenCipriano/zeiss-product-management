@@ -2,7 +2,7 @@ import { HttpClient } from '@angular/common/http';
 import { inject, Service } from '@angular/core';
 import { Observable, shareReplay } from 'rxjs';
 import { API_BASE_URL } from '../../../core/config/api-config';
-import { Category } from './product.models';
+import { Category } from './product-models';
 
 /** Categories are static reference data, so they are fetched once and shared. */
 @Service()

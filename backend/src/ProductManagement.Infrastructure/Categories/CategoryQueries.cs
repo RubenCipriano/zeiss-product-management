@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
-using ProductManagement.Application.Categories;
+using ProductManagement.Application.Categories.Abstractions;
+using ProductManagement.Application.Categories.Contracts;
 using ProductManagement.Infrastructure.Persistence;
 
 namespace ProductManagement.Infrastructure.Categories;

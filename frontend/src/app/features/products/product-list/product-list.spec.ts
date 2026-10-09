@@ -68,7 +68,7 @@ describe('ProductList', () => {
       .click();
     await fixture.whenStable();
 
-    expect(api.adjustStock).toHaveBeenCalledWith(product.id, 'remove', 1);
+    expect(api.adjustStock).toHaveBeenCalledWith(product, 'remove', 1);
   });
 
   it('shows an empty state when nothing matches', async () => {

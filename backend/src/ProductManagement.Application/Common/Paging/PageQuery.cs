@@ -9,6 +9,9 @@ public record PageQuery
 
     public const int MaxPageSize = 100;
 
+    /// <summary>Keeps <see cref="Skip"/> within <see cref="int"/> range for any allowed page size.</summary>
+    public const int MaxPage = int.MaxValue / MaxPageSize;
+
     /// <summary>1-based page number. Defaults to 1.</summary>
     public int Page { get; init; } = 1;
 

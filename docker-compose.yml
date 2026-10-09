@@ -31,7 +31,7 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ConnectionStrings__ProductManagement: "Host=db;Port=5432;Database=product_management;Username=${POSTGRES_USER:-product_management};Password=${POSTGRES_PASSWORD:-product_management}"
-      # Convenience for a local demo; see README "Production considerations" for how to run migrations in a real deployment.
+      # Convenience for a local demo; see README "Production readiness and next steps" for how to run migrations in a real deployment.
       Database__ApplyMigrationsOnStartup: "true"
       Database__SeedSampleData: "true"
       OpenApi__Enabled: "true"

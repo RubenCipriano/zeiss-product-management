@@ -4,7 +4,7 @@ import { of, throwError } from 'rxjs';
 import { aProduct } from '../../../../testing/product-fixtures';
 import { ApiError } from '../../../core/http/api-error';
 import { CategoriesApi } from '../data-access/categories-api';
-import { Product } from '../data-access/product.models';
+import { Product } from '../data-access/product-models';
 import { ProductsApi } from '../data-access/products-api';
 import { ProductsStore } from '../data-access/products-store';
 import { ProductFormDialog } from './product-form-dialog';

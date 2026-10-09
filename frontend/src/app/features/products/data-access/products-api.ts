@@ -3,7 +3,7 @@ import { inject, Service } from '@angular/core';
 import { Observable } from 'rxjs';
 import { API_BASE_URL } from '../../../core/config/api-config';
 import { PagedResponse } from '../../../shared/models/paged-response';
-import { Product, ProductInput, ProductQuery, StockOperation } from './product.models';
+import { Product, ProductInput, ProductQuery, StockOperation } from './product-models';
 
 /**
  * Typed client for the products endpoints. Stateless: it only maps calls to HTTP. Errors arrive as
@@ -55,9 +55,13 @@ export class ProductsApi {
     });
   }
 
-  adjustStock(productId: number, operation: StockOperation, quantity: number): Observable<Product> {
+  adjustStock(
+    product: Pick<Product, 'id'>,
+    operation: StockOperation,
+    quantity: number,
+  ): Observable<Product> {
     const action = operation === 'remove' ? 'decrement-stock' : 'add-to-stock';
-    return this.http.post<Product>(`${this.baseUrl}/${productId}/${action}/${quantity}`, null);
+    return this.http.post<Product>(`${this.baseUrl}/${product.id}/${action}/${quantity}`, null);
   }
 }
 

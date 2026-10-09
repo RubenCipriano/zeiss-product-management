@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
-using ProductManagement.Application.Categories;
+using ProductManagement.Application.Categories.Abstractions;
 using ProductManagement.Application.Common.Errors;
 using ProductManagement.Application.Common.Persistence;
 using ProductManagement.Application.Products;
@@ -174,8 +174,8 @@ public sealed class ProductCommandServiceTests
     [InlineData(ProductRules.MaxStockQuantity + 1)]
     public async Task StockOperations_RejectInvalidQuantitiesBeforeReachingTheDatabase(int quantity)
     {
-        var remove = await _service.RemoveStockAsync(ProductId, quantity, TestContext.Current.CancellationToken);
-        var add = await _service.AddStockAsync(ProductId, quantity, TestContext.Current.CancellationToken);
+        var remove = await _service.DecrementStockAsync(ProductId, quantity, TestContext.Current.CancellationToken);
+        var add = await _service.AddToStockAsync(ProductId, quantity, TestContext.Current.CancellationToken);
 
         remove.Error!.ValidationErrors.ShouldContainKey("quantity");
         add.Error!.ValidationErrors.ShouldContainKey("quantity");
@@ -183,22 +183,22 @@ public sealed class ProductCommandServiceTests
     }
 
     [Fact]
-    public async Task RemoveStock_SendsANegativeDeltaAndReturnsTheUpdatedProduct()
+    public async Task DecrementStock_SendsANegativeDeltaAndReturnsTheUpdatedProduct()
     {
         _repository.TryAdjustStockAsync(ProductId, -3, Now, Arg.Any<CancellationToken>()).Returns(true);
         _queries.GetByIdAsync(ProductId, Arg.Any<CancellationToken>()).Returns(Response(stock: 7));
 
-        var result = await _service.RemoveStockAsync(ProductId, 3, TestContext.Current.CancellationToken);
+        var result = await _service.DecrementStockAsync(ProductId, 3, TestContext.Current.CancellationToken);
 
         result.Value.StockQuantity.ShouldBe(7);
     }
 
     [Fact]
-    public async Task RemoveStock_WhenTheRuleRejectsTheChange_ReportsInsufficientStockWithTheAvailableQuantity()
+    public async Task DecrementStock_WhenTheRuleRejectsTheChange_ReportsInsufficientStockWithTheAvailableQuantity()
     {
         _repository.TryAdjustStockAsync(ProductId, -11, Now, Arg.Any<CancellationToken>()).Returns(false);
 
-        var result = await _service.RemoveStockAsync(ProductId, 11, TestContext.Current.CancellationToken);
+        var result = await _service.DecrementStockAsync(ProductId, 11, TestContext.Current.CancellationToken);
 
         result.Error!.Code.ShouldBe("product.insufficient_stock");
         result.Error.Type.ShouldBe(ErrorType.Conflict);
@@ -207,11 +207,11 @@ public sealed class ProductCommandServiceTests
     }
 
     [Fact]
-    public async Task AddStock_WhenTheRuleRejectsTheChange_ReportsStockLimitExceeded()
+    public async Task AddToStock_WhenTheRuleRejectsTheChange_ReportsStockLimitExceeded()
     {
         _repository.TryAdjustStockAsync(ProductId, ProductRules.MaxStockQuantity, Now, Arg.Any<CancellationToken>()).Returns(false);
 
-        var result = await _service.AddStockAsync(ProductId, ProductRules.MaxStockQuantity, TestContext.Current.CancellationToken);
+        var result = await _service.AddToStockAsync(ProductId, ProductRules.MaxStockQuantity, TestContext.Current.CancellationToken);
 
         result.Error!.Code.ShouldBe("product.stock_limit_exceeded");
     }
@@ -221,7 +221,7 @@ public sealed class ProductCommandServiceTests
     {
         _queries.GetByIdAsync(ProductId, Arg.Any<CancellationToken>()).Returns((ProductResponse?)null);
 
-        var result = await _service.AddStockAsync(ProductId, 1, TestContext.Current.CancellationToken);
+        var result = await _service.AddToStockAsync(ProductId, 1, TestContext.Current.CancellationToken);
 
         result.Error!.Type.ShouldBe(ErrorType.NotFound);
     }

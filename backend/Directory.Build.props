@@ -25,8 +25,8 @@
   <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('Tests')) Or '$(MSBuildProjectName)' == 'ProductManagement.Testing'">
     <IsPackable>false</IsPackable>
     <!-- CA1707: underscores in test names are the readable convention (Method_Scenario_Outcome). -->
-    <!-- CA2007: ConfigureAwait is meaningless in test code. -->
     <!-- CA1515: xUnit requires public test classes. -->
-    <NoWarn>$(NoWarn);CA1707;CA2007;CA1515;CA1861</NoWarn>
+    <!-- CA1861: constant arrays in [InlineData]/assertions are clearer inline and run once per test. -->
+    <NoWarn>$(NoWarn);CA1707;CA1515;CA1861</NoWarn>
   </PropertyGroup>
 </Project>

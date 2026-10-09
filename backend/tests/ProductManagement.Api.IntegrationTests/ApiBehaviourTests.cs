@@ -1,5 +1,6 @@
 using System.Net;
 using ProductManagement.Api.IntegrationTests.Infrastructure;
+using ProductManagement.Testing;
 
 namespace ProductManagement.Api.IntegrationTests;
 
@@ -23,6 +24,7 @@ public sealed class ApiBehaviourTests(ApiFixture fixture) : ApiTestBase(fixture)
 
         response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
         response.Content.Headers.ContentType!.MediaType.ShouldBe("application/problem+json");
+        (await ProductApiClient.ReadProblemAsync(response)).ErrorCode.ShouldBe("http_404");
     }
 
     [Fact]
