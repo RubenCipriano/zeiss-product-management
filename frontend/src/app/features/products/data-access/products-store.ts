@@ -9,11 +9,13 @@ import {
   signal,
 } from '@angular/core';
 import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { filter, interval, Observable, tap } from 'rxjs';
+import { filter, forkJoin, interval, map, Observable, tap } from 'rxjs';
 import { ApiError } from '../../../core/http/api-error';
 import { emptyPage, PagedResponse } from '../../../shared/models/paged-response';
 import {
   DEFAULT_PAGE_SIZE,
+  InventorySummary,
+  LOW_STOCK_THRESHOLD,
   Product,
   ProductFilter,
   ProductInput,
@@ -62,6 +64,35 @@ export class ProductsStore {
     computation: (current, previous) => current ?? previous?.value ?? emptyPage(DEFAULT_PAGE_SIZE),
   }).asReadonly();
 
+  /**
+   * Counts for the summary cards. They come from the same list endpoints with `pageSize=1` (only `totalCount` is
+   * used), so the API needs no dedicated statistics endpoint and the counts are cached like any other read.
+   */
+  private readonly summaryResource = rxResource({
+    stream: () =>
+      forkJoin({
+        all: this.api.query({ filter: { kind: 'all' }, page: 1, pageSize: 1 }),
+        low: this.api.query({
+          filter: { kind: 'stock', min: 0, max: LOW_STOCK_THRESHOLD },
+          page: 1,
+          pageSize: 1,
+        }),
+        out: this.api.query({ filter: { kind: 'stock', min: 0, max: 0 }, page: 1, pageSize: 1 }),
+      }).pipe(
+        map(({ all, low, out }): InventorySummary => ({
+          totalProducts: all.totalCount,
+          lowStock: low.totalCount,
+          outOfStock: out.totalCount,
+        })),
+      ),
+  });
+
+  /** Last known summary; `null` until the first load (and kept while reloading). */
+  readonly summary = linkedSignal<InventorySummary | undefined, InventorySummary | null>({
+    source: () => (this.summaryResource.hasValue() ? this.summaryResource.value() : undefined),
+    computation: (current, previous) => current ?? previous?.value ?? null,
+  }).asReadonly();
+
   readonly products = computed(() => this.page().items);
   readonly totalCount = computed(() => this.page().totalCount);
   readonly isLoading = this.productsResource.isLoading;
@@ -89,6 +120,7 @@ export class ProductsStore {
 
   reload(): void {
     this.productsResource.reload();
+    this.summaryResource.reload();
   }
 
   create(input: ProductInput): Observable<Product> {

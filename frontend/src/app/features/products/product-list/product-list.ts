@@ -1,24 +1,16 @@
+import { Dialog } from '@angular/cdk/dialog';
+import { CdkMenu, CdkMenuItem, CdkMenuTrigger } from '@angular/cdk/menu';
 import { CurrencyPipe, DatePipe } from '@angular/common';
 import { Component, computed, inject, Injector, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
-import { MatButtonModule } from '@angular/material/button';
-import { MatButtonToggleModule } from '@angular/material/button-toggle';
-import { MatChipsModule } from '@angular/material/chips';
-import { MatDialog } from '@angular/material/dialog';
-import { MatFormFieldModule } from '@angular/material/form-field';
-import { MatIconModule } from '@angular/material/icon';
-import { MatInputModule } from '@angular/material/input';
-import { MatMenuModule } from '@angular/material/menu';
-import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
-import { MatProgressBarModule } from '@angular/material/progress-bar';
-import { MatTableModule } from '@angular/material/table';
-import { MatTooltipModule } from '@angular/material/tooltip';
 import { debounceTime, distinctUntilChanged, filter, finalize, map, switchMap } from 'rxjs';
 import { ApiError } from '../../../core/http/api-error';
 import { Notifications } from '../../../core/notifications/notifications';
 import { integer, orderedRange } from '../../../shared/forms/validators';
 import { ConfirmDialog, ConfirmDialogData } from '../../../shared/ui/confirm-dialog/confirm-dialog';
+import { Icon, IconName } from '../../../shared/ui/icon/icon';
+import { PageChange, Paginator } from '../../../shared/ui/paginator/paginator';
 import {
   LOW_STOCK_THRESHOLD,
   Product,
@@ -48,40 +40,29 @@ const FILTER_DEBOUNCE_MS = 300;
     CurrencyPipe,
     DatePipe,
     ReactiveFormsModule,
-    MatButtonModule,
-    MatButtonToggleModule,
-    MatChipsModule,
-    MatFormFieldModule,
-    MatIconModule,
-    MatInputModule,
-    MatMenuModule,
-    MatPaginatorModule,
-    MatProgressBarModule,
-    MatTableModule,
-    MatTooltipModule,
+    CdkMenu,
+    CdkMenuItem,
+    CdkMenuTrigger,
+    Icon,
+    Paginator,
     StockStatus,
   ],
   providers: [ProductsStore],
   templateUrl: './product-list.html',
-  styleUrl: './product-list.scss',
 })
 export class ProductList {
   protected readonly store = inject(ProductsStore);
-  private readonly dialog = inject(MatDialog);
+  private readonly dialog = inject(Dialog);
   private readonly injector = inject(Injector);
   private readonly notifications = inject(Notifications);
 
-  protected readonly displayedColumns = [
-    'id',
-    'name',
-    'category',
-    'price',
-    'stock',
-    'updatedAt',
-    'actions',
-  ];
-  protected readonly pageSizeOptions = [10, 20, 50, 100];
   protected readonly lowStockThreshold = LOW_STOCK_THRESHOLD;
+  protected readonly filterOptions: readonly { kind: ProductFilterKind; label: string }[] = [
+    { kind: 'all', label: 'All products' },
+    { kind: 'name', label: 'Search by name' },
+    { kind: 'stock', label: 'Stock level' },
+  ];
+  protected readonly skeletonRows = [1, 2, 3, 4, 5];
 
   protected readonly filterKind = signal<ProductFilterKind>('all');
   protected readonly nameControl = new FormControl('', { nonNullable: true });
@@ -93,7 +74,32 @@ export class ProductList {
     { validators: orderedRange },
   );
 
-  protected readonly pageIndex = computed(() => this.store.query().page - 1);
+  protected readonly summaryCards = computed(() => {
+    const summary = this.store.summary();
+    return [
+      {
+        label: 'Products',
+        value: summary?.totalProducts,
+        icon: 'package' as IconName,
+        accent: 'bg-brand-50 text-brand-600',
+        apply: () => this.setFilterKind('all'),
+      },
+      {
+        label: `Low stock (≤ ${LOW_STOCK_THRESHOLD})`,
+        value: summary?.lowStock,
+        icon: 'trendingDown' as IconName,
+        accent: 'bg-amber-50 text-amber-600',
+        apply: () => this.showStockRange(0, LOW_STOCK_THRESHOLD),
+      },
+      {
+        label: 'Out of stock',
+        value: summary?.outOfStock,
+        icon: 'ban' as IconName,
+        accent: 'bg-red-50 text-red-600',
+        apply: () => this.showStockRange(0, 0),
+      },
+    ];
+  });
   /** Products with a stock request in flight, so their quick buttons can't be double-clicked. */
   protected readonly pendingIds = signal<ReadonlySet<number>>(new Set());
 
@@ -121,12 +127,19 @@ export class ProductList {
     this.stockRange.setValue({ min, max });
   }
 
+  /** Summary-card shortcut: switch to the stock filter with a preset range. */
+  protected showStockRange(min: number, max: number): void {
+    this.filterKind.set('stock');
+    this.stockRange.setValue({ min, max }, { emitEvent: false });
+    this.applyFilter();
+  }
+
   protected clearName(): void {
     this.nameControl.setValue('');
   }
 
-  protected onPage(event: PageEvent): void {
-    this.store.setPage(event.pageIndex + 1, event.pageSize);
+  protected onPage(change: PageChange): void {
+    this.store.setPage(change.page, change.pageSize);
   }
 
   protected openCreate(): void {
@@ -143,12 +156,12 @@ export class ProductList {
 
   protected openStockDialog(product: Product, operation: StockOperation): void {
     this.dialog
-      .open<StockAdjustDialog, StockAdjustDialogData, Product>(StockAdjustDialog, {
+      .open<Product, StockAdjustDialogData, StockAdjustDialog>(StockAdjustDialog, {
         data: { product, operation },
         injector: this.injector,
+        backdropClass: 'dialog-backdrop',
       })
-      .afterClosed()
-      .pipe(filter((updated): updated is Product => !!updated))
+      .closed.pipe(filter((updated): updated is Product => !!updated))
       .subscribe((updated) =>
         this.notifications.success(`"${updated.name}" now has ${updated.stockQuantity} in stock.`),
       );
@@ -165,15 +178,15 @@ export class ProductList {
 
   protected confirmDelete(product: Product): void {
     this.dialog
-      .open<ConfirmDialog, ConfirmDialogData, boolean>(ConfirmDialog, {
+      .open<boolean, ConfirmDialogData, ConfirmDialog>(ConfirmDialog, {
         data: {
           title: 'Delete product?',
           message: `"${product.name}" (#${product.id}) will be permanently removed.`,
           confirmLabel: 'Delete',
         },
+        backdropClass: 'dialog-backdrop',
       })
-      .afterClosed()
-      .pipe(
+      .closed.pipe(
         filter(Boolean),
         switchMap(() => this.store.delete(product)),
       )
@@ -215,12 +228,12 @@ export class ProductList {
 
   private openProductForm(data: ProductFormDialogData) {
     return this.dialog
-      .open<ProductFormDialog, ProductFormDialogData, Product>(ProductFormDialog, {
+      .open<Product, ProductFormDialogData, ProductFormDialog>(ProductFormDialog, {
         data,
         injector: this.injector,
+        backdropClass: 'dialog-backdrop',
       })
-      .afterClosed()
-      .pipe(filter((product): product is Product => !!product));
+      .closed.pipe(filter((product): product is Product => !!product));
   }
 
   private setPending(id: number, pending: boolean): void {

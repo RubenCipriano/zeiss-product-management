@@ -1,1 +1,108 @@
 @import 'tailwindcss';
+/* Positioning for CDK overlays (dialogs, menus). */
+@import '@angular/cdk/overlay-prebuilt.css';
+
+/* Design tokens. Tailwind generates utilities from them (bg-brand-600, font-sans, ...). */
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  --color-brand-50: #eff6ff;
+  --color-brand-100: #dbeafe;
+  --color-brand-200: #bfdbfe;
+  --color-brand-500: #3b82f6;
+  --color-brand-600: #2563eb;
+  --color-brand-700: #1d4ed8;
+  --color-brand-900: #1e3a8a;
+}
+
+@layer base {
+  html {
+    @apply h-full bg-slate-50 font-sans text-slate-900 antialiased;
+  }
+
+  body {
+    @apply h-full;
+  }
+
+  /* Default icon size, in the base layer so any size-* utility on the element wins. */
+  app-icon {
+    @apply inline-block size-4 shrink-0;
+  }
+}
+
+/*
+ * A handful of UI primitives, used everywhere so buttons, fields and cards look and behave the same.
+ * Everything else is plain utility classes in the templates.
+ */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold whitespace-nowrap
+      transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600
+      disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply bg-brand-600 text-white shadow-sm hover:bg-brand-700;
+  }
+
+  .btn-secondary {
+    @apply bg-white text-slate-700 shadow-sm ring-1 ring-slate-300 ring-inset hover:bg-slate-50;
+  }
+
+  .btn-danger {
+    @apply bg-red-600 text-white shadow-sm hover:bg-red-700 focus-visible:outline-red-600;
+  }
+
+  .btn-ghost {
+    @apply text-slate-600 hover:bg-slate-100 hover:text-slate-900;
+  }
+
+  .btn-icon {
+    @apply inline-flex size-8 items-center justify-center rounded-md text-slate-500 transition-colors
+      hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-brand-600
+      disabled:pointer-events-none disabled:opacity-40;
+  }
+
+  .input {
+    @apply block w-full rounded-lg border-0 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm ring-1
+      ring-slate-300 ring-inset placeholder:text-slate-400 focus:ring-2 focus:ring-brand-600 focus:outline-none;
+  }
+
+  .input[aria-invalid='true'] {
+    @apply ring-red-400 focus:ring-red-500;
+  }
+
+  .label {
+    @apply mb-1.5 block text-sm font-medium text-slate-700;
+  }
+
+  .field-error {
+    @apply mt-1.5 text-xs text-red-600;
+  }
+
+  .field-hint {
+    @apply mt-1.5 text-xs text-slate-500;
+  }
+
+  .card {
+    @apply rounded-xl bg-white shadow-sm ring-1 ring-slate-200;
+  }
+
+  .menu {
+    @apply min-w-44 rounded-lg bg-white p-1 shadow-lg ring-1 ring-slate-200 focus:outline-none;
+  }
+
+  .menu-item {
+    @apply flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-slate-700
+      hover:bg-slate-100 focus:bg-slate-100 focus:outline-none;
+  }
+
+  .dialog-panel {
+    @apply w-[min(36rem,calc(100vw-2rem))] rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200;
+  }
+}
+
+/* Outside the layers on purpose: it must beat the (unlayered) CDK overlay styles for the same element. */
+.dialog-backdrop {
+  @apply bg-slate-900/40 backdrop-blur-[2px];
+}

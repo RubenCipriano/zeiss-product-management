@@ -1,10 +1,23 @@
-<h2 mat-dialog-title>{{ data.title }}</h2>
-<mat-dialog-content>
-  <p>{{ data.message }}</p>
-</mat-dialog-content>
-<mat-dialog-actions align="end">
-  <button mat-button [mat-dialog-close]="false">Cancel</button>
-  <button mat-flat-button class="danger" [mat-dialog-close]="true" cdkFocusInitial>
-    {{ data.confirmLabel }}
-  </button>
-</mat-dialog-actions>
+<div
+  class="dialog-panel w-[min(28rem,calc(100vw-2rem))] p-6"
+  role="alertdialog"
+  aria-labelledby="confirm-title"
+>
+  <div class="flex gap-4">
+    <div
+      class="flex size-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600"
+    >
+      <app-icon name="alert" class="size-5" />
+    </div>
+    <div>
+      <h2 id="confirm-title" class="text-base font-semibold text-slate-900">{{ data.title }}</h2>
+      <p class="mt-1 text-sm text-slate-600">{{ data.message }}</p>
+    </div>
+  </div>
+  <div class="mt-6 flex justify-end gap-2">
+    <button type="button" class="btn btn-secondary" (click)="dialogRef.close(false)">Cancel</button>
+    <button type="button" class="btn btn-danger" (click)="dialogRef.close(true)">
+      {{ data.confirmLabel }}
+    </button>
+  </div>
+</div>

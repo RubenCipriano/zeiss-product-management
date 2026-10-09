@@ -1,5 +1,5 @@
+import { DIALOG_DATA, DialogRef } from '@angular/cdk/dialog';
 import { TestBed } from '@angular/core/testing';
-import { MAT_DIALOG_DATA, MatDialogRef } from '@angular/material/dialog';
 import { of, throwError } from 'rxjs';
 import { aProduct } from '../../../../testing/product-fixtures';
 import { ApiError } from '../../../core/http/api-error';
@@ -12,16 +12,16 @@ import { ProductFormDialog } from './product-form-dialog';
 describe('ProductFormDialog', () => {
   let store: { create: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
   let productsApi: { getById: ReturnType<typeof vi.fn> };
-  let dialogRef: { close: ReturnType<typeof vi.fn> };
+  let dialogRef: { close: ReturnType<typeof vi.fn>; disableClose: boolean };
 
   async function open(product?: Product) {
     store = { create: vi.fn(), update: vi.fn() };
     productsApi = { getById: vi.fn() };
-    dialogRef = { close: vi.fn() };
+    dialogRef = { close: vi.fn(), disableClose: false };
     TestBed.configureTestingModule({
       providers: [
-        { provide: MAT_DIALOG_DATA, useValue: { product } },
-        { provide: MatDialogRef, useValue: dialogRef },
+        { provide: DIALOG_DATA, useValue: { product } },
+        { provide: DialogRef, useValue: dialogRef },
         { provide: ProductsStore, useValue: store },
         { provide: ProductsApi, useValue: productsApi },
         {

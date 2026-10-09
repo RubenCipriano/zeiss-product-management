@@ -36,14 +36,20 @@ describe('ProductList', () => {
     );
 
     const fixture = await render();
-    const rows = (fixture.nativeElement as HTMLElement).querySelectorAll('tr.mat-mdc-row');
+    const rows = (fixture.nativeElement as HTMLElement).querySelectorAll(
+      '[data-testid=product-row]',
+    );
 
     expect(rows.length).toBe(2);
     expect(rows[0].textContent).toContain('#100001');
     expect(rows[0].textContent).toContain('Progressive Lens');
     expect(rows[0].textContent).toContain('Out of stock');
     expect(rows[1].textContent).toContain('In stock');
-    expect((fixture.nativeElement as HTMLElement).textContent).toContain('2 products');
+    const summary = (fixture.nativeElement as HTMLElement).querySelector(
+      '[aria-label="Inventory summary"]',
+    )!;
+    expect(summary.textContent).toContain('Products');
+    expect(summary.textContent).toContain('2');
   });
 
   it('disables the quick remove button when a product is out of stock', async () => {

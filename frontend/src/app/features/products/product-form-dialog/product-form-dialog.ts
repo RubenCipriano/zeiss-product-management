@@ -1,16 +1,12 @@
+import { DIALOG_DATA, DialogRef } from '@angular/cdk/dialog';
 import { Component, computed, inject, signal } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
-import { MatButtonModule } from '@angular/material/button';
-import { MAT_DIALOG_DATA, MatDialogModule, MatDialogRef } from '@angular/material/dialog';
-import { MatFormFieldModule } from '@angular/material/form-field';
-import { MatInputModule } from '@angular/material/input';
-import { MatProgressBarModule } from '@angular/material/progress-bar';
-import { MatSelectModule } from '@angular/material/select';
 import { catchError, of } from 'rxjs';
 import { ApiError } from '../../../core/http/api-error';
 import { integer, maxDecimals, notBlank } from '../../../shared/forms/validators';
 import { validationMessage } from '../../../shared/forms/validation-message';
+import { Icon } from '../../../shared/ui/icon/icon';
 import { CategoriesApi } from '../data-access/categories-api';
 import { PRODUCT_LIMITS, Product, ProductInput } from '../data-access/product-models';
 import { ProductsApi } from '../data-access/products-api';
@@ -39,22 +35,13 @@ const FIELD_LABELS: Record<ProductField, string> = {
  */
 @Component({
   selector: 'app-product-form-dialog',
-  imports: [
-    ReactiveFormsModule,
-    MatDialogModule,
-    MatButtonModule,
-    MatFormFieldModule,
-    MatInputModule,
-    MatSelectModule,
-    MatProgressBarModule,
-  ],
+  imports: [ReactiveFormsModule, Icon],
   templateUrl: './product-form-dialog.html',
-  styleUrl: './product-form-dialog.scss',
 })
 export class ProductFormDialog {
   private readonly store = inject(ProductsStore);
   private readonly productsApi = inject(ProductsApi);
-  private readonly dialogRef = inject<MatDialogRef<ProductFormDialog, Product>>(MatDialogRef);
+  protected readonly dialogRef = inject<DialogRef<Product, ProductFormDialog>>(DialogRef);
 
   protected readonly limits = PRODUCT_LIMITS;
   protected readonly categories = toSignal(
@@ -66,7 +53,7 @@ export class ProductFormDialog {
 
   /** The version being edited. Replaced when the user reloads after a conflict. */
   protected readonly editing = signal<Product | null>(
-    inject<ProductFormDialogData>(MAT_DIALOG_DATA).product ?? null,
+    inject<ProductFormDialogData>(DIALOG_DATA).product ?? null,
   );
   protected readonly isEdit = computed(() => this.editing() !== null);
   protected readonly saving = signal(false);

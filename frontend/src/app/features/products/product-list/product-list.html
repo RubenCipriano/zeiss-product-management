@@ -1,225 +1,318 @@
-<section class="page">
-  <header class="page-header">
+<div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+  <header class="flex flex-wrap items-end justify-between gap-4">
     <div>
-      <h1>Products</h1>
-      <p class="subtitle">
-        {{ store.totalCount() }} {{ store.totalCount() === 1 ? 'product' : 'products' }} · refreshes
-        automatically
+      <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Products</h1>
+      <p class="mt-1 text-sm text-slate-500">
+        Manage the catalogue and stock levels. Changes made elsewhere appear automatically.
       </p>
     </div>
-    <div class="page-header__actions">
+    <div class="flex gap-2">
       <button
-        mat-stroked-button
         type="button"
+        class="btn btn-secondary"
         (click)="store.reload()"
         [disabled]="store.isLoading()"
       >
-        <mat-icon>refresh</mat-icon>
+        <app-icon name="refresh" [class.animate-spin]="store.isLoading()" />
         Refresh
       </button>
-      <button mat-flat-button type="button" (click)="openCreate()">
-        <mat-icon>add</mat-icon>
+      <button type="button" class="btn btn-primary" (click)="openCreate()">
+        <app-icon name="plus" />
         New product
       </button>
     </div>
   </header>
 
-  <div class="filters">
-    <mat-button-toggle-group
-      [value]="filterKind()"
-      (change)="setFilterKind($event.value)"
+  <section class="mt-6 grid gap-4 sm:grid-cols-3" aria-label="Inventory summary">
+    @for (card of summaryCards(); track card.label) {
+      <button
+        type="button"
+        class="card flex items-center gap-4 p-5 text-left transition hover:-translate-y-0.5 hover:shadow-md hover:ring-slate-300"
+        (click)="card.apply()"
+      >
+        <span class="flex size-11 items-center justify-center rounded-lg" [class]="card.accent">
+          <app-icon [name]="card.icon" class="size-5" />
+        </span>
+        <span>
+          <span class="block text-sm text-slate-500">{{ card.label }}</span>
+          @if (card.value === undefined) {
+            <span class="mt-1 block h-7 w-12 animate-pulse rounded bg-slate-200"></span>
+          } @else {
+            <span class="block text-2xl font-semibold tabular-nums text-slate-900">{{
+              card.value
+            }}</span>
+          }
+        </span>
+      </button>
+    }
+  </section>
+
+  <section class="card mt-6 flex flex-wrap items-center gap-3 p-3" aria-label="Filters">
+    <div
+      class="inline-flex rounded-lg bg-slate-100 p-1"
+      role="radiogroup"
       aria-label="Filter products"
-      hideSingleSelectionIndicator
     >
-      <mat-button-toggle value="all">All products</mat-button-toggle>
-      <mat-button-toggle value="name">Search by name</mat-button-toggle>
-      <mat-button-toggle value="stock">Stock level</mat-button-toggle>
-    </mat-button-toggle-group>
+      @for (option of filterOptions; track option.kind) {
+        <button
+          type="button"
+          role="radio"
+          class="rounded-md px-3 py-1.5 text-sm font-medium transition"
+          [class]="
+            filterKind() === option.kind
+              ? 'bg-white text-slate-900 shadow-sm'
+              : 'text-slate-600 hover:text-slate-900'
+          "
+          [attr.aria-checked]="filterKind() === option.kind"
+          (click)="setFilterKind(option.kind)"
+        >
+          {{ option.label }}
+        </button>
+      }
+    </div>
 
     @switch (filterKind()) {
       @case ('name') {
-        <mat-form-field class="filter-field" subscriptSizing="dynamic">
-          <mat-icon matPrefix>search</mat-icon>
-          <mat-label>Name contains</mat-label>
-          <input matInput [formControl]="nameControl" placeholder="e.g. lens" autocomplete="off" />
+        <div class="relative w-full sm:max-w-sm">
+          <app-icon
+            name="search"
+            class="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-slate-400"
+          />
+          <input
+            class="input pr-9 pl-9"
+            [formControl]="nameControl"
+            placeholder="Name contains… e.g. lens"
+            aria-label="Name contains"
+            autocomplete="off"
+          />
           @if (nameControl.value) {
             <button
-              matSuffix
-              mat-icon-button
               type="button"
+              class="btn-icon absolute top-1/2 right-1 size-7 -translate-y-1/2"
               aria-label="Clear search"
               (click)="clearName()"
             >
-              <mat-icon>close</mat-icon>
+              <app-icon name="x" />
             </button>
           }
-        </mat-form-field>
+        </div>
       }
       @case ('stock') {
-        <div class="stock-range" [formGroup]="stockRange">
-          <mat-form-field subscriptSizing="dynamic">
-            <mat-label>Min stock</mat-label>
-            <input matInput type="number" min="0" step="1" formControlName="min" />
-          </mat-form-field>
-          <mat-form-field subscriptSizing="dynamic">
-            <mat-label>Max stock</mat-label>
-            <input matInput type="number" min="0" step="1" formControlName="max" />
-          </mat-form-field>
-          <mat-chip-set aria-label="Stock presets">
-            <mat-chip (click)="setStockRange(0, 0)">Out of stock</mat-chip>
-            <mat-chip (click)="setStockRange(0, lowStockThreshold)"
-              >Low stock (≤ {{ lowStockThreshold }})</mat-chip
+        <div class="flex flex-wrap items-center gap-2" [formGroup]="stockRange">
+          <input
+            class="input w-28"
+            type="number"
+            min="0"
+            step="1"
+            formControlName="min"
+            placeholder="Min"
+            aria-label="Min stock"
+          />
+          <span class="text-slate-400">–</span>
+          <input
+            class="input w-28"
+            type="number"
+            min="0"
+            step="1"
+            formControlName="max"
+            placeholder="Max"
+            aria-label="Max stock"
+          />
+          <div class="flex flex-wrap gap-1.5" aria-label="Stock presets">
+            <button
+              type="button"
+              class="rounded-full px-3 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50"
+              (click)="setStockRange(0, 0)"
             >
-            <mat-chip (click)="setStockRange(null, null)">Any</mat-chip>
-          </mat-chip-set>
+              Out of stock
+            </button>
+            <button
+              type="button"
+              class="rounded-full px-3 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50"
+              (click)="setStockRange(0, lowStockThreshold)"
+            >
+              Low stock (≤ {{ lowStockThreshold }})
+            </button>
+            <button
+              type="button"
+              class="rounded-full px-3 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50"
+              (click)="setStockRange(null, null)"
+            >
+              Any
+            </button>
+          </div>
           @if (stockRange.invalid) {
-            <p class="field-error" role="alert">
+            <p class="field-error w-full" role="alert">
               Use whole numbers from 0, with min not greater than max.
             </p>
           }
         </div>
       }
     }
-  </div>
+  </section>
 
-  <div class="table-card">
-    <div class="loading-slot">
+  <section class="card mt-4 overflow-hidden" aria-label="Products">
+    <div class="h-0.5 bg-slate-100">
       @if (store.isLoading()) {
-        <mat-progress-bar mode="indeterminate" />
+        <div class="h-full w-full animate-pulse bg-brand-500"></div>
       }
     </div>
 
     @if (store.error(); as error) {
-      <div class="state state--error" role="alert">
-        <mat-icon>cloud_off</mat-icon>
-        <p>{{ error.message }}</p>
-        <button mat-stroked-button type="button" (click)="store.reload()">Try again</button>
+      <div class="flex flex-col items-center gap-3 px-6 py-16 text-center" role="alert">
+        <span class="flex size-12 items-center justify-center rounded-full bg-red-50 text-red-600">
+          <app-icon name="alert" class="size-6" />
+        </span>
+        <p class="text-sm text-slate-700">{{ error.message }}</p>
+        <button type="button" class="btn btn-secondary" (click)="store.reload()">
+          <app-icon name="refresh" />
+          Try again
+        </button>
       </div>
     } @else {
-      <div class="table-scroll">
-        <table mat-table [dataSource]="store.products()" class="products-table">
-          <ng-container matColumnDef="id">
-            <th mat-header-cell *matHeaderCellDef>ID</th>
-            <td mat-cell *matCellDef="let product" class="cell-id">#{{ product.id }}</td>
-          </ng-container>
-
-          <ng-container matColumnDef="name">
-            <th mat-header-cell *matHeaderCellDef>Name</th>
-            <td mat-cell *matCellDef="let product" class="cell-name">
-              <div class="cell-name__title">{{ product.name }}</div>
-              @if (product.description) {
-                <div class="cell-name__description" [matTooltip]="product.description">
-                  {{ product.description }}
-                </div>
+      <div class="overflow-x-auto">
+        <table class="min-w-[56rem] w-full text-sm">
+          <thead
+            class="border-b border-slate-200 bg-slate-50/80 text-left text-xs font-semibold tracking-wide text-slate-500 uppercase"
+          >
+            <tr>
+              <th scope="col" class="px-4 py-3">ID</th>
+              <th scope="col" class="px-4 py-3">Name</th>
+              <th scope="col" class="px-4 py-3">Category</th>
+              <th scope="col" class="px-4 py-3 text-right">Price</th>
+              <th scope="col" class="px-4 py-3">Stock</th>
+              <th scope="col" class="px-4 py-3">Last updated</th>
+              <th scope="col" class="px-4 py-3"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            @for (product of store.products(); track product.id) {
+              <tr class="transition-colors hover:bg-slate-50/70" data-testid="product-row">
+                <td class="px-4 py-3 font-mono text-xs whitespace-nowrap text-slate-500">
+                  #{{ product.id }}
+                </td>
+                <td class="max-w-xs px-4 py-3">
+                  <div class="font-medium text-slate-900">{{ product.name }}</div>
+                  @if (product.description) {
+                    <div class="truncate text-xs text-slate-500" [title]="product.description">
+                      {{ product.description }}
+                    </div>
+                  }
+                </td>
+                <td class="px-4 py-3 whitespace-nowrap text-slate-600">
+                  {{ product.categoryName }}
+                </td>
+                <td class="px-4 py-3 text-right whitespace-nowrap tabular-nums text-slate-900">
+                  {{ product.price | currency }}
+                </td>
+                <td class="px-4 py-3">
+                  <div class="flex items-center gap-1">
+                    <button
+                      type="button"
+                      class="btn-icon"
+                      title="Remove 1"
+                      [attr.aria-label]="'Remove one unit of ' + product.name"
+                      [disabled]="product.stockQuantity === 0 || isPending(product.id)"
+                      (click)="quickAdjust(product, 'remove')"
+                    >
+                      <app-icon name="minus" />
+                    </button>
+                    <app-stock-status [quantity]="product.stockQuantity" />
+                    <button
+                      type="button"
+                      class="btn-icon"
+                      title="Add 1"
+                      [attr.aria-label]="'Add one unit of ' + product.name"
+                      [disabled]="isPending(product.id)"
+                      (click)="quickAdjust(product, 'add')"
+                    >
+                      <app-icon name="plus" />
+                    </button>
+                  </div>
+                </td>
+                <td class="px-4 py-3 whitespace-nowrap text-slate-500">
+                  {{ product.updatedAt | date: 'short' }}
+                </td>
+                <td class="px-4 py-3 text-right">
+                  <button
+                    type="button"
+                    class="btn-icon"
+                    [cdkMenuTriggerFor]="actions"
+                    [attr.aria-label]="'Actions for ' + product.name"
+                  >
+                    <app-icon name="more" />
+                  </button>
+                  <ng-template #actions>
+                    <div class="menu" cdkMenu>
+                      <button
+                        type="button"
+                        class="menu-item"
+                        cdkMenuItem
+                        (cdkMenuItemTriggered)="openStockDialog(product, 'remove')"
+                      >
+                        <app-icon name="arrowUpDown" class="text-slate-400" />
+                        Adjust stock…
+                      </button>
+                      <button
+                        type="button"
+                        class="menu-item"
+                        cdkMenuItem
+                        (cdkMenuItemTriggered)="openEdit(product)"
+                      >
+                        <app-icon name="pencil" class="text-slate-400" />
+                        Edit
+                      </button>
+                      <div class="my-1 h-px bg-slate-100"></div>
+                      <button
+                        type="button"
+                        class="menu-item text-red-600 hover:bg-red-50 focus:bg-red-50"
+                        cdkMenuItem
+                        (cdkMenuItemTriggered)="confirmDelete(product)"
+                      >
+                        <app-icon name="trash" />
+                        Delete
+                      </button>
+                    </div>
+                  </ng-template>
+                </td>
+              </tr>
+            } @empty {
+              @if (store.isLoading()) {
+                @for (row of skeletonRows; track row) {
+                  <tr aria-hidden="true">
+                    <td colspan="7" class="px-4 py-3.5">
+                      <div class="h-5 animate-pulse rounded bg-slate-100"></div>
+                    </td>
+                  </tr>
+                }
+              } @else {
+                <tr>
+                  <td colspan="7" class="px-6 py-16 text-center">
+                    <span
+                      class="mx-auto flex size-12 items-center justify-center rounded-full bg-slate-100 text-slate-400"
+                    >
+                      <app-icon name="inbox" class="size-6" />
+                    </span>
+                    <p class="mt-3 text-sm font-medium text-slate-900">
+                      No products match the current filter.
+                    </p>
+                    <p class="mt-1 text-sm text-slate-500">
+                      Try another search, or create a new product.
+                    </p>
+                  </td>
+                </tr>
               }
-            </td>
-          </ng-container>
-
-          <ng-container matColumnDef="category">
-            <th mat-header-cell *matHeaderCellDef>Category</th>
-            <td mat-cell *matCellDef="let product" class="cell-nowrap">
-              {{ product.categoryName }}
-            </td>
-          </ng-container>
-
-          <ng-container matColumnDef="price">
-            <th mat-header-cell *matHeaderCellDef class="align-end">Price</th>
-            <td mat-cell *matCellDef="let product" class="align-end cell-number">
-              {{ product.price | currency }}
-            </td>
-          </ng-container>
-
-          <ng-container matColumnDef="stock">
-            <th mat-header-cell *matHeaderCellDef>Stock</th>
-            <td mat-cell *matCellDef="let product">
-              <div class="stock-cell">
-                <button
-                  mat-icon-button
-                  type="button"
-                  matTooltip="Remove 1"
-                  [attr.aria-label]="'Remove one unit of ' + product.name"
-                  [disabled]="product.stockQuantity === 0 || isPending(product.id)"
-                  (click)="quickAdjust(product, 'remove')"
-                >
-                  <mat-icon>remove</mat-icon>
-                </button>
-                <app-stock-status [quantity]="product.stockQuantity" />
-                <button
-                  mat-icon-button
-                  type="button"
-                  matTooltip="Add 1"
-                  [attr.aria-label]="'Add one unit of ' + product.name"
-                  [disabled]="isPending(product.id)"
-                  (click)="quickAdjust(product, 'add')"
-                >
-                  <mat-icon>add</mat-icon>
-                </button>
-              </div>
-            </td>
-          </ng-container>
-
-          <ng-container matColumnDef="updatedAt">
-            <th mat-header-cell *matHeaderCellDef>Last updated</th>
-            <td mat-cell *matCellDef="let product" class="cell-muted">
-              {{ product.updatedAt | date: 'short' }}
-            </td>
-          </ng-container>
-
-          <ng-container matColumnDef="actions">
-            <th mat-header-cell *matHeaderCellDef><span class="visually-hidden">Actions</span></th>
-            <td mat-cell *matCellDef="let product" class="align-end">
-              <button
-                mat-icon-button
-                type="button"
-                [matMenuTriggerFor]="actions"
-                [attr.aria-label]="'Actions for ' + product.name"
-              >
-                <mat-icon>more_vert</mat-icon>
-              </button>
-              <mat-menu #actions="matMenu" xPosition="before">
-                <button mat-menu-item type="button" (click)="openStockDialog(product, 'remove')">
-                  <mat-icon>inventory</mat-icon>
-                  <span>Adjust stock…</span>
-                </button>
-                <button mat-menu-item type="button" (click)="openEdit(product)">
-                  <mat-icon>edit</mat-icon>
-                  <span>Edit</span>
-                </button>
-                <button
-                  mat-menu-item
-                  type="button"
-                  class="menu-danger"
-                  (click)="confirmDelete(product)"
-                >
-                  <mat-icon>delete</mat-icon>
-                  <span>Delete</span>
-                </button>
-              </mat-menu>
-            </td>
-          </ng-container>
-
-          <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
-          <tr mat-row *matRowDef="let product; columns: displayedColumns"></tr>
-          <tr class="mat-mdc-row" *matNoDataRow>
-            <td class="state" [attr.colspan]="displayedColumns.length">
-              @if (!store.isLoading()) {
-                <mat-icon>inventory_2</mat-icon>
-                <p>No products match the current filter.</p>
-              }
-            </td>
-          </tr>
+            }
+          </tbody>
         </table>
       </div>
 
-      <mat-paginator
-        [length]="store.totalCount()"
-        [pageIndex]="pageIndex()"
+      <app-paginator
+        [page]="store.query().page"
         [pageSize]="store.query().pageSize"
-        [pageSizeOptions]="pageSizeOptions"
-        (page)="onPage($event)"
-        showFirstLastButtons
-        aria-label="Select page of products"
+        [totalCount]="store.totalCount()"
+        (pageChange)="onPage($event)"
       />
     }
-  </div>
-</section>
+  </section>
+</div>

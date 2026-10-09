@@ -9,7 +9,7 @@ describe('App', () => {
     await fixture.whenStable();
 
     const element = fixture.nativeElement as HTMLElement;
-    expect(element.querySelector('mat-toolbar')?.textContent).toContain('Product Management');
+    expect(element.querySelector('header')?.textContent).toContain('Product Management');
     expect(element.querySelector('router-outlet')).not.toBeNull();
   });
 });

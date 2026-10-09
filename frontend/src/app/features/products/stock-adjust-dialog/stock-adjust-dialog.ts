@@ -1,15 +1,11 @@
+import { DIALOG_DATA, DialogRef } from '@angular/cdk/dialog';
 import { Component, computed, inject, signal } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
-import { MatButtonModule } from '@angular/material/button';
-import { MatButtonToggleModule } from '@angular/material/button-toggle';
-import { MAT_DIALOG_DATA, MatDialogModule, MatDialogRef } from '@angular/material/dialog';
-import { MatFormFieldModule } from '@angular/material/form-field';
-import { MatInputModule } from '@angular/material/input';
-import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { ApiError } from '../../../core/http/api-error';
 import { integer } from '../../../shared/forms/validators';
 import { validationMessage } from '../../../shared/forms/validation-message';
+import { Icon, IconName } from '../../../shared/ui/icon/icon';
 import { PRODUCT_LIMITS, Product, StockOperation } from '../data-access/product-models';
 import { ProductsStore } from '../data-access/products-store';
 import { StockStatus } from '../stock-status/stock-status';
@@ -27,23 +23,22 @@ export interface StockAdjustDialogData {
  */
 @Component({
   selector: 'app-stock-adjust-dialog',
-  imports: [
-    ReactiveFormsModule,
-    MatDialogModule,
-    MatButtonModule,
-    MatButtonToggleModule,
-    MatFormFieldModule,
-    MatInputModule,
-    MatProgressBarModule,
-    StockStatus,
-  ],
+  imports: [ReactiveFormsModule, Icon, StockStatus],
   templateUrl: './stock-adjust-dialog.html',
-  styleUrl: './stock-adjust-dialog.scss',
 })
 export class StockAdjustDialog {
-  private readonly data = inject<StockAdjustDialogData>(MAT_DIALOG_DATA);
-  private readonly dialogRef = inject<MatDialogRef<StockAdjustDialog, Product>>(MatDialogRef);
+  private readonly data = inject<StockAdjustDialogData>(DIALOG_DATA);
+  protected readonly dialogRef = inject<DialogRef<Product, StockAdjustDialog>>(DialogRef);
   private readonly store = inject(ProductsStore);
+
+  protected readonly operationOptions: readonly {
+    value: StockOperation;
+    label: string;
+    icon: IconName;
+  }[] = [
+    { value: 'remove', label: 'Remove stock', icon: 'minus' },
+    { value: 'add', label: 'Add stock', icon: 'plus' },
+  ];
 
   protected readonly product = this.data.product;
   protected readonly saving = signal(false);
@@ -63,6 +58,8 @@ export class StockAdjustDialog {
     initialValue: this.form.getRawValue(),
   });
 
+  protected readonly operation = computed(() => this.formValue().operation);
+
   /** Stock after the change, or null when the input is not a valid quantity yet. */
   protected readonly resultingStock = computed(() => {
     const { operation, quantity } = this.formValue();
@@ -73,6 +70,10 @@ export class StockAdjustDialog {
       ? this.product.stockQuantity - quantity
       : this.product.stockQuantity + quantity;
   });
+
+  protected setOperation(operation: StockOperation): void {
+    this.form.controls.operation.setValue(operation);
+  }
 
   protected quantityError(): string | null {
     const control = this.form.controls.quantity;

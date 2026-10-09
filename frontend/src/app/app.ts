@@ -1,13 +1,13 @@
 import { Component } from '@angular/core';
 import { RouterLink, RouterOutlet } from '@angular/router';
-import { MatIconModule } from '@angular/material/icon';
-import { MatToolbarModule } from '@angular/material/toolbar';
+import { Icon } from './shared/ui/icon/icon';
+import { ToastOutlet } from './shared/ui/toasts/toast-outlet';
 
-/** Application shell: top bar + routed content. */
+/** Application shell: top bar, routed content and the notifications outlet. */
 @Component({
   selector: 'app-root',
-  imports: [RouterOutlet, RouterLink, MatToolbarModule, MatIconModule],
+  imports: [RouterOutlet, RouterLink, Icon, ToastOutlet],
   templateUrl: './app.html',
-  styleUrl: './app.scss',
+  host: { class: 'flex min-h-full flex-col' },
 })
 export class App {}

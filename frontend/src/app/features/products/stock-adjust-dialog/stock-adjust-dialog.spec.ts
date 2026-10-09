@@ -1,5 +1,5 @@
+import { DIALOG_DATA, DialogRef } from '@angular/cdk/dialog';
 import { TestBed } from '@angular/core/testing';
-import { MAT_DIALOG_DATA, MatDialogRef } from '@angular/material/dialog';
 import { of, throwError } from 'rxjs';
 import { aProduct } from '../../../../testing/product-fixtures';
 import { ApiError } from '../../../core/http/api-error';
@@ -9,15 +9,15 @@ import { StockAdjustDialog } from './stock-adjust-dialog';
 describe('StockAdjustDialog', () => {
   const product = aProduct({ stockQuantity: 9 });
   let store: { adjustStock: ReturnType<typeof vi.fn> };
-  let dialogRef: { close: ReturnType<typeof vi.fn> };
+  let dialogRef: { close: ReturnType<typeof vi.fn>; disableClose: boolean };
 
   async function open() {
     store = { adjustStock: vi.fn() };
-    dialogRef = { close: vi.fn() };
+    dialogRef = { close: vi.fn(), disableClose: false };
     TestBed.configureTestingModule({
       providers: [
-        { provide: MAT_DIALOG_DATA, useValue: { product, operation: 'remove' } },
-        { provide: MatDialogRef, useValue: dialogRef },
+        { provide: DIALOG_DATA, useValue: { product, operation: 'remove' } },
+        { provide: DialogRef, useValue: dialogRef },
         { provide: ProductsStore, useValue: store },
       ],
     });
@@ -47,7 +47,8 @@ describe('StockAdjustDialog', () => {
     await enterQuantity(fixture, 12);
 
     const text = (fixture.nativeElement as HTMLElement).textContent!;
-    expect(text).toContain('Stock after this change: -3');
+    expect(text).toContain('Stock after this change');
+    expect(text).toContain('-3');
     expect(text).toContain('not enough stock');
   });
 
@@ -61,6 +62,19 @@ describe('StockAdjustDialog', () => {
 
     expect(store.adjustStock).toHaveBeenCalledWith(product, 'remove', 3);
     expect(dialogRef.close).toHaveBeenCalledWith(updated);
+  });
+
+  it('switches between removing and adding stock', async () => {
+    const fixture = await open();
+    const addOption = [
+      ...(fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('[role=radio]'),
+    ].find((button) => button.textContent?.includes('Add stock'))!;
+
+    addOption.click();
+    await enterQuantity(fixture, 5);
+
+    expect(addOption.getAttribute('aria-checked')).toBe('true');
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('14');
   });
 
   it("shows the API's explanation when the change is rejected", async () => {
@@ -77,6 +91,7 @@ describe('StockAdjustDialog', () => {
       (fixture.nativeElement as HTMLElement).querySelector('[role=alert]')!.textContent,
     ).toContain('Only 9 available.');
     expect(dialogRef.close).not.toHaveBeenCalled();
+    expect(dialogRef.disableClose).toBe(false);
   });
 
   it('does not call the API for an invalid quantity', async () => {

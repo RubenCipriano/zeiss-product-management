@@ -57,3 +57,10 @@ export const PRODUCT_LIMITS = {
 export const LOW_STOCK_THRESHOLD = 10;
 
 export const DEFAULT_PAGE_SIZE = 20;
+
+/** Headline numbers for the dashboard cards. */
+export interface InventorySummary {
+  totalProducts: number;
+  lowStock: number;
+  outOfStock: number;
+}

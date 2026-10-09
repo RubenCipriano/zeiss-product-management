@@ -3,20 +3,37 @@ import { LOW_STOCK_THRESHOLD } from '../data-access/product-models';
 
 type StockLevel = 'out' | 'low' | 'ok';
 
-const LABELS: Record<StockLevel, string> = {
-  out: 'Out of stock',
-  low: 'Low stock',
-  ok: 'In stock',
+const LEVELS: Record<StockLevel, { label: string; badge: string; dot: string }> = {
+  out: {
+    label: 'Out of stock',
+    badge: 'bg-red-50 text-red-700 ring-red-600/15',
+    dot: 'bg-red-500',
+  },
+  low: {
+    label: 'Low stock',
+    badge: 'bg-amber-50 text-amber-800 ring-amber-600/20',
+    dot: 'bg-amber-500',
+  },
+  ok: {
+    label: 'In stock',
+    badge: 'bg-emerald-50 text-emerald-700 ring-emerald-600/20',
+    dot: 'bg-emerald-500',
+  },
 };
 
-/** Shows a stock quantity together with an at-a-glance status. Purely presentational. */
+/** A stock quantity with an at-a-glance status. Purely presentational. */
 @Component({
   selector: 'app-stock-status',
-  templateUrl: './stock-status.html',
-  styleUrl: './stock-status.scss',
+  template: `
+    <span class="size-1.5 rounded-full" [class]="style().dot"></span>
+    <span class="min-w-[2ch] text-right font-semibold tabular-nums">{{ quantity() }}</span>
+    <span>{{ style().label }}</span>
+  `,
   host: {
-    '[class]': '"stock-status stock-status--" + level()',
-    '[attr.aria-label]': 'quantity() + " units, " + label()',
+    class:
+      'inline-flex min-w-32 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium whitespace-nowrap ring-1 ring-inset',
+    '[class]': 'style().badge + " stock-status--" + level()',
+    '[attr.aria-label]': 'quantity() + " units, " + style().label',
   },
 })
 export class StockStatus {
@@ -30,5 +47,5 @@ export class StockStatus {
     return quantity <= LOW_STOCK_THRESHOLD ? 'low' : 'ok';
   });
 
-  protected readonly label = computed(() => LABELS[this.level()]);
+  protected readonly style = computed(() => LEVELS[this.level()]);
 }

@@ -1,6 +1,6 @@
+import { DIALOG_DATA, DialogRef } from '@angular/cdk/dialog';
 import { Component, inject } from '@angular/core';
-import { MatButtonModule } from '@angular/material/button';
-import { MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
+import { Icon } from '../icon/icon';
 
 export interface ConfirmDialogData {
   title: string;
@@ -8,13 +8,13 @@ export interface ConfirmDialogData {
   confirmLabel: string;
 }
 
-/** Generic yes/no confirmation. Closes with `true` when confirmed. */
+/** Generic destructive-action confirmation. Closes with `true` when confirmed. */
 @Component({
   selector: 'app-confirm-dialog',
-  imports: [MatDialogModule, MatButtonModule],
+  imports: [Icon],
   templateUrl: './confirm-dialog.html',
-  styleUrl: './confirm-dialog.scss',
 })
 export class ConfirmDialog {
-  protected readonly data = inject<ConfirmDialogData>(MAT_DIALOG_DATA);
+  protected readonly data = inject<ConfirmDialogData>(DIALOG_DATA);
+  protected readonly dialogRef = inject<DialogRef<boolean>>(DialogRef);
 }
