@@ -12,7 +12,8 @@ instances). Two invariants must hold under any interleaving:
 
 ## Decision
 
-Each stock change is a **single conditional UPDATE**, issued with EF Core's `ExecuteUpdateAsync`:
+Each stock change is a **single conditional UPDATE**. (Since [0016](0016-stock-ledger.md) the same statement also
+writes the ledger row, as a data-modifying CTE; the condition is unchanged.)
 
 ```sql
 UPDATE products
@@ -22,11 +23,12 @@ WHERE  id = @id
   AND  stock_quantity <= @maxCurrent;     -- MAX - delta when adding
 ```
 
-* The **rule lives in the domain** (`Product.CanAdjustStockBy(delta)`). It is an expression tree, so EF Core translates it
-  into the `WHERE` clause. The domain still owns the business rule, and the database evaluates it atomically.
+* The **rule lives in the domain**: `Product.StockRangeAllowingAdjustment(delta)` returns the range the current stock
+  must be in for the change to be allowed, and that range becomes the `WHERE` clause. The domain still owns the
+  business rule, and the database evaluates it atomically.
 * PostgreSQL locks the row for the statement and re-evaluates the `WHERE` against the latest committed version. Concurrent
   decrements therefore serialise at the row level and each one sees the result of the previous one.
-* 1 affected row means success. 0 means the product does not exist or the rule was not met. The service then reads the
+* A returned row means success. None means the product does not exist or the rule was not met. The service then reads the
   current state once, to tell those cases apart (404 vs 409) and to return the updated product or the available quantity.
 * Bounds are computed in C#, so the SQL never computes `stock + delta` and cannot overflow.
 * A database `CHECK (stock_quantity BETWEEN 0 AND 1000000)` is the last line of defence for any other write path.
@@ -47,10 +49,10 @@ requests lose nothing) and by the BDD scenario *"Simultaneous orders never overs
   (`ProductTests.CanAdjustStockBy_*`).
 * The UPDATE changes `xmin`, so an editor holding an older ETag gets a 412 instead of silently overwriting the new stock
   with an outdated value (see [0004](0004-optimistic-concurrency.md)).
-* **Connection retries are disabled on purpose** (`EnableRetryOnFailure` is not used). The stock endpoints are not
-  idempotent. If a connection dropped after the UPDATE committed but before the acknowledgement arrived, an automatic
-  retry would apply the change twice. Making them safely retryable needs an `Idempotency-Key` header and a record of
-  processed keys. That is listed as future work.
+* **Connection retries are disabled on purpose** (`EnableRetryOnFailure` is not used). If a connection dropped after
+  the UPDATE committed but before the acknowledgement arrived, an automatic retry inside the API would apply the
+  change twice. Retries belong to the client, with an `Idempotency-Key`, which makes them safe across replicas
+  ([0017](0017-idempotency-keys.md)).
 
 ## Alternatives considered
 

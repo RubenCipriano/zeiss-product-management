@@ -49,7 +49,7 @@ internal sealed class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsF
             context.Result = Problem(
                 http,
                 StatusCodes.Status400BadRequest,
-                "invalid_idempotency_key",
+                "idempotency_key_invalid",
                 $"'{HeaderName}' must be 1-{MaxKeyLength} characters of letters, digits, '-', '_', '.' or ':'.");
             return;
         }

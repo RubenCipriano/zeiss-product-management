@@ -20,22 +20,27 @@ internal sealed partial class RedisCatalogCache(
 
     private IDatabase Database => redis.GetDatabase();
 
-    private RedisKey GenerationKey => $"{_prefix}:catalog:generation";
-
-    public async Task<long?> GetGenerationAsync()
+    private RedisKey GenerationKey(CacheGeneration generation) => generation switch
     {
+        CacheGeneration.Listing => $"{_prefix}:catalog:listing-generation",
+        _ => $"{_prefix}:catalog:generation",
+    };
+
+    public async Task<long?> GetGenerationAsync(CacheGeneration generation)
+    {
+        var key = GenerationKey(generation);
         try
         {
-            var generation = await Database.StringGetAsync(GenerationKey);
-            if (generation.HasValue)
+            var value = await Database.StringGetAsync(key);
+            if (value.HasValue)
             {
-                return (long)generation;
+                return (long)value;
             }
 
             // First use, or Redis lost its data. Start from the clock instead of 0, so a generation number is never
             // reused for a different state of the catalogue. Only the first writer wins (NX).
-            await Database.StringSetAsync(GenerationKey, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), when: When.NotExists);
-            return (long)await Database.StringGetAsync(GenerationKey);
+            await Database.StringSetAsync(key, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), when: When.NotExists);
+            return (long)await Database.StringGetAsync(key);
         }
         catch (Exception exception) when (IsCacheFailure(exception))
         {
@@ -72,17 +77,28 @@ internal sealed partial class RedisCatalogCache(
         }
     }
 
-    public async Task InvalidateAsync()
+    public async Task InvalidateAsync(CatalogChange change)
     {
         try
         {
-            await Database.StringIncrementAsync(GenerationKey);
+            await IncrementAsync(GenerationKey(CacheGeneration.Data));
+            if (change == CatalogChange.Products)
+            {
+                await IncrementAsync(GenerationKey(CacheGeneration.Listing));
+            }
         }
         catch (Exception exception) when (IsCacheFailure(exception))
         {
             // The write itself succeeded; readers may see the previous state until the entries' TTL expires.
             LogInvalidationFailed(exception);
         }
+    }
+
+    // A missing generation starts from the clock here too (INCR alone would start it at 1).
+    private async Task IncrementAsync(RedisKey key)
+    {
+        await Database.StringSetAsync(key, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), when: When.NotExists);
+        await Database.StringIncrementAsync(key);
     }
 
     private RedisKey Key(string key) => $"{_prefix}:{key}";

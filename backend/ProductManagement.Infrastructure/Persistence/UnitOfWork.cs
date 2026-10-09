@@ -27,7 +27,7 @@ internal sealed class UnitOfWork(ProductManagementDbContext context, ICatalogCac
         // Only after the commit: invalidating earlier would let a concurrent reader re-cache the old state.
         if (catalogueChanges)
         {
-            await cache.InvalidateAsync();
+            await cache.InvalidateAsync(CatalogChange.Products);
         }
     }
 }

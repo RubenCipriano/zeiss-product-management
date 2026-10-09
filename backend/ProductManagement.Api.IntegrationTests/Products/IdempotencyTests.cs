@@ -113,7 +113,7 @@ public sealed class IdempotencyTests(ApiFixture fixture) : ApiTestBase(fixture)
         using var response = await SendAsync(Api, HttpMethod.Post, "api/products", key, TestProducts.CreateRequest());
 
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
-        (await ReadProblemAsync(response)).ErrorCode.ShouldBe("invalid_idempotency_key");
+        (await ReadProblemAsync(response)).ErrorCode.ShouldBe("idempotency_key_invalid");
     }
 
     [Fact]

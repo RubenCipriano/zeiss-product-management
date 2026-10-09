@@ -54,7 +54,8 @@ internal sealed class ProductRepository(ProductManagementDbContext context, ICat
             return null;
         }
 
-        await cache.InvalidateAsync();
+        // Stock only: lists keep their cached membership and order, and read the new quantity with the rows.
+        await cache.InvalidateAsync(CatalogChange.Stock);
         return stockAfter[0];
     }
 }

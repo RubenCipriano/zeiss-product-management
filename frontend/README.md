@@ -36,7 +36,7 @@ src/app/
   features/auth/login/  sign-in page
   features/products/
     data-access/ ProductsApi, CategoriesApi (HTTP), ProductsStore (signals + rxResource), models
-    product-list/, product-form-dialog/, stock-adjust-dialog/, stock-status/
+    product-list/, product-form-dialog/, stock-adjust-dialog/, stock-history-dialog/, stock-status/
 src/testing/     test fixtures
 ```
 

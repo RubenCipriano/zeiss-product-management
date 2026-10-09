@@ -21,7 +21,7 @@ A product and stock management system:
 - [Develop](#develop)
 - [Tests](#tests)
 - [Requirements checklist](#requirements-checklist)
-- [Architecture](#architecture)
+- [Architecture](#architecture) (diagrams and what each component does: [docs/architecture.md](docs/architecture.md))
 - [API reference](#api-reference)
 - [Security](#security)
 - [Performance and scaling](#performance-and-scaling)
@@ -261,6 +261,7 @@ full schema is in Swagger.
 | DELETE | `/products/{id}` (optional `If-Match`)            | `products:write` | 204                            | 404, 409, 412      |
 | POST   | `/products/{id}/decrement-stock/{quantity}`       | `stock:write`    | 200 `Product` + `ETag`         | 400, 404, 409      |
 | POST   | `/products/{id}/add-to-stock/{quantity}`          | `stock:write`    | 200 `Product` + `ETag`         | 400, 404, 409      |
+| GET    | `/products/{id}/stock-movements?page=&pageSize=`  | `products:read`  | 200 `PagedResponse<StockMovement>`, newest first | 404 |
 | GET    | `/categories`                                     | `products:read`  | 200 `Category[]`               | –                  |
 
 Every endpoint may also answer **401** (no or invalid token), **403** (missing permission) or **429** (rate limited,
@@ -275,6 +276,15 @@ with `Retry-After`).
   "createdAt": "2026-10-09T13:38:11.29+00:00", "updatedAt": "2026-10-09T13:55:02.10+00:00", "version": 812
 }
 ```
+
+**Idempotency-Key** (optional, recommended) on `POST /products`, `decrement-stock` and `add-to-stock`: one key per
+operation (1–128 chars of `A-Z a-z 0-9 - _ . :`, e.g. a UUID), reused when retrying. The operation runs once,
+whichever replica the copies reach. Copies get the original response with `Idempotent-Replayed: true`
+([ADR 0017](docs/adr/0017-idempotency-keys.md)).
+
+**StockMovement:** `{ id, quantityChange, stockAfter, reason, performedBy, occurredAt }`, with `reason` one of
+`InitialStock`, `StockAdded`, `StockRemoved`, `Correction`. A product's stock always equals the sum of its movements
+([ADR 0016](docs/adr/0016-stock-ledger.md)).
 
 **Create / update body:** `name` (required, ≤ 200), `description` (≤ 2000), `price` (0.01–1,000,000, ≤ 2
 decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` replaces all fields.
@@ -295,6 +305,10 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
 | `invalid_client`                  | 401    | wrong client id or secret (deliberately not saying which) |
 | `rate_limited`                    | 429    | see `Retry-After` |
 | `too_many_failed_attempts`        | 429    | too many failed sign-ins from this IP; see `Retry-After` |
+| `idempotency_key_invalid`         | 400    | the `Idempotency-Key` header is empty, too long or has invalid characters |
+| `idempotency_key_in_progress`     | 409    | a copy of this request is still running: retry shortly |
+| `idempotency_key_reused`          | 422    | the key was already used for a different request |
+| `idempotency_unavailable`         | 503    | the key store (Redis) is unreachable; the request was not run |
 | `http_<status>`                   | any    | framework errors: `http_401`, `http_403`, `http_404` (unknown route), ... |
 | `internal_error`                  | 500    | details only in the logs (correlate with `traceId`) |
 
@@ -393,7 +407,7 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 | ------ | --- |
 | Stock changes bypass load-modify-save | Atomicity under concurrency. The rule stays in the domain as an expression ([0003](docs/adr/0003-atomic-stock-updates.md)). |
 | Nullable value types in request DTOs | A missing field becomes a validation error instead of a silent `0`. |
-| No `EnableRetryOnFailure` | The stock endpoints are not idempotent: a blind retry after an ambiguous commit could apply a change twice. |
+| No `EnableRetryOnFailure` | A blind retry inside the API after an ambiguous commit could apply a stock change twice. Retries belong to the client, with an `Idempotency-Key`. |
 | `If-Match` optional | Easy to try with Swagger or curl. The UI always sends it, and making it mandatory (428) is one line. |
 | Global cache generation (any write invalidates all cached reads) | Simple and race-free across replicas. It costs hit rate under heavy writes, as the load tests measured. |
 | In-memory API rate limiter | Fairness per replica with no extra network hop. Global quotas would need Redis; the gateway provides the coarse cluster-wide limit. |
@@ -426,7 +440,8 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 * **Observability:** OpenTelemetry traces and metrics (ASP.NET Core, EF Core, Npgsql, Redis), with dashboards and
   alerts on the SLOs used by the load tests.
 * A **HorizontalPodAutoscaler** for the API, once the database has headroom.
-* **Finer cache invalidation** (per product) and **Idempotency-Key** support for the stock endpoints.
+* **Keyset pagination** (`?after=`) for constant-time deep pages; monthly partitions for `stock_movements`.
+* A replicated Redis, so idempotency claims survive a Redis restart.
 * **GitOps** (Argo CD or Flux) with per-environment overlays (Kustomize or Helm) instead of deploy scripts.
 
 ---

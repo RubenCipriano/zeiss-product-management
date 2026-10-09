@@ -6,8 +6,8 @@ using ProductManagement.Testing;
 namespace ProductManagement.Api.IntegrationTests.Products;
 
 /// <summary>
-/// The Redis read cache: reads are served from it, every write through the API invalidates it for all replicas,
-/// and an unavailable cache never breaks the API. (Every other test in this assembly also runs with the cache on,
+/// The Redis read cache: reads are served from it, writes through the API invalidate what they affect for all
+/// replicas, and an unavailable cache never breaks the API. (Every other test in this assembly also runs with the cache on,
 /// so read-after-write correctness is covered across the whole suite.)
 /// </summary>
 public sealed class CacheTests(ApiFixture fixture) : ApiTestBase(fixture)
@@ -48,6 +48,36 @@ public sealed class CacheTests(ApiFixture fixture) : ApiTestBase(fixture)
         (await replicaB.GetProductAsync(product.Id)).StockQuantity.ShouldBe(6);
         using var listAfter = await replicaB.ListAsync();
         (await ProductApiClient.ReadPageAsync(listAfter)).Items.Single().StockQuantity.ShouldBe(6);
+    }
+
+    [Fact]
+    public async Task StockChanges_KeepListsCached_WhileTheyStillShowTheCurrentStock()
+    {
+        var product = await Api.CreateProductAsync(TestProducts.CreateRequest(name: "Listed", stockQuantity: 10));
+        using (var warm = await Api.ListAsync())
+        {
+            (await ProductApiClient.ReadPageAsync(warm)).TotalCount.ShouldBe(1);
+        }
+
+        // A product appears behind the API's back, then the stock of the listed one changes.
+        await ExecuteSqlAsync(
+            "INSERT INTO products (id, name, price, stock_quantity, category_id, created_at, updated_at) " +
+            "VALUES (999998, 'Inserted directly', 1, 1, 1, now(), now())");
+        (await Api.DecrementStockAsync(product.Id, 4)).Dispose();
+
+        // Which products the list holds is still cached (a stock change cannot alter it), but the row is current.
+        using (var afterStockChange = await Api.ListAsync())
+        {
+            var page = await ProductApiClient.ReadPageAsync(afterStockChange);
+            page.TotalCount.ShouldBe(1);
+            page.Items.Single().StockQuantity.ShouldBe(6);
+        }
+
+        // A change to the catalogue itself (an edit) refreshes the list.
+        var current = await Api.GetProductAsync(product.Id);
+        (await Api.UpdateAsync(product.Id, TestProducts.UpdateRequest(current, name: "Listed, renamed"))).Dispose();
+        using var afterEdit = await Api.ListAsync();
+        (await ProductApiClient.ReadPageAsync(afterEdit)).TotalCount.ShouldBe(2);
     }
 
     [Fact]

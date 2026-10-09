@@ -19,3 +19,6 @@ Short records of the decisions that shape this codebase: the context, the decisi
 | 0013 | [UI with Tailwind CSS and Angular CDK](0013-ui-tailwind-cdk.md)              |
 | 0014 | [MCP server for AI assistants](0014-mcp-server.md)                          |
 | 0015 | [Load testing with k6, inside the cluster](0015-load-testing.md)            |
+| 0016 | [Stock ledger written in the same statement as the stock change](0016-stock-ledger.md) |
+| 0017 | [Idempotency keys for create and stock changes](0017-idempotency-keys.md)   |
+| 0018 | [Autoscaling and testing at scale](0018-autoscaling-and-scale-testing.md)   |

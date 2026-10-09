@@ -14,7 +14,9 @@ A documentação técnica "oficial" (em inglês, para os avaliadores) está no [
 > para o stock. Testei-os com testes de integração contra PostgreSQL real e com testes de carga em Kubernetes com
 > várias réplicas. Para produção, acrescentei autenticação JWT emitida pela própria API a consumers registados,
 > RBAC, rate limiting, cache Redis, um gateway nginx com cache, deploy em Kubernetes (Docker Desktop) separado
-> por frontend e backend, e um servidor MCP para assistentes de IA."
+> por frontend e backend, e um servidor MCP para assistentes de IA. Por fim, validei a escala: 850 mil produtos e
+> 5 milhões de movimentos de stock, a API a escalar sozinha (HPA, 2 a 8 réplicas), e um teste com dez equipas em
+> simultâneo que prova que nenhum pedido repetido é aplicado duas vezes, mesmo em réplicas diferentes."
 
 ---
 
@@ -94,8 +96,14 @@ O PostgreSQL bloqueia a linha durante o statement e reavalia o `WHERE` com o val
 ficam em fila, e cada um vê o resultado do anterior. Se a linha não for alterada (0 linhas), ou o produto não existe
 (404) ou não há stock (409 com a quantidade disponível).
 
-**A regra continua no domínio:** `Product.CanAdjustStockBy(delta)` é uma *expression tree* que o EF Core traduz para
-o `WHERE`. O domínio define a regra e a base de dados aplica-a atomicamente.
+**A regra continua no domínio:** `Product.StockRangeAllowingAdjustment(delta)` diz em que intervalo o stock atual
+tem de estar para a alteração ser permitida, e esse intervalo vai para o `WHERE`. O domínio define a regra e a base
+de dados aplica-a atomicamente.
+
+**Histórico (ledger):** o mesmo statement também insere a linha em `stock_movements` (um CTE que faz o UPDATE e o
+INSERT de uma vez). Nunca há alteração de stock sem o seu movimento, e o `stock_after` de cada movimento é o valor
+exato produzido pelo lock da linha. Por isso, para qualquer produto, **stock = soma dos movimentos** — e isso é
+verificável depois de qualquer teste de carga ([ADR 0016](adr/0016-stock-ledger.md)).
 
 **Porque não "ler → alterar → gravar" com concorrência otimista?** Sob carga, a maioria dos pedidos entraria em
 conflito e teria de repetir (trabalho O(N²)), e o cliente veria erros em pedidos que podiam ter tido sucesso.
@@ -104,6 +112,29 @@ conflito e teria de repetir (trabalho O(N²)), e o cliente veria erros em pedido
 * teste de integração: 60 encomendas paralelas para 25 unidades → exatamente 25 sucessos e stock 0;
 * teste de carga em Kubernetes com várias réplicas: 300 encomendas para 100 unidades → exatamente 100 sucessos,
   200 × 409, stock final 0.
+
+### 4.3 Um pedido repetido nunca é aplicado duas vezes (réplica 1 ou réplica 2)
+
+**O problema:** o cliente faz timeout e repete, o utilizador clica duas vezes, a rede perde a resposta. O mesmo
+pedido chega duas vezes — e com várias réplicas, pode chegar **à réplica 1 e à réplica 2 ao mesmo tempo**. Uma
+lista em memória de "já vi este pedido" não serve, porque cada réplica tem a sua.
+
+**Solução: `Idempotency-Key`** (header standard, rascunho IETF) em criar produto e nas operações de stock:
+
+1. O cliente gera uma chave por ação (a app usa `crypto.randomUUID()`) e reutiliza-a se repetir.
+2. Antes de executar, a réplica faz `SET chave NX` no **Redis, que é partilhado** por todas as réplicas. O Redis
+   executa um comando de cada vez: de duas cópias simultâneas, **só uma ganha**, seja qual for a réplica.
+3. No fim, guarda a resposta (24 h). Uma cópia que chegue depois recebe **a mesma resposta**, com
+   `Idempotent-Replayed: true`, sem executar nada.
+4. Cópia que chega enquanto a primeira ainda corre → `409 idempotency_key_in_progress`. Mesma chave com outro corpo
+   → `422`. Redis em baixo → `503` (prefiro recusar a arriscar um duplicado).
+
+**Prova:** testes de integração com 2 instâncias da API (20 cópias simultâneas → stock desce 1), e o teste de carga
+`teams`, que envia 30% das alterações duas vezes e no fim compara "alterações aplicadas" com "linhas novas no
+ledger": têm de ser iguais ([ADR 0017](adr/0017-idempotency-keys.md)).
+
+**IDs duplicados também não:** os IDs vêm da *sequence* do PostgreSQL, que dá cada número uma só vez, a qualquer
+réplica. Com 850 mil produtos, a verificação `count(*) - count(DISTINCT id)` dá 0.
 
 ---
 
@@ -211,8 +242,11 @@ conflito e teria de repetir (trabalho O(N²)), e o cliente veria erros em pedido
   label `gateway`.
 * **Cluster no Docker Desktop:** Kubernetes ativado no Docker Desktop, onde se veem os pods. O gateway é um serviço
   `LoadBalancer` em http://localhost:8080. Os mesmos YAML também correm em MicroK8s (usado no CI).
-* **Escalar só o backend:** `kubectl -n product-management scale deployment/api --replicas=4`, sem mexer no
-  frontend. O nginx aponta para o serviço **headless** da API com `resolve` e volta a resolver o DNS a cada 5 s. Vê
+* **A API escala sozinha (HPA):** entre 2 e 8 réplicas, conforme o CPU (alvo 60%). Sobe depressa (até 2 pods a
+  cada 30 s) e desce devagar (3 minutos de carga baixa), porque adicionar tarde custa erros e remover tarde só custa
+  um pouco de CPU. O máximo 8 vem da base de dados: 8 réplicas × 20 ligações = 160, abaixo das 300 do PostgreSQL.
+  Mudar os limites sem tocar no frontend: `kubectl -n product-management patch hpa api -p '{"spec":{"minReplicas":4}}'`.
+  O nginx aponta para o serviço **headless** da API com `resolve` e volta a resolver o DNS a cada 5 s. Vê
   cada pod individualmente e distribui **por pedido** (`least_conn`). Num teste, 200 pedidos ficaram
   50/50/50/50 pelas 4 réplicas.
   * *Porque não um Service normal?* O Service normal distribui por ligação TCP; com keep-alive, as ligações ficam
@@ -233,6 +267,59 @@ conflito e teria de repetir (trabalho O(N²)), e o cliente veria erros em pedido
 * **Imagens:** cada deploy gera uma tag imutável (commit + timestamp). No MicroK8s vai para o registry interno; no
   Docker Desktop usa a imagem local.
 * **Dois clusters suportados:** Docker Desktop (vês tudo na app do Docker) e MicroK8s (VM Multipass).
+
+### 9.1 O que faz cada peça
+
+Diagramas e versão em inglês: [`architecture.md`](architecture.md).
+
+**Services** (o que aparece em Docker Desktop → Kubernetes → Services). Um Service é um nome e um IP fixos à frente
+de um conjunto de pods: os pods vão e vêm (deploys, escala, falhas), o Service fica. O *Cluster IP* só é acessível
+dentro do cluster.
+
+| Service        | Porta | O que é | Quem o usa |
+| -------------- | ----- | ------- | ---------- |
+| `gateway`      | 8080  | **A porta de entrada.** nginx: rate limit por IP, headers de segurança, cache das bundles e microcache de 1 s das leituras da API; encaminha `/api` para a API e o resto para a `web`. É o único `LoadBalancer`: o Docker Desktop liga-o ao `localhost:8080`. | o browser, curl, k6 |
+| `web`          | 8080  | nginx a servir os ficheiros do Angular (HTML/JS/CSS). Não fala com a API: quem fala é o browser, através do gateway. | gateway |
+| `api`          | 8080  | IP virtual da API. O kube-proxy escolhe um pod **por ligação**. | port-forward (Swagger), ferramentas |
+| `api-headless` | 8080  | **Sem IP** (`None`): o DNS devolve o IP de **cada** pod da API. O nginx relê-o a cada 5 s e distribui **por pedido** para o pod menos ocupado — por isso uma réplica nova recebe tráfego logo. | gateway |
+| `postgres`     | 5432  | A base de dados (PostgreSQL 18). A única fonte de verdade: produtos, categorias, movimentos de stock, *sequence* dos IDs. | api, job de migrações |
+| `redis`        | 6379  | Memória partilhada pelas réplicas: cache de leituras, chaves de idempotência, contador de logins falhados. Se cair, perde-se performance, nunca dados. | api |
+
+**Porque dois Services para a API?** Com o `api`, uma ligação keep-alive do nginx fica presa a um pod e a carga
+distribui-se mal. Com o `api-headless`, o nginx conhece todos os pods e escolhe a cada pedido.
+
+**O resto dos objetos:**
+
+| Objeto | O que faz |
+| ------ | --------- |
+| Deployment `gateway` ×2, `web` ×2 | Os pods nginx. Dois de cada para não haver paragem se um falhar ou durante um deploy. |
+| Deployment `api` (2–8) | Os pods da API. *Stateless*: tudo o que é partilhado está no Redis ou no PostgreSQL, por isso qualquer réplica serve qualquer pedido. |
+| StatefulSet `postgres` + volume `data-postgres-0` | O PostgreSQL com disco persistente: os dados sobrevivem a reinícios do pod. StatefulSet porque tem identidade e disco próprios. |
+| Deployment `redis` | Redis só em memória (sem disco), política `volatile-lru`. |
+| Job `db-migrate` | Corre as migrações do EF Core **uma vez** por deploy, antes das réplicas novas. Assim as réplicas nunca competem a migrar. |
+| HPA `api` | Decide quantas réplicas da API correm, a partir do CPU medido pelo metrics-server. |
+| `metrics-server` (kube-system) | Mede CPU/memória dos pods; usado pelo HPA e por `kubectl top`. Instalado por `scripts/cluster-addons.sh`. |
+| Secret `database-credentials` | Utilizador, password e connection string (pool de 20 ligações por réplica). |
+| Secret `api-auth` | A chave que assina os JWT. A mesma em todas as réplicas, por isso um token de uma réplica vale em todas. |
+| Secret `api-consumers` | Os consumers registados (client id, hash PBKDF2 do secret, roles), montado como `config/consumers.json`. |
+| ConfigMap `api-config` | Configuração não secreta: endereço do Redis, rate limits, bloqueio de logins, tempos de idempotência. |
+| PodDisruptionBudgets | Garantem pelo menos 1 pod de `api`, `web` e `gateway` durante manutenção do nó. |
+| NetworkPolicies | Firewall interna: PostgreSQL e Redis só aceitam a API (e o job); a API e a web só aceitam o gateway. |
+| Job `k6-<cenário>` | Um teste de carga a correr dentro do cluster (`load-tests/run.sh`), temporário. |
+
+### 9.2 Dados em escala (milhões de registos)
+
+* `load-tests/seed-bulk.sh` carrega **850 mil produtos e 5 milhões de movimentos** em ~2 minutos, gerados em SQL
+  (`generate_series`): nomes realistas, 6 categorias, preços, datas nos últimos 2 anos e 1–11 movimentos por produto
+  feitos por 8 equipas (lojas, armazéns, loja online, devoluções).
+* **IDs da mesma *sequence* que a API usa**, por isso os produtos criados depois nunca colidem. 850 mil deixam ~50 mil
+  IDs livres dos 900 mil possíveis de 6 dígitos.
+* **Consistente por construção:** stock de cada produto = soma dos movimentos, e o stock nunca fica negativo pelo
+  caminho. `load-tests/verify-data.sh` confirma em segundos: IDs únicos, stock = ledger, totais acumulados certos.
+* **O que a escala revelou:** páginas muito fundas (página 40 000 = OFFSET 800 000) demoravam 1,3 s no SQL.
+  Mudei a paginação para *late row lookup* (encontrar os 20 IDs pelo índice primeiro, depois ler só essas linhas):
+  0,5 s, sem mudar a API. O passo seguinte seria paginação por cursor (keyset), que é constante. O resto (primeiras
+  páginas, pesquisa, stock baixo, histórico) fica entre 15 e 175 ms sem cache, e ~3 ms com cache.
 
 ---
 
@@ -303,7 +390,19 @@ exatamente esses erros. Uso Testcontainers e o Respawn para limpar os dados entr
 
 **"O que farias a seguir para produção?"**
 Segredos num secret manager, TLS, PostgreSQL gerido com backups e PgBouncer, OpenTelemetry com dashboards e alertas
-sobre os SLOs, HPA, invalidação de cache por produto, `Idempotency-Key` no stock e GitOps (Argo CD).
+sobre os SLOs, paginação por cursor, partições mensais no ledger, Redis replicado (para as chaves de idempotência),
+invalidação de cache por produto e GitOps (Argo CD).
+
+**"Como garantes que um pedido à réplica 1 e à réplica 2 não duplica?"**
+Três garantias diferentes: os IDs vêm de uma *sequence* (cada número sai uma vez); o stock muda num único UPDATE
+condicional (o PostgreSQL serializa por linha); e um pedido repetido com a mesma `Idempotency-Key` é reclamado no
+Redis partilhado com `SET NX`, por isso só uma réplica o executa e a outra devolve a mesma resposta. Provado com 2
+instâncias nos testes de integração e no teste de carga `teams` (alterações aplicadas = linhas novas no ledger).
+
+**"E se o volume for de milhões?"**
+Testei com 850 mil produtos e 5 milhões de movimentos. Os índices certos (`(name, id)`, trigramas, `(product_id,
+occurred_at)`) mantêm as consultas normais em dezenas de ms; o único ponto fraco eram páginas muito fundas, que
+melhorei e cuja solução completa (keyset) está identificada. O limite seguinte é a base de dados, não a API.
 
 **"Porque é que o `If-Match` é opcional?"**
 Para a API ser fácil de experimentar (Swagger, curl). A UI envia-o sempre. Torná-lo obrigatório (428) é uma linha.
@@ -320,8 +419,9 @@ O .NET 10 *é* o .NET Core: a Microsoft deixou cair o "Core" do nome no .NET 5. 
    No terminal: `curl -X POST localhost:8080/api/auth/token ...` → mostrar o JWT (no jwt.io: `sub`, `roles`, `exp`).
    Depois, 3 GETs seguidos com o mesmo token → `X-Cache-Status: MISS … HIT` (cache nginx).
 3. Abrir uma edição em dois separadores e gravar nos dois → o segundo recebe o banner de conflito (412).
-4. `kubectl -n product-management scale deployment/api --replicas=4` → mostrar os pods novos e que a app continua
-   a funcionar.
+4. Num terminal `kubectl -n product-management get hpa api -w`, noutro `RATE=300 load-tests/run.sh teams` → o HPA
+   sobe as réplicas sozinho; no fim o script mostra "aplicadas = linhas no ledger" e as verificações a 0.
+   Abrir *Stock history* de um produto na app: cada movimento com quem o fez.
 5. `load-tests/run.sh stock-consistency` → "exatamente 100 vendidas, stock 0".
 6. Swagger: tentar `DELETE` com o token do clerk → 403. Mostrar o `errorCode` nos erros.
 7. (Bónus) No Claude Code: "que produtos estão com pouco stock?" → o servidor MCP responde.
