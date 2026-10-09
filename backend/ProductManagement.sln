@@ -25,6 +25,18 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProductManagement.Domain.Un
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProductManagement.Testing", "tests\ProductManagement.Testing\ProductManagement.Testing.csproj", "{28E31420-BAF6-4845-A3AA-01DD1B618C01}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{6B1F3C7E-5D2A-4E8B-9C41-2A7D0E9F4B13}"
+	ProjectSection(SolutionItems) = preProject
+		..\.editorconfig = ..\.editorconfig
+		.editorconfig = .editorconfig
+		..\docker-compose.yml = ..\docker-compose.yml
+		..\README.md = ..\README.md
+		Directory.Build.props = Directory.Build.props
+		Directory.Packages.props = Directory.Packages.props
+		dotnet-tools.json = dotnet-tools.json
+		global.json = global.json
+	EndProjectSection
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU

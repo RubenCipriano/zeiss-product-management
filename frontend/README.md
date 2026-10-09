@@ -1,59 +1,42 @@
-# ProductManagementWeb
+# Product Management — Web
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 22.2.2.
+Angular 22 frontend for the Product Management API. Generated with Angular CLI 22 and extended as described in
+[`docs/scaffolding.md`](../docs/scaffolding.md). Architecture and decisions are in the [root README](../README.md) and
+[ADR 0007](../docs/adr/0007-frontend-state.md).
 
-## Development server
+## Run
 
-To start a local development server, run:
-
-```bash
-ng serve
-```
-
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
-
-## Code scaffolding
-
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+Requires Node 24 LTS (see `.nvmrc`) and the API running on http://localhost:5080
+(`docker compose up -d db` and then `dotnet run --project ../backend/src/ProductManagement.Api`).
 
 ```bash
-ng generate component component-name
+npm ci
+npm start          # http://localhost:4200, /api is proxied to http://localhost:5080 (proxy.conf.json)
 ```
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
+## Scripts
 
-```bash
-ng generate --help
+| Script                 | Purpose                         |
+| ---------------------- | ------------------------------- |
+| `npm start`            | Dev server with live reload     |
+| `npm test`             | Vitest in watch mode            |
+| `npm run test:ci`      | Vitest, single run              |
+| `npm run lint`         | ESLint (angular-eslint)         |
+| `npm run format`       | Prettier (write)                |
+| `npm run format:check` | Prettier (check)                |
+| `npm run build`        | Production build → `dist/`      |
+
+## Structure
+
+```
+src/app/
+  core/          app-wide services: API base URL, ApiError + HTTP interceptor, notifications
+  shared/        reusable pieces: form validators/messages, PagedResponse, ConfirmDialog
+  features/products/
+    data-access/ ProductsApi, CategoriesApi (HTTP), ProductsStore (signals + rxResource), models
+    product-list/, product-form-dialog/, stock-adjust-dialog/, stock-status/
+src/testing/     test fixtures
 ```
 
-## Building
-
-To build the project run:
-
-```bash
-ng build
-```
-
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
-
-## Running unit tests
-
-To execute unit tests with the [Vitest](https://vitest.dev/) test runner, use the following command:
-
-```bash
-ng test
-```
-
-## Running end-to-end tests
-
-For end-to-end (e2e) testing, run:
-
-```bash
-ng e2e
-```
-
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+In Docker the app is served by unprivileged nginx (`nginx.conf`), which also reverse-proxies `/api` to the API
+container, so the browser always talks to a single origin.
