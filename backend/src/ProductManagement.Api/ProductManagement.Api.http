@@ -1,6 +1,73 @@
-@ProductManagement.Api_HostAddress = http://localhost:5153
+# Requests for the Visual Studio / Rider / VS Code (REST Client) HTTP editor.
+# Start the API first (F5 in Visual Studio, or `dotnet run --project src/ProductManagement.Api`).
 
-GET {{ProductManagement.Api_HostAddress}}/weatherforecast/
+@baseUrl = http://localhost:5080
+@productId = 100000
+
+### List products (paged)
+GET {{baseUrl}}/api/products?page=1&pageSize=10
 Accept: application/json
 
-###
+### Get one product (note the ETag response header)
+GET {{baseUrl}}/api/products/{{productId}}
+Accept: application/json
+
+### Search by name (case-insensitive, partial match)
+GET {{baseUrl}}/api/products/search?name=lens
+Accept: application/json
+
+### Products with stock between min and max (inclusive)
+GET {{baseUrl}}/api/products/stock-level?min=0&max=10
+Accept: application/json
+
+### Create a product
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+
+{
+  "name": "Single Vision Lens 1.74",
+  "description": "Ultra-thin high-index lens.",
+  "price": 199.90,
+  "stockQuantity": 25,
+  "categoryId": 1
+}
+
+### Create a product - validation errors (400)
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+
+{
+  "name": "",
+  "price": 10.999,
+  "stockQuantity": -1,
+  "categoryId": 999
+}
+
+### Update a product (If-Match is optional; use the ETag from GET to enable the lost-update check)
+PUT {{baseUrl}}/api/products/{{productId}}
+Content-Type: application/json
+If-Match: "0"
+
+{
+  "name": "Single Vision Lens 1.5 (updated)",
+  "description": "Standard index single vision lens.",
+  "price": 54.90,
+  "stockQuantity": 300,
+  "categoryId": 1
+}
+
+### Remove 5 units from stock
+POST {{baseUrl}}/api/products/{{productId}}/decrement-stock/5
+
+### Add 10 units to stock
+POST {{baseUrl}}/api/products/{{productId}}/add-to-stock/10
+
+### Delete a product
+DELETE {{baseUrl}}/api/products/{{productId}}
+
+### Categories
+GET {{baseUrl}}/api/categories
+Accept: application/json
+
+### Health
+GET {{baseUrl}}/health/ready

@@ -1,23 +1,42 @@
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using ProductManagement.Api.Configuration;
+using ProductManagement.Application;
+using ProductManagement.Infrastructure;
+using InfrastructureRegistration = ProductManagement.Infrastructure.DependencyInjection;
+using ProductManagement.Infrastructure.Persistence;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-
-builder.Services.AddControllers();
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-builder.Services.AddOpenApi();
+builder.Services
+    .AddApplication()
+    .AddInfrastructure(builder.Configuration)
+    .AddApiPresentation(builder.Configuration);
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
+app.UseExceptionHandler();
+app.UseStatusCodePages();
+
+if (app.Configuration.GetValue<bool>("OpenApi:Enabled"))
 {
     app.MapOpenApi();
+    app.UseSwaggerUI(options =>
+    {
+        options.SwaggerEndpoint("/openapi/v1.json", "Product Management API v1");
+        options.DocumentTitle = "Product Management API";
+    });
 }
 
-app.UseHttpsRedirection();
-
-app.UseAuthorization();
+app.UseCors();
 
 app.MapControllers();
 
-app.Run();
+// Liveness: the process is up. Readiness: it can also reach the database.
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains(InfrastructureRegistration.DatabaseHealthCheckTag),
+});
+
+await app.Services.InitializeDatabaseAsync();
+await app.RunAsync();
