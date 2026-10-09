@@ -1,16 +1,35 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using ProductManagement.Mcp.Api;
 
 var builder = Host.CreateApplicationBuilder(args);
 
-// Configure all logs to go to stderr (stdout is used for the MCP protocol messages).
-builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
+// stdout carries the MCP protocol messages, so every log line must go to stderr.
+builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
 
-// Add the MCP services: the transport to use (stdio) and the tools to register.
+builder.Services
+    .AddOptions<ProductApiOptions>()
+    .Bind(builder.Configuration.GetSection(ProductApiOptions.SectionName))
+    .Validate(
+        options => !string.IsNullOrWhiteSpace(options.ClientSecret),
+        "ProductApi__ClientSecret is not set: the MCP server needs its client secret to sign in to the identity provider.")
+    .ValidateOnStart();
+
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<AccessTokenProvider>();
+builder.Services.AddTransient<BearerTokenHandler>();
+builder.Services.AddHttpClient(AccessTokenProvider.HttpClientName);
+builder.Services
+    .AddHttpClient<ProductApiClient>((services, http) =>
+        http.BaseAddress = services.GetRequiredService<IOptions<ProductApiOptions>>().Value.BaseUrl)
+    .AddHttpMessageHandler<BearerTokenHandler>();
+
+// Tools are discovered from [McpServerToolType] classes in this assembly (see Tools/).
 builder.Services
     .AddMcpServer()
     .WithStdioServerTransport()
-    .WithTools<RandomNumberTools>();
+    .WithToolsFromAssembly();
 
 await builder.Build().RunAsync();

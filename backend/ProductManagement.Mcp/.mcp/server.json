@@ -1,22 +1,23 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
-  "description": "<your description here>",
-  "name": "io.github.<your GitHub username here>/<your repo name>",
-  "version": "0.1.0-beta",
+  "description": "Search the product catalogue, find low-stock products and record stock movements in the Product Management API.",
+  "name": "product-management/mcp",
+  "version": "1.0.0",
   "packages": [
     {
       "registryType": "nuget",
-      "identifier": "<your package ID here>",
-      "version": "0.1.0-beta",
+      "identifier": "ProductManagement.Mcp",
+      "version": "1.0.0",
       "transport": {
         "type": "stdio"
       },
       "packageArguments": [],
-      "environmentVariables": []
+      "environmentVariables": [
+        { "name": "ProductApi__BaseUrl", "description": "Gateway URL of the Product Management API", "isRequired": false },
+        { "name": "ProductApi__TokenEndpoint", "description": "OAuth 2.0 token endpoint of the identity provider", "isRequired": false },
+        { "name": "ProductApi__ClientId", "description": "Client id of the MCP service account", "isRequired": false },
+        { "name": "ProductApi__ClientSecret", "description": "Client secret of the MCP service account", "isRequired": true, "isSecret": true }
+      ]
     }
-  ],
-  "repository": {
-    "url": "https://github.com/<your GitHub username here>/<your repo name>",
-    "source": "github"
-  }
+  ]
 }
