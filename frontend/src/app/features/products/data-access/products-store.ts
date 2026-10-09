@@ -50,9 +50,13 @@ export class ProductsStore {
     { equal: (a, b) => JSON.stringify(a) === JSON.stringify(b) },
   );
 
+  /** Set before a reload that must bypass shared caches (after the user's own changes or an explicit refresh). */
+  private nextLoadFresh = false;
+  private summaryFresh = false;
+
   private readonly productsResource = rxResource({
     params: () => this.query(),
-    stream: ({ params }) => this.api.query(params),
+    stream: ({ params }) => this.api.query(params, this.consumeFresh()),
   });
 
   /**
@@ -71,13 +75,15 @@ export class ProductsStore {
   private readonly summaryResource = rxResource({
     stream: () =>
       forkJoin({
-        all: this.api.query({ filter: { kind: 'all' }, page: 1, pageSize: 1 }),
-        low: this.api.query({
-          filter: { kind: 'stock', min: 0, max: LOW_STOCK_THRESHOLD },
-          page: 1,
-          pageSize: 1,
-        }),
-        out: this.api.query({ filter: { kind: 'stock', min: 0, max: 0 }, page: 1, pageSize: 1 }),
+        all: this.api.query({ filter: { kind: 'all' }, page: 1, pageSize: 1 }, this.summaryFresh),
+        low: this.api.query(
+          { filter: { kind: 'stock', min: 0, max: LOW_STOCK_THRESHOLD }, page: 1, pageSize: 1 },
+          this.summaryFresh,
+        ),
+        out: this.api.query(
+          { filter: { kind: 'stock', min: 0, max: 0 }, page: 1, pageSize: 1 },
+          this.summaryFresh,
+        ),
       }).pipe(
         map(({ all, low, out }): InventorySummary => ({
           totalProducts: all.totalCount,
@@ -106,7 +112,8 @@ export class ProductsStore {
           filter(() => this.document.visibilityState === 'visible' && !this.isLoading()),
           takeUntilDestroyed(inject(DestroyRef)),
         )
-        .subscribe(() => this.reload());
+        // Background refreshes may be served by the gateway's microcache.
+        .subscribe(() => this.reload({ fresh: false }));
     }
   }
 
@@ -118,7 +125,10 @@ export class ProductsStore {
     this.query.update((query) => ({ ...query, page, pageSize }));
   }
 
-  reload(): void {
+  /** `fresh` (default) bypasses shared caches: used for explicit refreshes and after the user's own changes. */
+  reload({ fresh } = { fresh: true }): void {
+    this.nextLoadFresh = fresh;
+    this.summaryFresh = fresh;
     this.productsResource.reload();
     this.summaryResource.reload();
   }
@@ -139,6 +149,12 @@ export class ProductsStore {
     return this.api
       .adjustStock(product, operation, quantity)
       .pipe(tap((updated) => this.applyChange(updated)));
+  }
+
+  private consumeFresh(): boolean {
+    const fresh = this.nextLoadFresh;
+    this.nextLoadFresh = false;
+    return fresh;
   }
 
   /**

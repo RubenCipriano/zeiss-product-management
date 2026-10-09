@@ -13,7 +13,6 @@ ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
     GATEWAY_RATE_LIMIT_RPS=200 \
     GATEWAY_RATE_LIMIT_BURST=400 \
     WEB_UPSTREAM=web.product-management.svc.cluster.local:8080 \
-    API_UPSTREAM=api-headless.product-management.svc.cluster.local:8080 \
-    IDENTITY_UPSTREAM=keycloak.product-management.svc.cluster.local:8080
+    API_UPSTREAM=api-headless.product-management.svc.cluster.local:8080
 
 EXPOSE 8080

@@ -13,9 +13,7 @@
           <p class="text-sm font-medium text-slate-900">{{ auth.userName() }}</p>
           <p class="text-xs text-slate-500">{{ auth.roles().join(', ') }}</p>
         </div>
-        <button type="button" class="btn btn-secondary py-1.5" (click)="auth.logout()">
-          Sign out
-        </button>
+        <button type="button" class="btn btn-secondary py-1.5" (click)="signOut()">Sign out</button>
       </div>
     }
   </div>

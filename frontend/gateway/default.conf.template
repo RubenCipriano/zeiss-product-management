@@ -1,6 +1,5 @@
 # Gateway: the single entry point. Everything the browser needs comes through here, from one origin:
-#   /api/*   -> API replicas (per-request load balancing, rate limiting)
-#   /auth/*  -> identity provider (Keycloak)
+#   /api/*   -> API replicas (per-request load balancing, rate limiting, 1 s microcache for reads)
 #   /*       -> web (static Angular app), with an edge cache for the immutable bundles
 #
 # ${VARIABLES} are filled from the container environment at startup (see Dockerfile).
@@ -25,12 +24,6 @@ upstream web {
   keepalive 16;
 }
 
-upstream identity {
-  zone identity 64k;
-  server ${IDENTITY_UPSTREAM} resolve;
-  keepalive 16;
-}
-
 # Per-client-IP rate limit for the API (coarse protection in front of the API's own per-user limits).
 limit_req_zone $binary_remote_addr zone=api_per_ip:10m rate=${GATEWAY_RATE_LIMIT_RPS}r/s;
 limit_req_status 429;
@@ -38,6 +31,9 @@ limit_req_log_level warn;
 
 # Edge cache for the web app's hashed static files.
 proxy_cache_path /tmp/static-cache levels=1:2 keys_zone=static_cache:10m max_size=256m inactive=7d use_temp_path=off;
+
+# Microcache for API reads (see location /api/).
+proxy_cache_path /tmp/api-cache levels=1:2 keys_zone=api_cache:10m max_size=64m inactive=1m use_temp_path=off;
 
 map $http_upgrade $connection_upgrade {
   default upgrade;
@@ -82,17 +78,32 @@ server {
     return 200 "ok\n";
   }
 
-  # ^~ : prefix matches win over the static-file regex below (e.g. /auth/resources/*.css belongs to Keycloak).
+  # ^~ : this prefix match wins over the static-file regex below.
   location ^~ /api/ {
     limit_req zone=api_per_ip burst=${GATEWAY_RATE_LIMIT_BURST} nodelay;
     proxy_pass http://api;
-  }
 
-  location ^~ /auth/ {
-    proxy_pass http://identity;
-    proxy_buffer_size 128k;
-    proxy_buffers 4 256k;
-    proxy_busy_buffers_size 256k;
+    # Microcache for reads: identical GETs within 1 s are answered by nginx without reaching the API. This flattens
+    # bursts (many dashboards polling, a refresh storm) while staying at most 1 s behind.
+    #  - The key includes the Authorization header: a cached response is only ever reused for the same token, so a
+    #    caller can never receive data it was not authorised to read, and requests without a token are never served
+    #    from cache (they get 401 from the API, which is not cached).
+    #  - Only 200 responses to GET/HEAD are stored; writes always reach the API.
+    #  - A request with `Cache-Control: no-cache` (or `Pragma`) skips the cache: the web app sends it right after
+    #    its own changes, so a user always sees the result of what they just did.
+    #  - proxy_cache_lock collapses concurrent misses for the same key into a single upstream request.
+    proxy_cache api_cache;
+    proxy_cache_methods GET HEAD;
+    proxy_cache_key "$request_method|$request_uri|$http_authorization";
+    proxy_cache_valid 200 1s;
+    proxy_cache_lock on;
+    proxy_cache_lock_timeout 2s;
+    proxy_cache_use_stale updating;
+    proxy_cache_bypass $http_cache_control $http_pragma;
+    add_header X-Cache-Status $upstream_cache_status always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
   }
 
   # Hashed bundles: served from the edge cache after the first request.

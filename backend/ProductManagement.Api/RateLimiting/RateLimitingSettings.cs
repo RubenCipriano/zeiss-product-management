@@ -19,4 +19,7 @@ internal sealed class RateLimitingSettings
     public int WritesPerSecond { get; init; } = 10;
 
     public int WriteBurst { get; init; } = 20;
+
+    /// <summary>Token requests per minute per client IP (brute-force protection).</summary>
+    public int TokenRequestsPerMinute { get; init; } = 20;
 }

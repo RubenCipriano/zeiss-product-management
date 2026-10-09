@@ -11,15 +11,14 @@ internal sealed class ProductApiOptions
     /// <summary>Gateway URL; the API lives under <c>/api</c>.</summary>
     public Uri BaseUrl { get; init; } = new("http://localhost:8080/");
 
-    /// <summary>OAuth 2.0 token endpoint of the identity provider.</summary>
-    public Uri TokenEndpoint { get; init; } =
-        new("http://localhost:8080/auth/realms/product-management/protocol/openid-connect/token");
+    /// <summary>The API's token endpoint, relative to <see cref="BaseUrl"/>.</summary>
+    public string TokenPath { get; init; } = "api/auth/token";
 
     /// <summary>
-    /// The MCP server's own identity (a Keycloak service account). It has the <c>stock-clerk</c> role: an assistant
-    /// can read the catalogue and record stock movements, but cannot create, edit or delete products.
+    /// The MCP server's own identity: a registered API consumer with the <c>stock-clerk</c> role. An assistant can read
+    /// the catalogue and record stock movements, but cannot create, edit or delete products.
     /// </summary>
-    public string ClientId { get; init; } = "product-management-mcp";
+    public string ClientId { get; init; } = "mcp-server";
 
     public string ClientSecret { get; init; } = string.Empty;
 }

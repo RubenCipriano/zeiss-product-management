@@ -25,6 +25,15 @@ describe('ProductsApi', () => {
     expect(request.request.params.get('pageSize')).toBe('50');
   });
 
+  it('asks shared caches to revalidate when fresh data is required', () => {
+    api.query({ filter: { kind: 'all' }, page: 1, pageSize: 20 }, true).subscribe();
+    api.query({ filter: { kind: 'all' }, page: 2, pageSize: 20 }).subscribe();
+
+    const [fresh, normal] = httpTesting.match((req) => req.url === '/api/products');
+    expect(fresh.request.headers.get('Cache-Control')).toBe('no-cache');
+    expect(normal.request.headers.has('Cache-Control')).toBe(false);
+  });
+
   it('uses the search endpoint for name filters', () => {
     api.query({ filter: { kind: 'name', name: 'lens' }, page: 1, pageSize: 20 }).subscribe();
 

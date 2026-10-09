@@ -7,7 +7,17 @@ using ProductManagement.Application;
 using ProductManagement.Infrastructure;
 using ProductManagement.Infrastructure.Persistence;
 
+// `dotnet ProductManagement.Api.dll hash-secret <secret>`: prints the hash to put in an API consumer's SecretHash.
+if (args is ["hash-secret", var secretToHash])
+{
+    Console.WriteLine(SecretHasher.Hash(secretToHash));
+    return;
+}
+
 var builder = WebApplication.CreateBuilder(args);
+
+// Registered API consumers can also come from a file, e.g. mounted from a Kubernetes Secret (see deploy/).
+builder.Configuration.AddJsonFile("config/consumers.json", optional: true, reloadOnChange: false);
 
 builder.Services
     .AddApplication()

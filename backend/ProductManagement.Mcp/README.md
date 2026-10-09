@@ -21,9 +21,9 @@ Tools carry MCP annotations (`readOnly`, `idempotent`, ...) so clients can ask f
 
 ## Security model
 
-The server is a **client of the REST API**, never of the database. It signs in to Keycloak with its own identity
-(OAuth 2.0 client credentials, client `product-management-mcp`) whose service account has only the `stock-clerk`
-role. An assistant can therefore read the catalogue and move stock, but cannot create, edit or delete products, and
+The server is a **client of the REST API**, never of the database. It is a registered API consumer (`mcp-server`)
+and exchanges its client id and secret for a JWT at `POST /api/auth/token`. That consumer has only the
+`stock-clerk` role. An assistant can therefore read the catalogue and move stock, but cannot create, edit or delete products, and
 every call is subject to the API's validation, RBAC, rate limits and audit logs, exactly like any other client.
 
 ## Run
@@ -38,6 +38,6 @@ ProductApi__ClientSecret=mcp-local-dev-secret dotnet run --project backend/Produ
 | Setting (environment variable) | Default                                                                       |
 | ------------------------------ | ----------------------------------------------------------------------------- |
 | `ProductApi__BaseUrl`          | `http://localhost:8080/`                                                      |
-| `ProductApi__TokenEndpoint`    | `http://localhost:8080/auth/realms/product-management/protocol/openid-connect/token` |
-| `ProductApi__ClientId`         | `product-management-mcp`                                                      |
+| `ProductApi__TokenPath`        | `api/auth/token`                                                              |
+| `ProductApi__ClientId`         | `mcp-server`                                                                  |
 | `ProductApi__ClientSecret`     | *(required)*                                                                  |

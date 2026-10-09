@@ -2,27 +2,26 @@ import http from 'k6/http';
 import { check, fail } from 'k6';
 import { BASE_URL, LOAD_TEST_USERS, TOKEN_URL } from './config.js';
 
-// Each virtual user acts as one of several real users, so per-user rate limits are exercised realistically.
-function passwordGrant(username, password) {
-  const response = http.post(TOKEN_URL, {
-    grant_type: 'password',
-    client_id: 'product-management-load-test',
-    username,
-    password,
-  }, { tags: { name: 'token' } });
+// Each virtual user acts as one of several registered API consumers, so per-user rate limits are exercised
+// realistically. Tokens come from the API's own token endpoint.
+function requestToken(clientId, clientSecret) {
+  const response = http.post(TOKEN_URL, JSON.stringify({ clientId, clientSecret }), {
+    headers: { 'Content-Type': 'application/json' },
+    tags: { name: 'POST /auth/token' },
+  });
   if (response.status !== 200) {
-    fail(`Could not get a token for ${username}: ${response.status} ${response.body}`);
+    fail(`Could not get a token for ${clientId}: ${response.status} ${response.body}`);
   }
-  return response.json('access_token');
+  return response.json('accessToken');
 }
 
 /** Tokens for the load-test users (stock-clerk) plus one manager token for setup and teardown. */
 export function signIn() {
   const users = [];
   for (let i = 1; i <= LOAD_TEST_USERS; i++) {
-    users.push(passwordGrant(`load-tester-${String(i).padStart(2, '0')}`, 'load-test'));
+    users.push(requestToken(`load-tester-${String(i).padStart(2, '0')}`, 'load-test'));
   }
-  return { users, manager: passwordGrant('manager', 'manager') };
+  return { users, manager: requestToken('manager', 'manager') };
 }
 
 export function tokenForVu(tokens) {

@@ -1,12 +1,11 @@
 using System.Net.Http.Json;
-using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 
 namespace ProductManagement.Mcp.Api;
 
 /// <summary>
-/// Obtains access tokens with the OAuth 2.0 client-credentials grant and caches them until shortly before they
-/// expire, so tool calls don't hit the identity provider each time. Singleton.
+/// Obtains access tokens from the API's token endpoint (client id + secret of the MCP server's consumer) and caches
+/// them until shortly before they expire, so tool calls don't request a token each time. Singleton.
 /// </summary>
 internal sealed class AccessTokenProvider(
     IHttpClientFactory httpClientFactory,
@@ -52,14 +51,9 @@ internal sealed class AccessTokenProvider(
     {
         var settings = options.Value;
         using var client = httpClientFactory.CreateClient(HttpClientName);
-        using var response = await client.PostAsync(
-            settings.TokenEndpoint,
-            new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                ["grant_type"] = "client_credentials",
-                ["client_id"] = settings.ClientId,
-                ["client_secret"] = settings.ClientSecret,
-            }),
+        using var response = await client.PostAsJsonAsync(
+            new Uri(settings.BaseUrl, settings.TokenPath),
+            new { clientId = settings.ClientId, clientSecret = settings.ClientSecret },
             cancellationToken);
 
         if (!response.IsSuccessStatusCode)
@@ -67,15 +61,13 @@ internal sealed class AccessTokenProvider(
             throw new ProductApiException(
                 (int)response.StatusCode,
                 "authentication_failed",
-                $"The MCP server could not sign in to the identity provider ({(int)response.StatusCode}). " +
+                $"The MCP server could not get a token from the API ({(int)response.StatusCode}). " +
                 "Check ProductApi__ClientId and ProductApi__ClientSecret.");
         }
 
         return await response.Content.ReadFromJsonAsync<TokenResponse>(cancellationToken)
-            ?? throw new ProductApiException(500, "authentication_failed", "The identity provider returned no token.");
+            ?? throw new ProductApiException(500, "authentication_failed", "The API returned no token.");
     }
 
-    private sealed record TokenResponse(
-        [property: JsonPropertyName("access_token")] string AccessToken,
-        [property: JsonPropertyName("expires_in")] int ExpiresIn);
+    private sealed record TokenResponse(string AccessToken, int ExpiresIn);
 }

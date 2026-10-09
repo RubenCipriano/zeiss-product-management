@@ -11,8 +11,7 @@
       ],
       "env": {
         "ProductApi__BaseUrl": "http://localhost:8080/",
-        "ProductApi__TokenEndpoint": "http://localhost:8080/auth/realms/product-management/protocol/openid-connect/token",
-        "ProductApi__ClientId": "product-management-mcp",
+        "ProductApi__ClientId": "mcp-server",
         "ProductApi__ClientSecret": "mcp-local-dev-secret"
       }
     },

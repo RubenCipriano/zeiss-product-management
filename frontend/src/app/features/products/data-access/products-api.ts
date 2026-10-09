@@ -14,15 +14,23 @@ export class ProductsApi {
   private readonly http = inject(HttpClient);
   private readonly baseUrl = `${inject(API_BASE_URL)}/products`;
 
-  query({ filter, page, pageSize }: ProductQuery): Observable<PagedResponse<Product>> {
+  /**
+   * @param fresh skip shared caches (the gateway's 1 s microcache) - used right after the user's own changes so they
+   * always see the result.
+   */
+  query(
+    { filter, page, pageSize }: ProductQuery,
+    fresh = false,
+  ): Observable<PagedResponse<Product>> {
     let params = new HttpParams().set('page', page).set('pageSize', pageSize);
+    const headers = fresh ? new HttpHeaders({ 'Cache-Control': 'no-cache' }) : undefined;
 
     switch (filter.kind) {
       case 'all':
-        return this.http.get<PagedResponse<Product>>(this.baseUrl, { params });
+        return this.http.get<PagedResponse<Product>>(this.baseUrl, { params, headers });
       case 'name':
         params = params.set('name', filter.name);
-        return this.http.get<PagedResponse<Product>>(`${this.baseUrl}/search`, { params });
+        return this.http.get<PagedResponse<Product>>(`${this.baseUrl}/search`, { params, headers });
       case 'stock':
         if (filter.min !== null) {
           params = params.set('min', filter.min);
@@ -30,7 +38,10 @@ export class ProductsApi {
         if (filter.max !== null) {
           params = params.set('max', filter.max);
         }
-        return this.http.get<PagedResponse<Product>>(`${this.baseUrl}/stock-level`, { params });
+        return this.http.get<PagedResponse<Product>>(`${this.baseUrl}/stock-level`, {
+          params,
+          headers,
+        });
     }
   }
 

@@ -1,11 +1,11 @@
-# Backend deployment: API, database migrations, PostgreSQL, Redis and the identity provider (Keycloak).
+# Backend deployment: API, database migrations, PostgreSQL and Redis.
 #
 #   kubectl apply -f backend/deploy/kubernetes.yaml
 #   kubectl -n product-management scale deployment/api --replicas=4      # scale the API on its own
 #
 # This file is self-contained so the backend repository can deploy independently of the frontend. The two
-# deployments only share a contract: the namespace and the Service names `api-headless` and `keycloak`, which the
-# frontend gateway routes to, plus the `app.kubernetes.io/name: gateway` label allowed by the NetworkPolicies.
+# deployments only share a contract: the namespace and the Service name `api-headless`, which the frontend gateway
+# routes to, plus the `app.kubernetes.io/name: gateway` label allowed by the NetworkPolicies.
 #
 # Secrets below are local-development values. In a real cluster they come from a secret manager
 # (External Secrets / Sealed Secrets / Vault), never from the repository.
@@ -35,12 +35,129 @@ stringData:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: keycloak-admin
+  name: api-auth
   namespace: product-management
 type: Opaque
 stringData:
-  username: admin
-  password: admin
+  # HMAC-SHA256 key used to sign and verify access tokens. Every replica uses the same key, so a token issued by one
+  # replica is accepted by all. Generate with: openssl rand -base64 32
+  Authentication__SigningKey: (development key removed from history)
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: api-consumers
+  namespace: product-management
+type: Opaque
+stringData:
+  # Registered API consumers, mounted as /app/config/consumers.json. Only PBKDF2 hashes of the secrets are stored
+  # (create one with `dotnet ProductManagement.Api.dll hash-secret <secret>`). Local demo secrets:
+  #   viewer/viewer, clerk/clerk, manager/manager, mcp-server/mcp-local-dev-secret, load-tester-NN/load-test
+  consumers.json: |
+    {
+      "Authentication": {
+        "Consumers": [
+          {
+            "ClientId": "viewer",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "viewer"
+            ]
+          },
+          {
+            "ClientId": "clerk",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "manager",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "manager"
+            ]
+          },
+          {
+            "ClientId": "mcp-server",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "load-tester-01",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "load-tester-02",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "load-tester-03",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "load-tester-04",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "load-tester-05",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "load-tester-06",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "load-tester-07",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "load-tester-08",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "load-tester-09",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          },
+          {
+            "ClientId": "load-tester-10",
+            "SecretHash": "pbkdf2-sha256$(development hash removed from history)",
+            "Roles": [
+              "stock-clerk"
+            ]
+          }
+        ]
+      }
+    }
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -50,18 +167,14 @@ metadata:
 data:
   ASPNETCORE_ENVIRONMENT: Production
   ConnectionStrings__Redis: redis.product-management.svc.cluster.local:6379
-  # Issuer as browsers see it (through the gateway) ...
-  Authentication__Authority: http://localhost:8080/auth/realms/product-management
-  # ... and the in-cluster address the API uses to download the signing keys.
-  Authentication__MetadataAddress: http://keycloak.product-management.svc.cluster.local:8080/auth/realms/product-management/.well-known/openid-configuration
-  # Local cluster without TLS. In production the issuer is https and this stays true.
-  Authentication__RequireHttpsMetadata: "false"
+  Authentication__AccessTokenLifetime: "01:00:00"
   Database__ApplyMigrationsOnStartup: "false"
   OpenApi__Enabled: "true"
   RateLimiting__RequestsPerSecond: "50"
   RateLimiting__RequestBurst: "100"
   RateLimiting__WritesPerSecond: "10"
   RateLimiting__WriteBurst: "20"
+  RateLimiting__TokenRequestsPerMinute: "20"
 ---
 # ------------------------------------------------------------------------------------------------- PostgreSQL
 apiVersion: v1
@@ -199,242 +312,6 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
 ---
-# ---------------------------------------------------------------------------------------- Keycloak (identity)
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: keycloak-realm
-  namespace: product-management
-data:
-  # Imported at startup: roles, the OIDC clients (web app, MCP service account, load tests) and demo users.
-  # Secrets and passwords here are for the local cluster only.
-  product-management-realm.json: |
-    {
-      "realm": "product-management",
-      "displayName": "Product Management",
-      "enabled": true,
-      "sslRequired": "none",
-      "registrationAllowed": false,
-      "bruteForceProtected": true,
-      "accessTokenLifespan": 300,
-      "ssoSessionIdleTimeout": 1800,
-      "roles": {
-        "realm": [
-          { "name": "viewer", "description": "Read-only access to products and categories" },
-          { "name": "stock-clerk", "description": "Viewer + record stock movements" },
-          { "name": "manager", "description": "Full access: create, edit and delete products" }
-        ]
-      },
-      "clients": [
-        {
-          "clientId": "product-management-web",
-          "name": "Product Management (web)",
-          "publicClient": true,
-          "standardFlowEnabled": true,
-          "implicitFlowEnabled": false,
-          "directAccessGrantsEnabled": false,
-          "redirectUris": ["http://localhost:8080/*", "http://localhost:4200/*"],
-          "webOrigins": ["http://localhost:8080", "http://localhost:4200"],
-          "attributes": {
-            "pkce.code.challenge.method": "S256",
-            "post.logout.redirect.uris": "http://localhost:8080/*##http://localhost:4200/*"
-          },
-          "protocolMappers": [
-            {
-              "name": "realm roles",
-              "protocol": "openid-connect",
-              "protocolMapper": "oidc-usermodel-realm-role-mapper",
-              "config": {
-                "multivalued": "true",
-                "claim.name": "roles",
-                "jsonType.label": "String",
-                "access.token.claim": "true",
-                "id.token.claim": "true",
-                "userinfo.token.claim": "true"
-              }
-            },
-            {
-              "name": "api audience",
-              "protocol": "openid-connect",
-              "protocolMapper": "oidc-audience-mapper",
-              "config": {
-                "included.custom.audience": "product-management-api",
-                "access.token.claim": "true",
-                "id.token.claim": "false"
-              }
-            }
-          ]
-        },
-        {
-          "clientId": "product-management-mcp",
-          "name": "MCP server (service account, client credentials)",
-          "publicClient": false,
-          "secret": "mcp-local-dev-secret",
-          "serviceAccountsEnabled": true,
-          "standardFlowEnabled": false,
-          "directAccessGrantsEnabled": false,
-          "protocolMappers": [
-            {
-              "name": "realm roles",
-              "protocol": "openid-connect",
-              "protocolMapper": "oidc-usermodel-realm-role-mapper",
-              "config": {
-                "multivalued": "true",
-                "claim.name": "roles",
-                "jsonType.label": "String",
-                "access.token.claim": "true"
-              }
-            },
-            {
-              "name": "api audience",
-              "protocol": "openid-connect",
-              "protocolMapper": "oidc-audience-mapper",
-              "config": {
-                "included.custom.audience": "product-management-api",
-                "access.token.claim": "true"
-              }
-            }
-          ]
-        },
-        {
-          "clientId": "product-management-load-test",
-          "name": "Load tests (password grant, local only)",
-          "publicClient": true,
-          "standardFlowEnabled": false,
-          "directAccessGrantsEnabled": true,
-          "attributes": { "access.token.lifespan": "1800" },
-          "protocolMappers": [
-            {
-              "name": "realm roles",
-              "protocol": "openid-connect",
-              "protocolMapper": "oidc-usermodel-realm-role-mapper",
-              "config": {
-                "multivalued": "true",
-                "claim.name": "roles",
-                "jsonType.label": "String",
-                "access.token.claim": "true",
-                "id.token.claim": "true"
-              }
-            },
-            {
-              "name": "api audience",
-              "protocol": "openid-connect",
-              "protocolMapper": "oidc-audience-mapper",
-              "config": {
-                "included.custom.audience": "product-management-api",
-                "access.token.claim": "true"
-              }
-            }
-          ]
-        }
-      ],
-      "users": [
-        { "username": "service-account-product-management-mcp", "enabled": true, "serviceAccountClientId": "product-management-mcp", "realmRoles": ["stock-clerk"] },
-        { "username": "viewer", "enabled": true, "email": "viewer@example.com", "emailVerified": true, "firstName": "Vera", "lastName": "Viewer", "credentials": [{ "type": "password", "value": "viewer", "temporary": false }], "realmRoles": ["viewer"] },
-        { "username": "clerk", "enabled": true, "email": "clerk@example.com", "emailVerified": true, "firstName": "Carl", "lastName": "Clerk", "credentials": [{ "type": "password", "value": "clerk", "temporary": false }], "realmRoles": ["stock-clerk"] },
-        { "username": "manager", "enabled": true, "email": "manager@example.com", "emailVerified": true, "firstName": "Maria", "lastName": "Manager", "credentials": [{ "type": "password", "value": "manager", "temporary": false }], "realmRoles": ["manager"] },
-        { "username": "load-tester-01", "enabled": true, "email": "load-tester-01@example.com", "emailVerified": true, "firstName": "Load", "lastName": "Tester 01", "credentials": [{ "type": "password", "value": "load-test", "temporary": false }], "realmRoles": ["stock-clerk"] },
-        { "username": "load-tester-02", "enabled": true, "email": "load-tester-02@example.com", "emailVerified": true, "firstName": "Load", "lastName": "Tester 02", "credentials": [{ "type": "password", "value": "load-test", "temporary": false }], "realmRoles": ["stock-clerk"] },
-        { "username": "load-tester-03", "enabled": true, "email": "load-tester-03@example.com", "emailVerified": true, "firstName": "Load", "lastName": "Tester 03", "credentials": [{ "type": "password", "value": "load-test", "temporary": false }], "realmRoles": ["stock-clerk"] },
-        { "username": "load-tester-04", "enabled": true, "email": "load-tester-04@example.com", "emailVerified": true, "firstName": "Load", "lastName": "Tester 04", "credentials": [{ "type": "password", "value": "load-test", "temporary": false }], "realmRoles": ["stock-clerk"] },
-        { "username": "load-tester-05", "enabled": true, "email": "load-tester-05@example.com", "emailVerified": true, "firstName": "Load", "lastName": "Tester 05", "credentials": [{ "type": "password", "value": "load-test", "temporary": false }], "realmRoles": ["stock-clerk"] },
-        { "username": "load-tester-06", "enabled": true, "email": "load-tester-06@example.com", "emailVerified": true, "firstName": "Load", "lastName": "Tester 06", "credentials": [{ "type": "password", "value": "load-test", "temporary": false }], "realmRoles": ["stock-clerk"] },
-        { "username": "load-tester-07", "enabled": true, "email": "load-tester-07@example.com", "emailVerified": true, "firstName": "Load", "lastName": "Tester 07", "credentials": [{ "type": "password", "value": "load-test", "temporary": false }], "realmRoles": ["stock-clerk"] },
-        { "username": "load-tester-08", "enabled": true, "email": "load-tester-08@example.com", "emailVerified": true, "firstName": "Load", "lastName": "Tester 08", "credentials": [{ "type": "password", "value": "load-test", "temporary": false }], "realmRoles": ["stock-clerk"] },
-        { "username": "load-tester-09", "enabled": true, "email": "load-tester-09@example.com", "emailVerified": true, "firstName": "Load", "lastName": "Tester 09", "credentials": [{ "type": "password", "value": "load-test", "temporary": false }], "realmRoles": ["stock-clerk"] },
-        { "username": "load-tester-10", "enabled": true, "email": "load-tester-10@example.com", "emailVerified": true, "firstName": "Load", "lastName": "Tester 10", "credentials": [{ "type": "password", "value": "load-test", "temporary": false }], "realmRoles": ["stock-clerk"] }
-      ]
-    }
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: keycloak
-  namespace: product-management
-  labels:
-    app.kubernetes.io/name: keycloak
-spec:
-  selector:
-    app.kubernetes.io/name: keycloak
-  ports:
-    - name: http
-      port: 8080
-      targetPort: http
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: keycloak
-  namespace: product-management
-  labels:
-    app.kubernetes.io/name: keycloak
-    app.kubernetes.io/part-of: product-management
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: keycloak
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: keycloak
-        app.kubernetes.io/part-of: product-management
-    spec:
-      containers:
-        - name: keycloak
-          image: quay.io/keycloak/keycloak:26.8.0
-          # Development mode with an embedded database: the realm is re-imported on every start. A production
-          # Keycloak runs `start` (optimised build) against its own PostgreSQL database, with TLS.
-          args: ["start-dev", "--import-realm"]
-          env:
-            - name: KC_BOOTSTRAP_ADMIN_USERNAME
-              valueFrom: { secretKeyRef: { name: keycloak-admin, key: username } }
-            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
-              valueFrom: { secretKeyRef: { name: keycloak-admin, key: password } }
-            # Served under /auth on the gateway, so the app and the identity provider share one origin.
-            - name: KC_HTTP_RELATIVE_PATH
-              value: /auth
-            # Public URL used in tokens (issuer) and redirects ...
-            - name: KC_HOSTNAME
-              value: http://localhost:8080/auth
-            # ... while in-cluster callers (the API fetching signing keys) get in-cluster URLs.
-            - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
-              value: "true"
-            - name: KC_PROXY_HEADERS
-              value: xforwarded
-            - name: KC_HTTP_ENABLED
-              value: "true"
-            - name: KC_HEALTH_ENABLED
-              value: "true"
-            - name: JAVA_OPTS_KC_HEAP
-              value: "-XX:MaxRAMPercentage=70"
-          ports:
-            - name: http
-              containerPort: 8080
-            - name: management
-              containerPort: 9000
-          startupProbe:
-            httpGet: { path: /auth/health/started, port: management }
-            periodSeconds: 5
-            failureThreshold: 60
-          readinessProbe:
-            httpGet: { path: /auth/health/ready, port: management }
-            periodSeconds: 10
-          livenessProbe:
-            httpGet: { path: /auth/health/live, port: management }
-            periodSeconds: 20
-          resources:
-            requests: { cpu: 250m, memory: 512Mi }
-            limits: { cpu: "1", memory: 1Gi }
-          volumeMounts:
-            - name: realm
-              mountPath: /opt/keycloak/data/import
-              readOnly: true
-      volumes:
-        - name: realm
-          configMap:
-            name: keycloak-realm
----
 # ----------------------------------------------------------------------------------------------- migrations
 # Applies EF Core migrations (and sample data) once per deployment, before/while the API rolls out, instead of
 # every replica migrating on startup. EF Core's migration lock makes concurrent runs safe anyway.
@@ -468,6 +345,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: api-config
+            - secretRef:
+                name: api-auth
           env:
             - name: ConnectionStrings__ProductManagement
               valueFrom: { secretKeyRef: { name: database-credentials, key: connection-string } }
@@ -568,6 +447,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: api-config
+            - secretRef:
+                name: api-auth
           env:
             - name: ConnectionStrings__ProductManagement
               valueFrom: { secretKeyRef: { name: database-credentials, key: connection-string } }
@@ -597,9 +478,15 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: consumers
+              mountPath: /app/config
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: consumers
+          secret:
+            secretName: api-consumers
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -663,23 +550,5 @@ spec:
     # Only the gateway reaches the API, which is why it may trust X-Forwarded-For.
     - from:
         - podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
-      ports:
-        - port: 8080
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: keycloak-ingress
-  namespace: product-management
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: keycloak
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
-        - podSelector: { matchLabels: { app.kubernetes.io/name: api } }
-        - podSelector: { matchLabels: { app.kubernetes.io/name: db-migrate } }
       ports:
         - port: 8080

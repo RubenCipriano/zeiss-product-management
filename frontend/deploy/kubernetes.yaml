@@ -3,7 +3,7 @@
 #   kubectl apply -f frontend/deploy/kubernetes.yaml
 #
 # Self-contained so the frontend repository can deploy independently of the backend. The gateway routes to the
-# backend's Services `api-headless` and `keycloak` by DNS name only: scaling the API needs no change here.
+# backend's Service `api-headless` by DNS name only: scaling the API needs no change here.
 ---
 apiVersion: v1
 kind: Namespace

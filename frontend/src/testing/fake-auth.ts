@@ -14,6 +14,7 @@ export function fakeAuth(
       roles: signal(['manager']),
       can: (permission: Permission) => granted().has(permission),
       accessToken: () => 'test-token',
+      isTokenRequest: () => false,
       login: vi.fn(),
       logout: vi.fn(),
     },

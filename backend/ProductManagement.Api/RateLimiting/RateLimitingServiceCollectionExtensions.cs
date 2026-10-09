@@ -32,6 +32,17 @@ internal static class RateLimitingServiceCollectionExtensions
                 settings.Enabled
                     ? TokenBucket(PartitionKey(context), settings.WritesPerSecond, settings.WriteBurst)
                     : RateLimitPartition.GetNoLimiter("unlimited"));
+
+            options.AddPolicy(RateLimitPolicies.Authentication, context =>
+                settings.Enabled
+                    ? RateLimitPartition.GetFixedWindowLimiter($"ip:{context.Connection.RemoteIpAddress}", _ =>
+                        new FixedWindowRateLimiterOptions
+                        {
+                            PermitLimit = settings.TokenRequestsPerMinute,
+                            Window = TimeSpan.FromMinutes(1),
+                            QueueLimit = 0,
+                        })
+                    : RateLimitPartition.GetNoLimiter("unlimited"));
         });
 
         return services;

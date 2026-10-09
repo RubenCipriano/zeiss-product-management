@@ -1,32 +1,34 @@
 import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
-import { ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';
+import {
+  ActivatedRouteSnapshot,
+  provideRouter,
+  RouterStateSnapshot,
+  UrlTree,
+} from '@angular/router';
 import { Auth } from './auth';
 import { authGuard } from './auth-guard';
 
 describe('authGuard', () => {
   function run(isAuthenticated: boolean) {
-    const login = vi.fn().mockResolvedValue(undefined);
     TestBed.configureTestingModule({
-      providers: [{ provide: Auth, useValue: { isAuthenticated: signal(isAuthenticated), login } }],
+      providers: [
+        provideRouter([]),
+        { provide: Auth, useValue: { isAuthenticated: signal(isAuthenticated) } },
+      ],
     });
-    const result = TestBed.runInInjectionContext(() =>
+    return TestBed.runInInjectionContext(() =>
       authGuard({} as ActivatedRouteSnapshot, { url: '/products?page=3' } as RouterStateSnapshot),
     );
-    return { result, login };
   }
 
-  it('lets signed-in users through', async () => {
-    const { result, login } = run(true);
-
-    expect(await result).toBe(true);
-    expect(login).not.toHaveBeenCalled();
+  it('lets signed-in users through', () => {
+    expect(run(true)).toBe(true);
   });
 
-  it('sends anonymous users to sign in and back to where they were going', async () => {
-    const { result, login } = run(false);
+  it('sends anonymous users to the login page, remembering where they were going', () => {
+    const result = run(false) as UrlTree;
 
-    expect(await result).toBe(false);
-    expect(login).toHaveBeenCalledWith('/products?page=3');
+    expect(result.toString()).toBe('/login?returnUrl=%2Fproducts%3Fpage%3D3');
   });
 });

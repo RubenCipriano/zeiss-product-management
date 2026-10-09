@@ -1,0 +1,51 @@
+<div class="flex min-h-[calc(100vh-4rem)] items-center justify-center px-4 py-12">
+  <div class="w-full max-w-sm">
+    <div class="mb-8 text-center">
+      <span
+        class="mx-auto flex size-12 items-center justify-center rounded-xl bg-brand-600 text-white shadow-sm"
+      >
+        <app-icon name="package" class="size-6" />
+      </span>
+      <h1 class="mt-4 text-2xl font-semibold tracking-tight text-slate-900">Sign in</h1>
+      <p class="mt-1 text-sm text-slate-500">Product Management</p>
+    </div>
+
+    <form class="card space-y-5 p-6" [formGroup]="form" (ngSubmit)="submit()" novalidate>
+      <div>
+        <label class="label" for="username">Username</label>
+        <input id="username" class="input" formControlName="username" autocomplete="username" />
+      </div>
+      <div>
+        <label class="label" for="password">Password</label>
+        <input
+          id="password"
+          class="input"
+          type="password"
+          formControlName="password"
+          autocomplete="current-password"
+        />
+      </div>
+
+      @if (errorMessage(); as message) {
+        <p
+          class="flex items-start gap-2 rounded-lg bg-red-50 px-3 py-2.5 text-sm text-red-700"
+          role="alert"
+        >
+          <app-icon name="alert" class="mt-0.5" />
+          {{ message }}
+        </p>
+      }
+
+      <button type="submit" class="btn btn-primary w-full" [disabled]="signingIn()">
+        {{ signingIn() ? 'Signing in…' : 'Sign in' }}
+      </button>
+    </form>
+
+    <div class="mt-6 rounded-xl bg-slate-100 px-4 py-3 text-xs text-slate-600">
+      <p class="font-medium text-slate-700">Local demo accounts</p>
+      <p class="mt-1"><code>viewer</code> / <code>viewer</code> · read only</p>
+      <p><code>clerk</code> / <code>clerk</code> · + stock movements</p>
+      <p><code>manager</code> / <code>manager</code> · full access</p>
+    </div>
+  </div>
+</div>

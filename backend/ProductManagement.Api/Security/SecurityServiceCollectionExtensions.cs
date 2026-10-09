@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
 
 namespace ProductManagement.Api.Security;
 
@@ -6,39 +7,69 @@ internal static class SecurityServiceCollectionExtensions
 {
     public static IServiceCollection AddApiSecurity(this IServiceCollection services, IConfiguration configuration)
     {
-        var settings = configuration.GetSection(AuthenticationSettings.SectionName).Get<AuthenticationSettings>()
-            ?? new AuthenticationSettings();
+        var section = configuration.GetSection(AuthenticationSettings.SectionName);
+        var settings = section.Get<AuthenticationSettings>() ?? new AuthenticationSettings();
+        var signingKey = Validate(settings);
 
-        // Fail fast: an API that silently starts without token validation is worse than one that does not start.
-        if (string.IsNullOrWhiteSpace(settings.Authority))
-        {
-            throw new InvalidOperationException(
-                $"'{AuthenticationSettings.SectionName}:Authority' is not configured.");
-        }
+        services.Configure<AuthenticationSettings>(section);
+        services.AddSingleton<AccessTokenIssuer>();
 
         services
             .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(options =>
             {
-                options.Authority = settings.Authority;
-                if (!string.IsNullOrWhiteSpace(settings.MetadataAddress))
-                {
-                    options.MetadataAddress = settings.MetadataAddress;
-                }
-
-                options.Audience = settings.Audience;
-                options.RequireHttpsMetadata = settings.RequireHttpsMetadata;
-
-                // Keep the claim names exactly as issued (sub, roles, preferred_username) instead of the legacy
-                // WS-Federation URIs, so policies and logs use the same names as the token.
+                // Keep claim names as issued (sub, roles) instead of the legacy WS-Federation URIs.
                 options.MapInboundClaims = false;
-                options.TokenValidationParameters.NameClaimType = "preferred_username";
-                options.TokenValidationParameters.RoleClaimType = "roles";
-                options.TokenValidationParameters.ClockSkew = TimeSpan.FromSeconds(30);
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidIssuer = settings.Issuer,
+                    ValidateAudience = true,
+                    ValidAudience = settings.Audience,
+                    ValidateLifetime = true,
+                    RequireExpirationTime = true,
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(signingKey),
+                    ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
+                    ClockSkew = TimeSpan.FromSeconds(30),
+                    NameClaimType = "sub",
+                    RoleClaimType = "roles",
+                };
             });
 
         services.AddAuthorization(Policies.Configure);
 
         return services;
+    }
+
+    /// <summary>Fail fast: an API that starts with a weak key or broken consumers is worse than one that does not start.</summary>
+    private static byte[] Validate(AuthenticationSettings settings)
+    {
+        byte[] key;
+        try
+        {
+            key = Convert.FromBase64String(settings.SigningKey);
+        }
+        catch (FormatException)
+        {
+            throw new InvalidOperationException($"'{AuthenticationSettings.SectionName}:SigningKey' must be Base64.");
+        }
+
+        if (key.Length < AuthenticationSettings.MinimumSigningKeyBytes)
+        {
+            throw new InvalidOperationException(
+                $"'{AuthenticationSettings.SectionName}:SigningKey' must be at least {AuthenticationSettings.MinimumSigningKeyBytes} bytes.");
+        }
+
+        foreach (var consumer in settings.Consumers)
+        {
+            if (string.IsNullOrWhiteSpace(consumer.ClientId) || !SecretHasher.IsWellFormed(consumer.SecretHash))
+            {
+                throw new InvalidOperationException(
+                    $"API consumer '{consumer.ClientId}' needs a client id and a secret hash (use the hash-secret command).");
+            }
+        }
+
+        return key;
     }
 }

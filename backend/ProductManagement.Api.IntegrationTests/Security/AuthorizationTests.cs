@@ -1,7 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
-using Microsoft.IdentityModel.Tokens;
 using ProductManagement.Api.IntegrationTests.Infrastructure;
 using ProductManagement.Testing;
 using static ProductManagement.Testing.ProductApiClient;
@@ -101,7 +100,7 @@ public sealed class AuthorizationTests(ApiFixture fixture) : ApiTestBase(fixture
     [Fact]
     public async Task TokensSignedWithAnUnknownKey_AreRejected()
     {
-        var forgedKey = new RsaSecurityKey(RSA.Create(2048)) { KeyId = "tests" };
+        var forgedKey = RandomNumberGenerator.GetBytes(32);
         using var client = ClientWithToken(TestTokens.Create(TestTokens.Manager, signingKey: forgedKey));
 
         using var response = await client.ListAsync();

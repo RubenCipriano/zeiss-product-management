@@ -36,7 +36,10 @@ describe('ProductsStore', () => {
   it('loads the first page of all products', async () => {
     await settle();
 
-    expect(api.query).toHaveBeenCalledWith({ filter: { kind: 'all' }, page: 1, pageSize: 20 });
+    expect(api.query).toHaveBeenCalledWith(
+      { filter: { kind: 'all' }, page: 1, pageSize: 20 },
+      false,
+    );
     expect(store.products()).toEqual([lens, frame]);
     expect(store.totalCount()).toBe(2);
   });
@@ -96,6 +99,17 @@ describe('ProductsStore', () => {
     pending.complete();
     await settle();
     expect(store.products()).toEqual([frame]);
+  });
+
+  it('bypasses shared caches after the user changes something, but not for background refreshes', async () => {
+    await settle();
+    api.adjustStock.mockReturnValue(of({ ...lens, stockQuantity: 4 }));
+
+    store.adjustStock(lens, 'remove', 1).subscribe();
+    await settle();
+
+    const tableRequests = api.query.mock.calls.filter(([query]) => query.pageSize !== 1);
+    expect(tableRequests.at(-1)?.[1]).toBe(true);
   });
 
   it('derives the summary cards from the list endpoints', async () => {

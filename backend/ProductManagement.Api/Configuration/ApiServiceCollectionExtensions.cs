@@ -74,7 +74,7 @@ internal static class ApiServiceCollectionExtensions
                 document.Info.Description =
                     "Manage products and their stock. Errors follow RFC 9457 (application/problem+json) and carry a " +
                     "machine-readable `errorCode`. Conditional updates use ETag / If-Match. All endpoints require " +
-                    "a bearer token issued by the identity provider (roles: viewer, stock-clerk, manager).";
+                    "a bearer token: POST your client id and secret to /api/auth/token (roles: viewer, stock-clerk, manager).";
 
                 document.Components ??= new OpenApiComponents();
                 document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
@@ -83,7 +83,7 @@ internal static class ApiServiceCollectionExtensions
                     Type = SecuritySchemeType.Http,
                     Scheme = "bearer",
                     BearerFormat = "JWT",
-                    Description = "Access token from the identity provider (Keycloak).",
+                    Description = "Access token from POST /api/auth/token.",
                 };
                 document.Security =
                 [

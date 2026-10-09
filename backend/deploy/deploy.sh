@@ -27,10 +27,9 @@ kubectl -n "$NAMESPACE" delete job db-migrate --ignore-not-found >/dev/null 2>&1
 sed "s#localhost:32000/product-management/api:latest#$IMAGE_REF#g" "$HERE/kubernetes.yaml" \
   | kubectl apply -f -
 
-echo "==> Waiting for PostgreSQL, Redis and Keycloak"
+echo "==> Waiting for PostgreSQL and Redis"
 kubectl -n "$NAMESPACE" rollout status statefulset/postgres --timeout=300s
 kubectl -n "$NAMESPACE" rollout status deployment/redis --timeout=180s
-kubectl -n "$NAMESPACE" rollout status deployment/keycloak --timeout=600s
 
 echo "==> Waiting for database migrations"
 kubectl -n "$NAMESPACE" wait --for=condition=complete job/db-migrate --timeout=300s

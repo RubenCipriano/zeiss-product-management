@@ -24,24 +24,25 @@ public sealed class AccessTokenProviderTests : IDisposable
     }
 
     [Fact]
-    public async Task RequestsATokenWithTheClientCredentialsGrant()
+    public async Task RequestsATokenFromTheApiWithTheConsumerCredentials()
     {
-        _identity.Respond(HttpStatusCode.OK, """{"access_token":"token-1","expires_in":300}""");
+        _identity.Respond(HttpStatusCode.OK, """{"accessToken":"token-1","tokenType":"Bearer","expiresIn":300}""");
 
         var token = await _provider.GetTokenAsync(TestContext.Current.CancellationToken);
 
         token.ShouldBe("token-1");
         var body = await _identity.Requests.Single().Content!.ReadAsStringAsync(TestContext.Current.CancellationToken);
-        body.ShouldContain("grant_type=client_credentials");
-        body.ShouldContain("client_id=product-management-mcp");
+        _identity.Requests.Single().RequestUri!.AbsoluteUri.ShouldBe("http://localhost:8080/api/auth/token");
+        body.ShouldContain("\"clientId\":\"mcp-server\"");
+        body.ShouldContain("\"clientSecret\":\"secret\"");
     }
 
     [Fact]
     public async Task ReusesTheTokenUntilShortlyBeforeItExpires()
     {
         _identity
-            .Respond(HttpStatusCode.OK, """{"access_token":"token-1","expires_in":300}""")
-            .Respond(HttpStatusCode.OK, """{"access_token":"token-2","expires_in":300}""");
+            .Respond(HttpStatusCode.OK, """{"accessToken":"token-1","tokenType":"Bearer","expiresIn":300}""")
+            .Respond(HttpStatusCode.OK, """{"accessToken":"token-2","tokenType":"Bearer","expiresIn":300}""");
 
         var first = await _provider.GetTokenAsync(TestContext.Current.CancellationToken);
         _time.Advance(TimeSpan.FromSeconds(260)); // still valid (renewed 30 s before the 300 s expiry)
@@ -56,7 +57,7 @@ public sealed class AccessTokenProviderTests : IDisposable
     [Fact]
     public async Task ConcurrentCallers_ShareOneTokenRequest()
     {
-        _identity.Respond(HttpStatusCode.OK, """{"access_token":"token-1","expires_in":300}""");
+        _identity.Respond(HttpStatusCode.OK, """{"accessToken":"token-1","tokenType":"Bearer","expiresIn":300}""");
 
         var tokens = await Task.WhenAll(Enumerable.Range(0, 10)
             .Select(_ => _provider.GetTokenAsync(TestContext.Current.CancellationToken)));
@@ -68,7 +69,7 @@ public sealed class AccessTokenProviderTests : IDisposable
     [Fact]
     public async Task RejectedCredentials_ExplainWhatToCheck()
     {
-        _identity.Respond(HttpStatusCode.Unauthorized, """{"error":"unauthorized_client"}""");
+        _identity.Respond(HttpStatusCode.Unauthorized, """{"status":401,"errorCode":"invalid_client"}""");
 
         var exception = await Should.ThrowAsync<ProductApiException>(() =>
             _provider.GetTokenAsync(TestContext.Current.CancellationToken));

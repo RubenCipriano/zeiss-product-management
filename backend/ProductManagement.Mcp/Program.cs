@@ -14,7 +14,7 @@ builder.Services
     .Bind(builder.Configuration.GetSection(ProductApiOptions.SectionName))
     .Validate(
         options => !string.IsNullOrWhiteSpace(options.ClientSecret),
-        "ProductApi__ClientSecret is not set: the MCP server needs its client secret to sign in to the identity provider.")
+        "ProductApi__ClientSecret is not set: the MCP server needs it to get a token from the API.")
     .ValidateOnStart();
 
 builder.Services.AddSingleton(TimeProvider.System);

@@ -1,7 +1,7 @@
 namespace ProductManagement.Api.Security;
 
 /// <summary>
-/// Roles issued by the identity provider (Keycloak realm roles, in the token's <c>roles</c> claim).
+/// Roles of the registered API consumers, carried in the access token's <c>roles</c> claim.
 /// </summary>
 public static class Roles
 {

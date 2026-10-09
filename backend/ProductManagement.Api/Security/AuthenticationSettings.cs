@@ -1,25 +1,41 @@
 namespace ProductManagement.Api.Security;
 
 /// <summary>
-/// JWT bearer settings. The API never sees passwords: users sign in at the identity provider (Keycloak, OIDC) and
-/// the API only validates the signed access token it receives.
+/// The API issues and verifies its own JWT access tokens. Callers are registered <see cref="ApiConsumer"/>s that
+/// exchange their credentials for a token at <c>POST /api/auth/token</c>.
 /// </summary>
-internal sealed class AuthenticationSettings
+public sealed class AuthenticationSettings
 {
     public const string SectionName = "Authentication";
 
-    /// <summary>Issuer URL of the realm, exactly as it appears in the token's <c>iss</c> claim.</summary>
-    public string Authority { get; init; } = string.Empty;
+    /// <summary>Minimum signing key size for HMAC-SHA256 (RFC 7518 §3.2).</summary>
+    public const int MinimumSigningKeyBytes = 32;
 
-    /// <summary>
-    /// Optional discovery URL the API should use instead of <c>{Authority}/.well-known/openid-configuration</c>,
-    /// e.g. the in-cluster service address when the public issuer URL is only reachable from browsers.
-    /// </summary>
-    public string? MetadataAddress { get; init; }
+    /// <summary><c>iss</c> claim written into, and required from, every token.</summary>
+    public string Issuer { get; init; } = "product-management-api";
 
-    /// <summary>Expected <c>aud</c> claim: tokens issued for other applications are rejected.</summary>
+    /// <summary><c>aud</c> claim: tokens meant for another application are rejected.</summary>
     public string Audience { get; init; } = "product-management-api";
 
-    /// <summary>Only for local clusters without TLS. Must stay <c>true</c> in production.</summary>
-    public bool RequireHttpsMetadata { get; init; } = true;
+    /// <summary>
+    /// Base64-encoded HMAC-SHA256 key (at least 32 bytes). Shared by all replicas through a Kubernetes Secret, so any
+    /// replica can verify a token another one issued.
+    /// </summary>
+    public string SigningKey { get; init; } = string.Empty;
+
+    public TimeSpan AccessTokenLifetime { get; init; } = TimeSpan.FromHours(1);
+
+    public List<ApiConsumer> Consumers { get; init; } = [];
+}
+
+/// <summary>A client allowed to call the API: the web app's users, the MCP server, load tests, other services.</summary>
+public sealed class ApiConsumer
+{
+    public string ClientId { get; init; } = string.Empty;
+
+    /// <summary>PBKDF2 hash of the client secret (see <see cref="SecretHasher"/>); the secret itself is never stored.</summary>
+    public string SecretHash { get; init; } = string.Empty;
+
+    /// <summary>Roles placed in the token (viewer, stock-clerk, manager); they map to permissions in <see cref="Policies"/>.</summary>
+    public List<string> Roles { get; init; } = [];
 }

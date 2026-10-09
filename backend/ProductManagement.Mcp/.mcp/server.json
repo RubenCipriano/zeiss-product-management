@@ -13,10 +13,22 @@
       },
       "packageArguments": [],
       "environmentVariables": [
-        { "name": "ProductApi__BaseUrl", "description": "Gateway URL of the Product Management API", "isRequired": false },
-        { "name": "ProductApi__TokenEndpoint", "description": "OAuth 2.0 token endpoint of the identity provider", "isRequired": false },
-        { "name": "ProductApi__ClientId", "description": "Client id of the MCP service account", "isRequired": false },
-        { "name": "ProductApi__ClientSecret", "description": "Client secret of the MCP service account", "isRequired": true, "isSecret": true }
+        {
+          "name": "ProductApi__BaseUrl",
+          "description": "Gateway URL of the Product Management API",
+          "isRequired": false
+        },
+        {
+          "name": "ProductApi__ClientId",
+          "description": "API consumer id of the MCP server",
+          "isRequired": false
+        },
+        {
+          "name": "ProductApi__ClientSecret",
+          "description": "API consumer secret of the MCP server",
+          "isRequired": true,
+          "isSecret": true
+        }
       ]
     }
   ]

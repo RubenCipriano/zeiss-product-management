@@ -3,23 +3,36 @@
     "product-management": {
       "type": "stdio",
       "command": "dotnet",
-      "args": ["run", "--project", "backend/ProductManagement.Mcp", "--no-launch-profile"],
+      "args": [
+        "run",
+        "--project",
+        "backend/ProductManagement.Mcp",
+        "--no-launch-profile"
+      ],
       "env": {
         "ProductApi__BaseUrl": "http://localhost:8080/",
-        "ProductApi__TokenEndpoint": "http://localhost:8080/auth/realms/product-management/protocol/openid-connect/token",
-        "ProductApi__ClientId": "product-management-mcp",
+        "ProductApi__ClientId": "mcp-server",
         "ProductApi__ClientSecret": "mcp-local-dev-secret"
       }
     },
     "kubernetes": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "kubernetes-mcp-server@0.0.67", "--read-only", "--kubeconfig", ".kube/microk8s"]
+      "args": [
+        "-y",
+        "kubernetes-mcp-server@0.0.67",
+        "--read-only",
+        "--kubeconfig",
+        ".kube/microk8s"
+      ]
     },
     "postgres": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["postgres-mcp@0.3.0", "--access-mode=restricted"],
+      "args": [
+        "postgres-mcp@0.3.0",
+        "--access-mode=restricted"
+      ],
       "env": {
         "DATABASE_URI": "postgresql://product_management:product_management@localhost:5432/product_management"
       }
@@ -27,7 +40,10 @@
     "playwright": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@playwright/mcp@0.0.83"]
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.83"
+      ]
     }
   }
 }

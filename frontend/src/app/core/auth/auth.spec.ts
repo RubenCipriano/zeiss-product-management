@@ -1,42 +1,70 @@
+import { provideHttpClient } from '@angular/common/http';
+import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
-import { User, UserManager } from 'oidc-client-ts';
-import { Auth, USER_MANAGER } from './auth';
+import { firstValueFrom } from 'rxjs';
+import { Auth, SESSION_STORAGE } from './auth';
+
+/** An unsigned JWT with the given payload (the client only reads claims; the API verifies signatures). */
+function jwt(payload: object): string {
+  const encode = (value: object) =>
+    btoa(JSON.stringify(value)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  return `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode(payload)}.signature`;
+}
 
 describe('Auth', () => {
-  function userWithRoles(roles: string[], expired = false): User {
-    return {
-      access_token: 'token-123',
-      expired,
-      profile: { sub: '1', preferred_username: 'maria', roles },
-      state: undefined,
-    } as unknown as User;
+  let storage: Storage;
+  let httpTesting: HttpTestingController;
+
+  function setup(): Auth {
+    TestBed.configureTestingModule({
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        { provide: SESSION_STORAGE, useValue: storage },
+      ],
+    });
+    httpTesting = TestBed.inject(HttpTestingController);
+    return TestBed.inject(Auth);
   }
 
-  function setup(storedUser: User | null) {
-    const userManager = {
-      getUser: vi.fn().mockResolvedValue(storedUser),
-      signinRedirect: vi.fn().mockResolvedValue(undefined),
-      signinRedirectCallback: vi.fn(),
-      signoutRedirect: vi.fn(),
-      events: {
-        addUserLoaded: vi.fn(),
-        addUserUnloaded: vi.fn(),
-        addAccessTokenExpired: vi.fn(),
-      },
-    };
-    TestBed.configureTestingModule({
-      providers: [{ provide: USER_MANAGER, useValue: userManager as unknown as UserManager }],
-    });
-    return { auth: TestBed.inject(Auth), userManager };
+  async function signIn(auth: Auth, roles: string | string[], expiresIn = 3600): Promise<void> {
+    const done = firstValueFrom(auth.login('maria', 'secret'));
+    httpTesting
+      .expectOne({ method: 'POST', url: '/api/auth/token' })
+      .flush({ accessToken: jwt({ sub: 'maria', roles }), tokenType: 'Bearer', expiresIn });
+    await done;
   }
+
+  beforeEach(() => {
+    storage = window.sessionStorage;
+    storage.clear();
+  });
+
+  it('exchanges the credentials for a token at the API', async () => {
+    const auth = setup();
+    const done = firstValueFrom(auth.login('maria', 's3cret'));
+
+    const request = httpTesting.expectOne({ method: 'POST', url: '/api/auth/token' });
+    expect(request.request.body).toEqual({ clientId: 'maria', clientSecret: 's3cret' });
+    request.flush({
+      accessToken: jwt({ sub: 'maria', roles: ['viewer'] }),
+      tokenType: 'Bearer',
+      expiresIn: 3600,
+    });
+    await done;
+
+    expect(auth.isAuthenticated()).toBe(true);
+    expect(auth.userName()).toBe('maria');
+    expect(auth.accessToken()).toContain('.');
+  });
 
   it.each([
     ['viewer', { read: true, stock: false, write: false }],
     ['stock-clerk', { read: true, stock: true, write: false }],
     ['manager', { read: true, stock: true, write: true }],
   ])('maps the %s role to the same permissions as the API', async (role, expected) => {
-    const { auth } = setup(userWithRoles([role]));
-    await auth.initialize();
+    const auth = setup();
+    await signIn(auth, role);
 
     expect({
       read: auth.can('products:read'),
@@ -45,36 +73,38 @@ describe('Auth', () => {
     }).toEqual(expected);
   });
 
-  it('exposes the user name and the access token of a valid session', async () => {
-    const { auth } = setup(userWithRoles(['viewer']));
-    await auth.initialize();
+  it('keeps the session across a page reload until it expires', async () => {
+    await signIn(setup(), ['manager']);
 
-    expect(auth.isAuthenticated()).toBe(true);
-    expect(auth.userName()).toBe('maria');
-    expect(auth.accessToken()).toBe('token-123');
+    TestBed.resetTestingModule();
+    const reloaded = setup();
+
+    expect(reloaded.isAuthenticated()).toBe(true);
+    expect(reloaded.can('products:write')).toBe(true);
   });
 
-  it('treats an expired session as signed out', async () => {
-    const { auth } = setup(userWithRoles(['manager'], true));
-    await auth.initialize();
+  it('signs out automatically when the token expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const auth = setup();
+      await signIn(auth, 'viewer', 60);
 
-    expect(auth.isAuthenticated()).toBe(false);
-    expect(auth.accessToken()).toBeNull();
-    expect(auth.can('products:read')).toBe(true); // roles are known, but the guard sends the user to sign in
+      vi.advanceTimersByTime(60_000);
+
+      expect(auth.isAuthenticated()).toBe(false);
+      expect(auth.accessToken()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('ignores unknown roles', async () => {
-    const { auth } = setup(userWithRoles(['admin', 'offline_access']));
-    await auth.initialize();
+  it('forgets the session on logout', async () => {
+    const auth = setup();
+    await signIn(auth, 'viewer');
 
-    expect(auth.can('products:read')).toBe(false);
-  });
+    auth.logout();
+    TestBed.resetTestingModule();
 
-  it('passes the return URL through the sign-in redirect', async () => {
-    const { auth, userManager } = setup(null);
-
-    await auth.login('/products?page=2');
-
-    expect(userManager.signinRedirect).toHaveBeenCalledWith({ state: '/products?page=2' });
+    expect(setup().isAuthenticated()).toBe(false);
   });
 });
