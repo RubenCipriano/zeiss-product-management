@@ -1,6 +1,8 @@
 import { TestBed } from '@angular/core/testing';
 import { of, throwError } from 'rxjs';
+import { fakeAuth } from '../../../../testing/fake-auth';
 import { aPage, aProduct } from '../../../../testing/product-fixtures';
+import { Permission } from '../../../core/auth/auth';
 import { ApiError } from '../../../core/http/api-error';
 import { ProductsApi } from '../data-access/products-api';
 import { PRODUCTS_AUTO_REFRESH_MS } from '../data-access/products-store';
@@ -9,9 +11,10 @@ import { ProductList } from './product-list';
 describe('ProductList', () => {
   let api: { query: ReturnType<typeof vi.fn>; adjustStock: ReturnType<typeof vi.fn> };
 
-  async function render() {
+  async function render(permissions?: Permission[]) {
     TestBed.configureTestingModule({
       providers: [
+        fakeAuth(permissions),
         { provide: ProductsApi, useValue: api },
         { provide: PRODUCTS_AUTO_REFRESH_MS, useValue: 0 },
       ],
@@ -75,6 +78,28 @@ describe('ProductList', () => {
     await fixture.whenStable();
 
     expect(api.adjustStock).toHaveBeenCalledWith(product, 'remove', 1);
+  });
+
+  it('offers only what a viewer may do: no create, edit, delete or stock actions', async () => {
+    api.query.mockReturnValue(of(aPage([aProduct({ name: 'Frame', stockQuantity: 5 })])));
+
+    const fixture = await render(['products:read']);
+    const element = fixture.nativeElement as HTMLElement;
+
+    expect(element.textContent).toContain('Frame');
+    expect(element.textContent).not.toContain('New product');
+    expect(element.querySelector('button[aria-label="Remove one unit of Frame"]')).toBeNull();
+    expect(element.querySelector('button[aria-label="Actions for Frame"]')).toBeNull();
+  });
+
+  it('lets a stock clerk change stock but not create products', async () => {
+    api.query.mockReturnValue(of(aPage([aProduct({ name: 'Frame', stockQuantity: 5 })])));
+
+    const fixture = await render(['products:read', 'stock:write']);
+    const element = fixture.nativeElement as HTMLElement;
+
+    expect(element.textContent).not.toContain('New product');
+    expect(element.querySelector('button[aria-label="Remove one unit of Frame"]')).not.toBeNull();
   });
 
   it('shows an empty state when nothing matches', async () => {

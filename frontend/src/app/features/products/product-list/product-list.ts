@@ -5,6 +5,7 @@ import { Component, computed, inject, Injector, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 import { debounceTime, distinctUntilChanged, filter, finalize, map, switchMap } from 'rxjs';
+import { Auth } from '../../../core/auth/auth';
 import { ApiError } from '../../../core/http/api-error';
 import { Notifications } from '../../../core/notifications/notifications';
 import { integer, orderedRange } from '../../../shared/forms/validators';
@@ -52,6 +53,8 @@ const FILTER_DEBOUNCE_MS = 300;
 })
 export class ProductList {
   protected readonly store = inject(ProductsStore);
+  /** Used only to hide what the user may not do; the API enforces the same rules on every request. */
+  protected readonly auth = inject(Auth);
   private readonly dialog = inject(Dialog);
   private readonly injector = inject(Injector);
   private readonly notifications = inject(Notifications);

@@ -6,6 +6,18 @@
       </span>
       Product Management
     </a>
+
+    @if (auth.isAuthenticated()) {
+      <div class="flex items-center gap-3">
+        <div class="hidden text-right sm:block">
+          <p class="text-sm font-medium text-slate-900">{{ auth.userName() }}</p>
+          <p class="text-xs text-slate-500">{{ auth.roles().join(', ') }}</p>
+        </div>
+        <button type="button" class="btn btn-secondary py-1.5" (click)="auth.logout()">
+          Sign out
+        </button>
+      </div>
+    }
   </div>
 </header>
 
