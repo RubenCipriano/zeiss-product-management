@@ -5,7 +5,7 @@
 # ${VARIABLES} are filled from the container environment at startup (see Dockerfile).
 
 # Kubernetes DNS, taken from /etc/resolv.conf (NGINX_ENTRYPOINT_LOCAL_RESOLVERS). Names are re-resolved every
-# 5 s, so API replicas added or removed by `kubectl scale` are picked up without restarting the gateway.
+# 5 s, so API replicas added or removed by the autoscaler are picked up without restarting the gateway.
 resolver ${NGINX_LOCAL_RESOLVERS} valid=5s ipv6=off;
 resolver_timeout 2s;
 

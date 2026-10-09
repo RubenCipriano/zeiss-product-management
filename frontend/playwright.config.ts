@@ -17,6 +17,7 @@ export default defineConfig({
   reporter: [['list'], ['html', { outputFolder: 'e2e/reports/playwright', open: 'never' }]],
   use: {
     baseURL: process.env['BASE_URL'] ?? 'http://localhost:8080',
+    // Locally the installed Chrome; in CI Playwright's own Chromium (PLAYWRIGHT_CHANNEL=chromium).
     channel: process.env['PLAYWRIGHT_CHANNEL'] ?? 'chrome',
     trace: 'retain-on-failure',
   },

@@ -195,8 +195,8 @@ réplica. Com 850 mil produtos, a verificação `count(*) - count(DISTINCT id)` 
 * **A UI esconde, a API decide:** o frontend esconde botões que o role não pode usar (UX), mas quem garante é a API.
   Há um teste com a matriz completa 3 roles × 10 operações.
 * **Rate limiting em duas camadas:** o nginx limita por IP (proteção grossa e barata) e a API por utilizador, com um
-  limite mais apertado para escritas. Respondem 429 + `Retry-After`. Nota: o limitador da API é por réplica, por
-  isso o limite efetivo é limite × réplicas (documentado; um limite global exigiria Redis).
+  limite mais apertado para escritas. Respondem 429 + `Retry-After`. Os limites da API estão no **Redis**,
+  partilhados por todas as réplicas: o limite de um utilizador não cresce quando o HPA junta pods (secção 9.6).
 * **Rede e contentores:** NetworkPolicies (só a API chega à base de dados e ao Redis, só o gateway chega à API).
   Os pods correm como não-root, com o sistema de ficheiros só de leitura e sem capabilities.
 
@@ -303,7 +303,7 @@ distribui-se mal. Com o `api-headless`, o nginx conhece todos os pods e escolhe 
 | Job `db-migrate` | Corre as migrações do EF Core **uma vez** por deploy, antes das réplicas novas. Assim as réplicas nunca competem a migrar. |
 | HPA `api` | Decide quantas réplicas da API correm, a partir do CPU medido pelo metrics-server. |
 | `metrics-server` (kube-system) | Mede CPU/memória dos pods; usado pelo HPA e por `kubectl top`. Instalado por `scripts/cluster-addons.sh`. |
-| Secret `database-credentials` | Utilizador, password e connection string (pool de 20 ligações por réplica). |
+| Secret `database-credentials` | Utilizador, password e connection string (pool de 10 ligações por réplica: 8 réplicas × 10 = 80 no máximo). |
 | Secret `api-auth` | A chave que assina os JWT. A mesma em todas as réplicas, por isso um token de uma réplica vale em todas. |
 | Secret `api-consumers` | Os consumers registados (client id, hash PBKDF2 do secret, roles), montado como `config/consumers.json`. |
 | ConfigMap `api-config` | Configuração não secreta: endereço do Redis, rate limits, bloqueio de logins, tempos de idempotência. |
@@ -535,3 +535,70 @@ O .NET 10 *é* o .NET Core: a Microsoft deixou cair o "Core" do nome no .NET 5. 
 5. `load-tests/run.sh stock-consistency` → "exatamente 100 vendidas, stock 0".
 6. Swagger: tentar `DELETE` com o token do clerk → 403. Mostrar o `errorCode` nos erros.
 7. (Bónus) No Claude Code: "que produtos estão com pouco stock?" → o servidor MCP responde.
+
+---
+
+## 14. Do browser à base de dados: como tudo está montado
+
+Diagramas detalhados (inglês, Mermaid): [`flows.md`](flows.md) e [`architecture.md`](architecture.md).
+
+**As peças.** O cluster é o Kubernetes do Docker Desktop: **um nó** (`docker-desktop`, uma VM Linux com 8 CPUs)
+onde correm todos os pods. Em produção haveria vários nós e o Kubernetes espalharia as réplicas (os manifests já
+pedem isso com `topologySpreadConstraints`). Um **pod** é um contentor a correr com o seu IP; um **Service** é um
+nome e IP fixos à frente de um grupo de pods.
+
+**O caminho de um pedido:**
+
+1. **Browser → `localhost:8080`.** O Docker Desktop liga essa porta ao Service `gateway` (tipo `LoadBalancer`). Num
+   cloud seria um load balancer público com TLS.
+2. **Service `gateway` → um pod nginx** (2 a 6, HPA).
+3. **nginx gateway**, a única porta de entrada:
+   * `/` e os ficheiros → pods **web** (o Angular);
+   * `/api/auth/token` → passa sem token (é o login);
+   * resto de `/api/…` → verifica o **JWT ES256** (njs, chave pública da API), aplica o rate limit por IP, e se a
+     mesma leitura foi feita há menos de 1 s por alguém com o mesmo role **responde da microcache** (o pedido acaba
+     aqui). Token inválido → **401** aqui.
+4. **gateway → um pod da API** via `api-headless`: o DNS devolve os IPs de todos os pods prontos e o nginx escolhe,
+   **a cada pedido**, o menos ocupado.
+5. **API**: verifica de novo o token, as permissões e o limite por utilizador (Redis). Leituras: cache **Redis**
+   (pode acabar aqui). Escritas: reclama a `Idempotency-Key` no Redis.
+6. **PostgreSQL**: fim da linha para dados reais. A resposta volta pelo mesmo caminho.
+
+Fora do caminho do pedido: o Job `db-migrate` (migrações, uma vez por deploy), o metrics-server + HPAs (número de
+réplicas) e as NetworkPolicies (PostgreSQL e Redis só aceitam a API).
+
+**Onde está o trabalho repetido** (secção 1 de `flows.md`): cache do browser (5 s sem pedido, até 5 min mostra e
+revalida) → microcache do nginx (1 s por URL + role; 96% dos pedidos de leitura param aqui) → Redis (por gerações:
+uma alteração de stock invalida só esse produto) → PostgreSQL (só o que nenhuma camada respondeu, e todas as
+escritas).
+
+## 15. Revisão final: estrutura, Lighthouse, Playwright, produção
+
+**Estrutura do frontend (SOLID):**
+* `data-access/` (API, modelos, store) · `feature/` (página, `ProductActions`, diálogos) · `ui/` (componentes de
+  apresentação: só `input()`/`output()`, sem serviços).
+* A página dos produtos passou de 277 + 361 linhas para 25 + 70: só liga peças. Cada ação do utilizador (criar,
+  editar, ajustar stock, histórico, apagar) vive em `ProductActions`, testada à parte.
+* **"Hooks" em Angular** são funções `inject…()`: `autoRefresh()` adiciona um comportamento a quem a chama e pára
+  com ele. **"Modules"** hoje são pastas por funcionalidade com barrels (`index.ts`), não NgModules (legado).
+* `AppDialog`: um só sítio que abre diálogos com nome acessível.
+
+**Lighthouse (fluxo com login, mobile e desktop):** Performance 97–100, Accessibility 100, Best Practices 100. SEO 63
+é **de propósito**: app interna, `robots.txt` proíbe indexar. O que se aprendeu:
+* diálogos sem nome e aninhados → corrigido (Accessibility 96 → 100);
+* `robots.txt` devolvia o `index.html` → qualquer ficheiro inexistente é agora 404;
+* tentei "inline critical CSS" (CSS crítico no HTML) e **medi**: numa SPA o HTML é uma casca vazia, o conteúdo
+  aparecia antes do CSS completo e saltava (CLS 0,14). Revertido. Decisão com dados, não com intuição.
+* o resumo de cards reserva o seu espaço → CLS 0.
+
+**Playwright (20 testes, desktop + telemóvel):** login por role, a jornada completa do manager (criar, pesquisar,
++10/−10, histórico, editar, apagar), paginação servida pela cache do browser, CSP, 401 na borda. **Encontrou dois
+bugs só de telemóvel:** a página ficava 2,4× mais larga (um texto para leitores de ecrã, `position: absolute`,
+escapava ao `overflow`) e o formulário era mais alto do que o ecrã (botão "Create" inalcançável).
+
+**Pronto para produção?** Ver [`production-readiness.md`](production-readiness.md): o software sim (requisitos do
+PDF verificados automaticamente, seguro por omissão, escala, correto sob carga). Falta o que é do ambiente: TLS,
+gestor de segredos, PostgreSQL gerido com backups, métricas/traces e cluster com vários nós.
+
+**Agentes do projeto** (`.claude/agents/`): `docs-maintainer` (mantém docs e diagramas Mermaid alinhados com o
+código), `quality-gate` (corre todas as verificações e reporta), `architecture-reviewer` (revisão SOLID).

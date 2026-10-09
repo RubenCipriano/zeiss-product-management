@@ -31,7 +31,7 @@ fi
 run sudo microk8s status --wait-ready --timeout 300 >/dev/null
 
 # dns: service discovery; hostpath-storage: PersistentVolumes for PostgreSQL; registry: image registry at
-# localhost:32000 that the deploy scripts push to; metrics-server: `kubectl top` and the optional autoscaler.
+# localhost:32000 that the deploy scripts push to; metrics-server: `kubectl top` and the HorizontalPodAutoscalers (required).
 echo "==> Enabling add-ons"
 run sudo microk8s enable dns hostpath-storage metrics-server
 run sudo microk8s enable registry

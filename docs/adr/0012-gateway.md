@@ -19,7 +19,7 @@ A dedicated **nginx gateway** (`frontend/gateway`) is the only entry point:
 
 * **Per-request load balancing across API replicas:** the upstream points at the API's *headless* Service and uses
   `server … resolve` (open-source nginx ≥ 1.27.3) with a 5 s DNS TTL. nginx sees every ready pod individually and
-  picks the least busy one for each request, and new replicas join within seconds of `kubectl scale`. A normal
+  picks the least busy one for each request, and new replicas (added by the HPA) join within seconds. A normal
   ClusterIP Service would balance per TCP connection, and long-lived keep-alive connections would pin traffic to the
   old pods.
 * **Microcache for API reads.** Identical GETs within 1 s are answered by nginx without reaching the API. This

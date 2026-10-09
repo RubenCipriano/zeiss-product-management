@@ -31,20 +31,38 @@ npm start          # http://localhost:4200, /api is proxied to http://localhost:
 
 ```
 src/app/
-  core/          app-wide services: auth (session, guard, interceptor), API base URL, ApiError + interceptor,
-                 browser response cache (ResponseCache + clientCacheInterceptor), notifications
-  shared/        reusable pieces: form validators/messages, PagedResponse,
-                 ui/ (icon, paginator, progress bar, toasts, ConfirmDialog; index.ts), pipes/ (signedNumber; index.ts)
+  core/                 app-wide: auth (session, guard, interceptor), API base URL, ApiError + interceptor,
+                        browser response cache (ResponseCache + clientCacheInterceptor), notifications
+  shared/
+    ui/                 presentational building blocks: AppDialog, ConfirmDialog, icon, paginator, progress bar, toasts
+    util/               inject-functions ("hooks"): autoRefresh()
+    pipes/  forms/  models/
   features/auth/login/  sign-in page
   features/products/
-    data-access/ ProductsApi, CategoriesApi (HTTP), ProductsStore (signals + rxResource), models
-    pipes/       movementReason
-    product-list/, product-form-dialog/, stock-adjust-dialog/, stock-history-dialog/, stock-status/
+    data-access/        ProductsApi, CategoriesApi (HTTP), ProductsStore (signals + rxResource), models
+    feature/            ProductsPage (container), ProductActions (what the user can do), the dialogs
+    ui/                 presentational: InventorySummary, ProductFilters, ProductTable, StockStatus, pipes
+src/testing/            test fixtures
+e2e/                    Playwright end-to-end tests and the Lighthouse user flow
+```
+
+Dependency rules, so each piece has one reason to change:
+* `ui/` components only take `input()`s and emit `output()`s: no services, no store. Reusable and trivial to test.
+* `feature/` orchestrates: the page wires the store and `ProductActions` to the `ui/` components; `ProductActions`
+  opens dialogs and reports results.
+* `data-access/` knows HTTP and state, nothing about components.
+* Across folders, import through the folder's `index.ts`; inside a folder, import files directly.
 
 Standalone components throughout (no NgModules, the Angular default since v19): each component imports exactly what
-it uses. Folders are grouped by feature; `index.ts` barrels keep imports short.
-src/testing/     test fixtures
-```
+it uses.
+
+## Quality checks
+
+| Script                     | What it checks                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------ |
+| `npm run test:ci`          | unit and component tests (Vitest)                                              |
+| `npm run e2e`              | Playwright against the running system (default http://localhost:8080), desktop and mobile |
+| `npm run audit:lighthouse` | Lighthouse user flow, signed in (`FORM_FACTOR=desktop` for desktop); report in `e2e/reports/` |
 
 ## Deployment
 

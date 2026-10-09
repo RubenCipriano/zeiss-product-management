@@ -21,7 +21,7 @@ deployments.
     PodDisruptionBudget) and NetworkPolicies.
   * `frontend/deploy/kubernetes.yaml`: the web app and the gateway (`LoadBalancer`), with PodDisruptionBudgets.
   * The **contract** between them is just names: the namespace, the Service `api-headless`, and the `gateway` pod
-    label. Scaling the API (`kubectl scale deployment/api --replicas=4`) needs nothing from the
+    label. Scaling the API (its HPA, or `kubectl patch hpa api`) needs nothing from the
     frontend.
 * **One Dockerfile per project** (`backend/Dockerfile`, `frontend/Dockerfile`, `frontend/gateway/Dockerfile`). All
   images are multi-stage and run as non-root.

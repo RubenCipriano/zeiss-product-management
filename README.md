@@ -225,7 +225,7 @@ ProductManagement.Mcp ──(HTTP)──► the API, through the gateway
 
 | Project          | Responsibility |
 | ---------------- | -------------- |
-| `Domain`         | `Product`, `Category`, invariants, `ProductRules` (single source of limits), the stock rule as an expression. No dependencies. |
+| `Domain`         | `Product`, `Category`, invariants, `ProductRules` (single source of limits), the stock rule (`StockRangeAllowingAdjustment`). No dependencies. |
 | `Application`    | Use cases (`ProductQueryService`, `ProductCommandService`), contracts, FluentValidation, `Result`/`Error`, ports (`IProductRepository`, `IProductQueries`, `IProductIdGenerator`, `IUnitOfWork`). |
 | `Infrastructure` | `DbContext`, configurations, migrations, repositories and queries, sequence-based id generator, **Redis cache decorator**, seeding, health checks. |
 | `Api`            | Thin controllers, HTTP mapping (status codes, ETag/If-Match, problem details), **token endpoint, JWT verification, authorization policies, rate limiting**, OpenAPI, health endpoints, the `migrate` and `hash-secret` commands. |
@@ -363,7 +363,7 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
 * **Redis cache:** cache-aside with generation-based invalidation, shared by all replicas, fails open
   ([ADR 0008](docs/adr/0008-redis-cache.md)).
 * **nginx gateway:** per-request balancing over the API's headless Service (new replicas are picked up within 5 s),
-  edge cache for the bundles, **1 s microcache for API reads** (keyed per token, bypassed after the user's own
+  edge cache for the bundles, **1 s microcache for API reads** (keyed per role from a token the gateway verified, bypassed after the user's own
   changes; 38 % of product GETs served by nginx in the load test), gzip, keep-alive pools
   ([ADR 0012](docs/adr/0012-gateway.md)).
 * **Two cache layers, two jobs:** nginx absorbs identical requests within a second; Redis is shared, invalidated
@@ -451,16 +451,16 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 
 | Choice | Why |
 | ------ | --- |
-| Stock changes bypass load-modify-save | Atomicity under concurrency. The rule stays in the domain as an expression ([0003](docs/adr/0003-atomic-stock-updates.md)). |
+| Stock changes bypass load-modify-save | Atomicity under concurrency. The rule stays in the domain; the SQL only applies the range it computes ([0003](docs/adr/0003-atomic-stock-updates.md)). |
 | Nullable value types in request DTOs | A missing field becomes a validation error instead of a silent `0`. |
 | No `EnableRetryOnFailure` | A blind retry inside the API after an ambiguous commit could apply a stock change twice. Retries belong to the client, with an `Idempotency-Key`. |
 | `If-Match` optional | Easy to try with Swagger or curl. The UI always sends it, and making it mandatory (428) is one line. |
-| Global cache generation (any write invalidates all cached reads) | Simple and race-free across replicas. It costs hit rate under heavy writes, as the load tests measured. |
-| In-memory API rate limiter | Fairness per replica with no extra network hop. Global quotas would need Redis; the gateway provides the coarse cluster-wide limit. |
+| Cache invalidated by generations (data, listing, per product) | Race-free across replicas and O(1); a stock change invalidates only that product and the stock-level lists. Finer than this (per key) was not needed by the measurements ([0008](docs/adr/0008-redis-cache.md)). |
+| Per-user rate limits in Redis | One Redis round trip per API request, so a user's limit does not grow as the autoscaler adds replicas; falls back to per-replica limits if Redis is down ([0010](docs/adr/0010-rate-limiting.md)). |
 | Real PostgreSQL and Redis in tests (Docker required) | In-memory fakes would hide exactly the behaviour under test. |
-| The API issues its own tokens (no identity provider) | One API and a handful of known callers: an IdP would add a component without solving a problem here. HS256 with one shared key is the simplest secure option while only the API verifies tokens ([0009](docs/adr/0009-authentication-authorization.md)). |
+| The API issues its own tokens (no identity provider) | One API and a handful of known callers: an IdP would add a component without solving a problem here. ES256: only the API can sign; the gateway and other services verify with the public key ([0009](docs/adr/0009-authentication-authorization.md), [0020](docs/adr/0020-edge-token-verification.md)). |
 | Stateless JWTs (no revocation list) | No session store; a 1-hour lifetime and key rotation bound the risk. A `jti` deny-list in Redis is the next step if needed. |
-| 1 s nginx microcache | Up to 1 s of staleness for repeated reads, in exchange for absorbing bursts; never shared between tokens and bypassed after the user's own changes. |
+| 1 s nginx microcache | Up to 1 s of staleness for repeated reads, in exchange for absorbing bursts; shared only between callers with the same roles (tokens verified at the gateway), bypassed after the user's own changes. |
 | Polling instead of push in the UI | Works across replicas with no extra infrastructure, at the cost of up to 15 s of staleness. |
 
 ---
@@ -475,17 +475,15 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 * migrations as a deployment step;
 * CI with an end-to-end deployment, and load tests with SLO thresholds.
 
-**Next:**
+**Next** (full assessment: [docs/production-readiness.md](docs/production-readiness.md)):
 
 * **Secrets** from a secret manager (External Secrets, Vault or Sealed Secrets) instead of values in the manifests.
-* **TLS** at the edge (cert-manager) with HSTS, and a Content-Security-Policy (which needs Angular's
-  `inlineCritical` turned off).
+* **TLS** at the edge (cert-manager) with HSTS.
 * **Managed PostgreSQL** (or CloudNativePG) with backups, PgBouncer and read replicas.
 * **Preserve client IPs** at the load balancer (`externalTrafficPolicy: Local` / PROXY protocol) so per-IP limits
-  apply per caller; consider RS256 + JWKS if other services need to verify tokens; a `jti` deny-list for revocation.
+  apply per caller; a `jti` deny-list (checked at the gateway too) for revocation.
 * **Observability:** OpenTelemetry traces and metrics (ASP.NET Core, EF Core, Npgsql, Redis), with dashboards and
   alerts on the SLOs used by the load tests.
-* A **HorizontalPodAutoscaler** for the API, once the database has headroom.
 * **Keyset pagination** (`?after=`) for constant-time deep pages; monthly partitions for `stock_movements`.
 * A replicated Redis, so idempotency claims survive a Redis restart.
 * **GitOps** (Argo CD or Flux) with per-environment overlays (Kustomize or Helm) instead of deploy scripts.
@@ -514,7 +512,7 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 │   ├── gateway/                              # nginx gateway image (Dockerfile, config template)
 │   └── deploy/                               # kubernetes.yaml + deploy.sh (web, gateway)
 ├── load-tests/                               # k6 scenarios + run.sh (runs them as a Kubernetes Job)
-├── scripts/                                  # cluster-up / cluster-down (MicroK8s), deploy-all
+├── scripts/                                  # cluster-up / cluster-down (MicroK8s), cluster-addons, deploy-all, check-requirements.py
 ├── docs/                                     # ADRs, load test results, scaffolding, presentation guide (PT)
 ├── .mcp.json · .vscode/mcp.json              # MCP servers for Claude Code / VS Code
 └── .github/workflows/ci.yml
