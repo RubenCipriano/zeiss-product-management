@@ -10,7 +10,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\ProductManagement.Application\ProductManagement.Application.csproj" />
+    <ProjectReference Include="..\ProductManagement.Domain\ProductManagement.Domain.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -22,11 +22,6 @@
   <ItemGroup>
     <Using Include="Shouldly" />
     <Using Include="Xunit" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="NSubstitute" />
-    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
   </ItemGroup>
 
 </Project>

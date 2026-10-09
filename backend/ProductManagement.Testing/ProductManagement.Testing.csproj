@@ -3,7 +3,7 @@
   <!-- Shared test infrastructure: PostgreSQL container, API host factory, database reset, HTTP helpers. -->
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\ProductManagement.Api\ProductManagement.Api.csproj" />
+    <ProjectReference Include="..\ProductManagement.Api\ProductManagement.Api.csproj" />
   </ItemGroup>
 
   <ItemGroup>

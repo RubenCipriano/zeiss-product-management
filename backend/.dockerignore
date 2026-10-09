@@ -3,4 +3,8 @@
 **/.vs/
 **/.idea/
 **/*.user
-tests/
+**/TestResults/
+*.Tests/
+*Tests/
+ProductManagement.Testing/
+deploy/
