@@ -31,7 +31,8 @@ namespace ProductManagement.Api.Controllers;
 [ProducesResponseType<ProblemDetails>(StatusCodes.Status429TooManyRequests, ProblemJsonContentType)]
 public sealed class ProductsController(
     IProductQueryService productQueries,
-    IProductCommandService productCommands) : ApiControllerBase
+    IProductCommandService productCommands,
+    IStockCommandService stockCommands) : ApiControllerBase
 {
     private const string IfMatchHeader = "If-Match";
 
@@ -175,7 +176,7 @@ public sealed class ProductsController(
         int quantity,
         CancellationToken cancellationToken)
     {
-        var result = await productCommands.DecrementStockAsync(id, quantity, cancellationToken);
+        var result = await stockCommands.DecrementStockAsync(id, quantity, cancellationToken);
         return result.IsSuccess ? OkWithEntityTag(result.Value) : Problem(result.Error);
     }
 
@@ -195,7 +196,7 @@ public sealed class ProductsController(
         int quantity,
         CancellationToken cancellationToken)
     {
-        var result = await productCommands.AddToStockAsync(id, quantity, cancellationToken);
+        var result = await stockCommands.AddToStockAsync(id, quantity, cancellationToken);
         return result.IsSuccess ? OkWithEntityTag(result.Value) : Problem(result.Error);
     }
 

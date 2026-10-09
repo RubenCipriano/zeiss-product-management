@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using ProductManagement.Application.Common.Security;
-using ProductManagement.Infrastructure.Caching;
+using ProductManagement.Infrastructure.Edge;
+using ProductManagement.Infrastructure.Redis;
 using StackExchange.Redis;
 
 namespace ProductManagement.Infrastructure.Security;
@@ -14,7 +14,7 @@ namespace ProductManagement.Infrastructure.Security;
 internal sealed partial class RedisFailedAttemptThrottle(
     IConnectionMultiplexer redis,
     IOptions<FailedAttemptThrottleOptions> options,
-    IOptions<CacheOptions> cacheOptions,
+    IOptions<RedisOptions> redisOptions,
     ILogger<RedisFailedAttemptThrottle> logger) : IFailedAttemptThrottle
 {
     private readonly FailedAttemptThrottleOptions _options = options.Value;
@@ -32,7 +32,7 @@ internal sealed partial class RedisFailedAttemptThrottle(
 
             return await database.KeyTimeToLiveAsync(Key(key)) ?? _options.Window;
         }
-        catch (Exception exception) when (exception is RedisException or TimeoutException)
+        catch (Exception exception) when (RedisFailures.IsTransient(exception))
         {
             LogUnavailable(exception);
             return null;
@@ -51,13 +51,13 @@ internal sealed partial class RedisFailedAttemptThrottle(
                 await database.KeyExpireAsync(Key(key), _options.Window);
             }
         }
-        catch (Exception exception) when (exception is RedisException or TimeoutException)
+        catch (Exception exception) when (RedisFailures.IsTransient(exception))
         {
             LogUnavailable(exception);
         }
     }
 
-    private RedisKey Key(string key) => $"{cacheOptions.Value.KeyPrefix}:signin-failures:{key}";
+    private RedisKey Key(string key) => $"{redisOptions.Value.KeyPrefix}:signin-failures:{key}";
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Redis unavailable: sign-in failures are not being counted cluster-wide")]
     private partial void LogUnavailable(Exception exception);

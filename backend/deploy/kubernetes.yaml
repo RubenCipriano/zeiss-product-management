@@ -362,11 +362,10 @@ spec:
           image: localhost:32000/product-management/api:latest
           imagePullPolicy: IfNotPresent
           args: ["migrate"]
+          # No api-auth: the migrate command builds only the database and cache services, not authentication.
           envFrom:
             - configMapRef:
                 name: api-config
-            - secretRef:
-                name: api-auth
           env:
             - name: ConnectionStrings__ProductManagement
               valueFrom: { secretKeyRef: { name: database-credentials, key: connection-string } }

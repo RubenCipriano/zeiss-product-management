@@ -1,4 +1,3 @@
-using System.Net.Mime;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using ProductManagement.Application.Common.Errors;
@@ -13,7 +12,7 @@ namespace ProductManagement.Api.Http;
 [ApiController]
 public abstract class ApiControllerBase : ControllerBase
 {
-    public const string ProblemJsonContentType = "application/problem+json";
+    public const string ProblemJsonContentType = ApiProblems.ContentType;
 
     protected ActionResult<T> ToActionResult<T>(Result<T> result) =>
         result.IsSuccess ? Ok(result.Value) : Problem(result.Error);
@@ -33,14 +32,15 @@ public abstract class ApiControllerBase : ControllerBase
             _ => StatusCodes.Status500InternalServerError,
         };
 
-        var problem = ProblemDetailsFactory.CreateProblemDetails(HttpContext, statusCode, detail: error.Message);
-        problem.Extensions["errorCode"] = error.Code;
+        var problem = ProblemDetailsFactory
+            .CreateProblemDetails(HttpContext, statusCode, detail: error.Message)
+            .WithErrorCode(error.Code);
         foreach (var (key, value) in error.Metadata)
         {
             problem.Extensions[key] = value;
         }
 
-        return ProblemResult(problem);
+        return problem.ToResult();
     }
 
     protected ObjectResult InvalidIfMatchHeader() =>
@@ -59,20 +59,13 @@ public abstract class ApiControllerBase : ControllerBase
             }
         }
 
-        var problem = ProblemDetailsFactory.CreateValidationProblemDetails(
-            HttpContext,
-            modelState,
-            StatusCodes.Status400BadRequest,
-            detail: error.Message);
-        problem.Extensions["errorCode"] = error.Code;
-
-        return ProblemResult(problem);
+        return ProblemDetailsFactory
+            .CreateValidationProblemDetails(HttpContext, modelState, StatusCodes.Status400BadRequest, detail: error.Message)
+            .WithErrorCode(error.Code)
+            .ToResult();
     }
 
-    private static ObjectResult ProblemResult(ProblemDetails problem) =>
-        new(problem)
-        {
-            StatusCode = problem.Status,
-            ContentTypes = { ProblemJsonContentType, MediaTypeNames.Application.Json },
-        };
+    /// <summary>A request refused before reaching a use case (see <see cref="ApiProblems.Rejection"/>).</summary>
+    protected ObjectResult Rejection(int status, string errorCode, string detail) =>
+        ProblemDetailsFactory.Rejection(HttpContext, status, errorCode, detail);
 }

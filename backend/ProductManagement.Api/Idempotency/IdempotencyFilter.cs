@@ -1,12 +1,10 @@
-using System.Buffers;
-using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Mvc.Infrastructure;
-using Microsoft.AspNetCore.WebUtilities;
 using ProductManagement.Api.Http;
-using ProductManagement.Application.Common.Idempotency;
+using ProductManagement.Api.Security;
+using ProductManagement.Infrastructure.Edge;
 
 namespace ProductManagement.Api.Idempotency;
 
@@ -24,15 +22,7 @@ namespace ProductManagement.Api.Idempotency;
 internal sealed class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsFactory problemDetailsFactory)
     : IAsyncResourceFilter
 {
-    public const string HeaderName = "Idempotency-Key";
     public const string ReplayedHeaderName = "Idempotent-Replayed";
-
-    /// <summary>HttpContext item holding the consumer-scoped key, read by <c>ICurrentActor.RequestKey</c>.</summary>
-    public const string RequestKeyItem = "IdempotencyRequestKey";
-    public const int MaxKeyLength = 128;
-
-    private static readonly SearchValues<char> AllowedKeyCharacters =
-        SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.:");
 
     // Headers that are part of the response a client relies on, replayed with the body.
     private static readonly string[] ReplayedHeaders = ["ETag", "Location"];
@@ -40,27 +30,21 @@ internal sealed class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsF
     public async Task OnResourceExecutionAsync(ResourceExecutingContext context, ResourceExecutionDelegate next)
     {
         var http = context.HttpContext;
-        if (!http.Request.Headers.TryGetValue(HeaderName, out var values))
+        if (!http.Request.Headers.TryGetValue(IdempotencyKey.HeaderName, out var values))
         {
             await next();
             return;
         }
 
-        var key = values.ToString();
-        if (key.Length is 0 or > MaxKeyLength || key.AsSpan().ContainsAnyExcept(AllowedKeyCharacters))
+        if (!IdempotencyKey.TryParse(values.ToString(), http.GetSubject() ?? "anonymous", out var scopedKey))
         {
-            context.Result = Problem(
-                http,
-                StatusCodes.Status400BadRequest,
-                "idempotency_key_invalid",
-                $"'{HeaderName}' must be 1-{MaxKeyLength} characters of letters, digits, '-', '_', '.' or ':'.");
+            context.Result = Reject(http, StatusCodes.Status400BadRequest, ApiErrorCodes.IdempotencyKeyInvalid, IdempotencyKey.Rule);
             return;
         }
 
-        var scopedKey = $"{http.User.FindFirst("sub")?.Value ?? "anonymous"}:{key}";
         // Also recorded with the change in the database (unique), the backstop if this claim is ever lost.
-        http.Items[RequestKeyItem] = scopedKey;
-        var fingerprint = await FingerprintAsync(http.Request);
+        HttpRequestContext.SetIdempotencyKey(http, scopedKey);
+        var fingerprint = await RequestFingerprint.ComputeAsync(http.Request);
         var claim = await store.TryBeginAsync(scopedKey, fingerprint, http.RequestAborted);
 
         switch (claim.Status)
@@ -70,24 +54,24 @@ internal sealed class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsF
                 return;
             case IdempotencyClaimStatus.InProgress:
                 http.Response.Headers.RetryAfter = "1";
-                context.Result = Problem(
+                context.Result = Reject(
                     http,
                     StatusCodes.Status409Conflict,
-                    "idempotency_key_in_progress",
+                    ApiErrorCodes.IdempotencyKeyInProgress,
                     "A request with this Idempotency-Key is still being processed. Retry shortly.");
                 return;
             case IdempotencyClaimStatus.FingerprintMismatch:
-                context.Result = Problem(
+                context.Result = Reject(
                     http,
                     StatusCodes.Status422UnprocessableEntity,
-                    "idempotency_key_reused",
+                    ApiErrorCodes.IdempotencyKeyReused,
                     "This Idempotency-Key was already used for a different request.");
                 return;
             case IdempotencyClaimStatus.Unavailable:
-                context.Result = Problem(
+                context.Result = Reject(
                     http,
                     StatusCodes.Status503ServiceUnavailable,
-                    "idempotency_unavailable",
+                    ApiErrorCodes.IdempotencyUnavailable,
                     "The request cannot be guaranteed to run only once right now. Retry later with the same key.");
                 return;
         }
@@ -156,30 +140,6 @@ internal sealed class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsF
         };
     }
 
-    /// <summary>Method, path, query and body: the same key with a different request is detected.</summary>
-    private static async Task<string> FingerprintAsync(HttpRequest request)
-    {
-        request.EnableBuffering();
-        using var reader = new StreamReader(request.Body, Encoding.UTF8, leaveOpen: true);
-        var body = await reader.ReadToEndAsync(request.HttpContext.RequestAborted);
-        request.Body.Position = 0;
-
-        var material = $"{request.Method}\n{request.Path}{request.QueryString}\n{body}";
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
-    }
-
-    private ObjectResult Problem(HttpContext http, int status, string errorCode, string detail)
-    {
-        var problem = problemDetailsFactory.CreateProblemDetails(
-            http,
-            status,
-            title: ReasonPhrases.GetReasonPhrase(status),
-            detail: detail);
-        problem.Extensions["errorCode"] = errorCode;
-        return new ObjectResult(problem)
-        {
-            StatusCode = status,
-            ContentTypes = { ApiControllerBase.ProblemJsonContentType },
-        };
-    }
+    private ObjectResult Reject(HttpContext http, int status, string errorCode, string detail) =>
+        problemDetailsFactory.Rejection(http, status, errorCode, detail);
 }

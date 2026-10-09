@@ -2,6 +2,7 @@ using FluentValidation;
 using Microsoft.Extensions.Logging;
 using ProductManagement.Application.Categories.Abstractions;
 using ProductManagement.Application.Common.Persistence;
+using ProductManagement.Application.Common.Requests;
 using ProductManagement.Application.Common.Results;
 using ProductManagement.Application.Common.Security;
 using ProductManagement.Application.Common.Validation;
@@ -18,6 +19,7 @@ internal sealed partial class ProductCommandService(
     IProductIdGenerator idGenerator,
     IUnitOfWork unitOfWork,
     ICurrentActor actor,
+    IRequestContext requestContext,
     IValidator<CreateProductRequest> createValidator,
     IValidator<UpdateProductRequest> updateValidator,
     TimeProvider timeProvider,
@@ -49,23 +51,17 @@ internal sealed partial class ProductCommandService(
             categoryId,
             timeProvider.GetUtcNow());
 
+        var idempotencyKey = requestContext.IdempotencyKey;
         products.Add(product);
-        products.AddMovement(StockMovement.Record(
-            product.Id,
-            product.StockQuantity,
-            product.StockQuantity,
-            StockMovementReason.InitialStock,
-            actor.Name,
-            product.CreatedAt,
-            actor.RequestKey));
+        products.AddMovement(StockMovement.ForInitialStock(product, actor.Name, idempotencyKey));
         try
         {
             await unitOfWork.SaveChangesAsync(cancellationToken);
         }
-        catch (DuplicateRequestException) when (actor.RequestKey is not null)
+        catch (DuplicateRequestException) when (idempotencyKey is not null)
         {
             // Created before by this same request: answer with that product instead of a second one.
-            var original = await productQueries.FindCreatedByRequestAsync(actor.RequestKey, CancellationToken.None);
+            var original = await productQueries.FindCreatedByRequestAsync(idempotencyKey, CancellationToken.None);
             if (original is not null)
             {
                 return original;
@@ -118,26 +114,15 @@ internal sealed partial class ProductCommandService(
             now);
 
         // Overwriting the stock is recorded too, in the same transaction, so the ledger always adds up.
-        if (product.StockQuantity != stockBefore)
+        if (StockMovement.ForCorrection(product, stockBefore, actor.Name, now) is { } correction)
         {
-            products.AddMovement(StockMovement.Record(
-                id,
-                product.StockQuantity - stockBefore,
-                product.StockQuantity,
-                StockMovementReason.Correction,
-                actor.Name,
-                now));
+            products.AddMovement(correction);
         }
 
-        try
+        var saved = await SaveCheckingConcurrencyAsync(id, expectedVersion, cancellationToken);
+        if (saved.IsFailure)
         {
-            await unitOfWork.SaveChangesAsync(cancellationToken);
-        }
-        catch (ConcurrencyConflictException)
-        {
-            // The row changed between our read and our write (the token we loaded no longer matches).
-            LogConcurrencyConflict(id);
-            return expectedVersion is null ? ProductErrors.ConcurrentModification(id) : ProductErrors.VersionMismatch(id);
+            return saved.Error;
         }
 
         LogProductUpdated(id);
@@ -159,70 +144,35 @@ internal sealed partial class ProductCommandService(
 
         products.Remove(product);
 
-        try
+        var saved = await SaveCheckingConcurrencyAsync(id, expectedVersion, cancellationToken);
+        if (saved.IsFailure)
         {
-            await unitOfWork.SaveChangesAsync(cancellationToken);
-        }
-        catch (ConcurrencyConflictException)
-        {
-            LogConcurrencyConflict(id);
-            return expectedVersion is null ? ProductErrors.ConcurrentModification(id) : ProductErrors.VersionMismatch(id);
+            return saved;
         }
 
         LogProductDeleted(id);
         return Result.Success();
     }
 
-    public Task<Result<ProductResponse>> DecrementStockAsync(int id, int quantity, CancellationToken cancellationToken) =>
-        AdjustStockAsync(id, quantity, StockOperation.Remove, cancellationToken);
-
-    public Task<Result<ProductResponse>> AddToStockAsync(int id, int quantity, CancellationToken cancellationToken) =>
-        AdjustStockAsync(id, quantity, StockOperation.Add, cancellationToken);
-
     /// <summary>
-    /// Stock changes skip load-modify-save on purpose: a single conditional UPDATE makes check-and-write atomic.
-    /// Concurrent requests therefore never oversell and never fail with spurious concurrency conflicts.
-    /// See docs/adr/0003-atomic-stock-updates.md.
+    /// Saves a load-modify-save change. If the row changed between our read and our write (the token we loaded no
+    /// longer matches), a client that sent a version gets 412, one that did not gets 409.
     /// </summary>
-    private async Task<Result<ProductResponse>> AdjustStockAsync(
+    private async Task<Result> SaveCheckingConcurrencyAsync(
         int id,
-        int quantity,
-        StockOperation operation,
+        uint? expectedVersion,
         CancellationToken cancellationToken)
     {
-        if (quantity is < 1 or > ProductRules.MaxStockQuantity)
+        try
         {
-            return ProductErrors.InvalidQuantity();
+            await unitOfWork.SaveChangesAsync(cancellationToken);
+            return Result.Success();
         }
-
-        var delta = operation == StockOperation.Remove ? -quantity : quantity;
-        var outcome = await products.TryAdjustStockAsync(
-            id,
-            delta,
-            actor.Name,
-            actor.RequestKey,
-            timeProvider.GetUtcNow(),
-            cancellationToken);
-        // Applied before by this same request (its first answer was lost): the change stands, report success.
-        var adjusted = outcome is StockAdjustmentOutcome.Applied or StockAdjustmentOutcome.AlreadyApplied;
-
-        // The current state tells us both what to return on success and why it failed otherwise. Not cancellable:
-        // once the change may have been committed, the request finishes, so its outcome can be recorded and replayed.
-        var current = await productQueries.GetByIdAsync(id, CancellationToken.None);
-        if (current is null)
+        catch (ConcurrencyConflictException)
         {
-            return ProductErrors.NotFound(id);
+            LogConcurrencyConflict(id);
+            return expectedVersion is null ? ProductErrors.ConcurrentModification(id) : ProductErrors.VersionMismatch(id);
         }
-
-        if (!adjusted)
-        {
-            return operation == StockOperation.Remove
-                ? ProductErrors.InsufficientStock(id, quantity, current.StockQuantity)
-                : ProductErrors.StockLimitExceeded(id, quantity, current.StockQuantity);
-        }
-
-        LogStockAdjusted(id, delta, current.StockQuantity);
-        return current;
     }
 
     private async Task<Result<ProductResponse>> LoadAsync(int id, CancellationToken cancellationToken)
@@ -242,15 +192,6 @@ internal sealed partial class ProductCommandService(
     [LoggerMessage(Level = LogLevel.Information, Message = "Deleted product {ProductId}")]
     private partial void LogProductDeleted(int productId);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Adjusted stock of product {ProductId} by {Delta}; now {StockQuantity}")]
-    private partial void LogStockAdjusted(int productId, int delta, int stockQuantity);
-
     [LoggerMessage(Level = LogLevel.Warning, Message = "Optimistic concurrency conflict on product {ProductId}")]
     private partial void LogConcurrencyConflict(int productId);
-
-    private enum StockOperation
-    {
-        Remove,
-        Add,
-    }
 }

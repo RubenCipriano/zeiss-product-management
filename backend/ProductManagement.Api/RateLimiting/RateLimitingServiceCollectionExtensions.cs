@@ -1,9 +1,11 @@
 using System.Globalization;
-using System.Security.Claims;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
-using ProductManagement.Application.Common.Security;
+using Microsoft.Extensions.Options;
+using ProductManagement.Api.Http;
+using ProductManagement.Api.Security;
+using ProductManagement.Infrastructure.Edge;
 
 namespace ProductManagement.Api.RateLimiting;
 
@@ -15,13 +17,17 @@ internal static class RateLimitingServiceCollectionExtensions
     /// endpoint's per-IP limit stays per replica; its cluster-wide guard is the failed-attempt throttle.
     /// See docs/adr/0010.
     /// </remarks>
-    public static IServiceCollection AddApiRateLimiting(this IServiceCollection services, IConfiguration configuration)
+    public static IServiceCollection AddApiRateLimiting(this IServiceCollection services)
     {
-        var settings = configuration.GetSection(RateLimitingSettings.SectionName).Get<RateLimitingSettings>()
-            ?? new RateLimitingSettings();
+        services.AddOptions<RateLimitingOptions>()
+            .BindConfiguration(RateLimitingOptions.SectionName)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
 
-        services.AddRateLimiter(options =>
+        services.AddRateLimiter(_ => { });
+        services.AddOptions<RateLimiterOptions>().Configure<IOptions<RateLimitingOptions>>((options, limits) =>
         {
+            var settings = limits.Value;
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
             options.OnRejected = WriteRejectionAsync;
 
@@ -37,7 +43,7 @@ internal static class RateLimitingServiceCollectionExtensions
 
             options.AddPolicy(RateLimitPolicies.Authentication, context =>
                 settings.Enabled
-                    ? RateLimitPartition.GetFixedWindowLimiter($"ip:{context.Connection.RemoteIpAddress}", _ =>
+                    ? RateLimitPartition.GetFixedWindowLimiter(context.GetClientIpKey(), _ =>
                         new FixedWindowRateLimiterOptions
                         {
                             PermitLimit = settings.TokenRequestsPerMinute,
@@ -52,9 +58,7 @@ internal static class RateLimitingServiceCollectionExtensions
 
     /// <summary>Signed-in callers are limited per user; anonymous ones per IP address.</summary>
     private static string PartitionKey(HttpContext context) =>
-        context.User.FindFirstValue("sub") is { } subject
-            ? $"user:{subject}"
-            : $"ip:{context.Connection.RemoteIpAddress}";
+        context.GetSubject() is { } subject ? $"user:{subject}" : context.GetClientIpKey();
 
     private static RateLimitPartition<string> TokenBucket(HttpContext context, string kind, int perSecond, int burst)
     {
@@ -80,8 +84,7 @@ internal static class RateLimitingServiceCollectionExtensions
                 Status = StatusCodes.Status429TooManyRequests,
                 Title = "Too many requests.",
                 Detail = $"Rate limit exceeded. Retry after {retryAfterSeconds} second(s).",
-                Extensions = { ["errorCode"] = "rate_limited" },
-            },
+            }.WithErrorCode(ApiErrorCodes.RateLimited),
         });
     }
 }

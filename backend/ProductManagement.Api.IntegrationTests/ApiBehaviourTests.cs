@@ -1,4 +1,5 @@
 using System.Net;
+using Microsoft.Extensions.Options;
 using ProductManagement.Api.IntegrationTests.Infrastructure;
 using ProductManagement.Testing;
 
@@ -36,5 +37,18 @@ public sealed class ApiBehaviourTests(ApiFixture fixture) : ApiTestBase(fixture)
         document.ShouldContain("/api/products/{id}/add-to-stock/{quantity}");
         document.ShouldContain("/api/products/search");
         document.ShouldContain("/api/products/stock-level");
+    }
+
+    [Theory]
+    [InlineData("RateLimiting:WritesPerSecond", "0")]
+    [InlineData("SignInThrottle:MaxFailures", "0")]
+    [InlineData("Idempotency:InProgressTimeout", "00:00:00")]
+    [InlineData("Authentication:SigningKey", "")]
+    public void AnInstanceWithAnInvalidSetting_RefusesToStart(string key, string value)
+    {
+        var exception = Should.Throw<OptionsValidationException>(() =>
+            Environment.CreateClientForInstanceWith(new Dictionary<string, string> { [key] = value }));
+
+        exception.Message.ShouldContain(key.Split(':')[1]);
     }
 }

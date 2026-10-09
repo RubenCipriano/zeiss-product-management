@@ -22,7 +22,8 @@ everyone. Limits must also hold with several replicas behind a load balancer.
 * Health probes are never limited (Kubernetes must always be able to probe).
 * The API trusts `X-Forwarded-For` from the gateway because a NetworkPolicy allows API ingress only from gateway
   pods; otherwise the header would be spoofable.
-* Limits are configuration (`RateLimiting__*`, `GATEWAY_RATE_LIMIT_*`), not code.
+* Limits are configuration (`RateLimiting__*`, `GATEWAY_RATE_LIMIT_*`), not code. The API validates its limits at
+  startup (each at least 1) and refuses to start otherwise.
 
 ## Consequences
 

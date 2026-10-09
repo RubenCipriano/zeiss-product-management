@@ -1,14 +1,12 @@
+using System.Globalization;
 using System.Net.Mime;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.AspNetCore.WebUtilities;
 using ProductManagement.Api.Http;
 using ProductManagement.Api.RateLimiting;
 using ProductManagement.Api.Security;
-using System.Globalization;
 using ProductManagement.Application.Common.Errors;
-using ProductManagement.Application.Common.Security;
 
 namespace ProductManagement.Api.Controllers;
 
@@ -21,10 +19,7 @@ namespace ProductManagement.Api.Controllers;
 /// </remarks>
 [Route("api/auth")]
 [AllowAnonymous]
-public sealed class AuthController(
-    AccessTokenIssuer issuer,
-    TokenSigningKey signingKey,
-    IFailedAttemptThrottle failedAttempts) : ApiControllerBase
+public sealed class AuthController(TokenService tokens, TokenSigningKey signingKey) : ApiControllerBase
 {
     /// <summary>
     /// The public key(s) that verify access tokens (JWKS, RFC 7517). Lets the gateway and other services check tokens
@@ -55,37 +50,26 @@ public sealed class AuthController(
             return Problem(Error.Validation("clientId", "'clientId' and 'clientSecret' are required."));
         }
 
-        var callerKey = $"ip:{HttpContext.Connection.RemoteIpAddress}";
-        if (await failedAttempts.GetBlockedForAsync(callerKey, cancellationToken) is { } blockedFor)
+        var outcome = await tokens.IssueAsync(
+            request.ClientId,
+            request.ClientSecret,
+            HttpContext.GetClientIpKey(),
+            cancellationToken);
+
+        switch (outcome)
         {
-            var retryAfter = Math.Max(1, (int)Math.Ceiling(blockedFor.TotalSeconds));
-            Response.Headers.RetryAfter = retryAfter.ToString(CultureInfo.InvariantCulture);
-            return ProblemResponse(
-                StatusCodes.Status429TooManyRequests,
-                "too_many_failed_attempts",
-                $"Too many failed sign-in attempts. Try again in {retryAfter} second(s).");
+            case TokenOutcome.Issued(var token):
+                return Ok(new TokenResponse(token.AccessToken, "Bearer", token.ExpiresInSeconds));
+            case TokenOutcome.Blocked(var blockedFor):
+                var retryAfter = Math.Max(1, (int)Math.Ceiling(blockedFor.TotalSeconds));
+                Response.Headers.RetryAfter = retryAfter.ToString(CultureInfo.InvariantCulture);
+                return Rejection(
+                    StatusCodes.Status429TooManyRequests,
+                    ApiErrorCodes.TooManyFailedAttempts,
+                    $"Too many failed sign-in attempts. Try again in {retryAfter} second(s).");
+            default:
+                // One message for unknown client and wrong secret: no hint about which client ids exist.
+                return Rejection(StatusCodes.Status401Unauthorized, ApiErrorCodes.InvalidClient, "Invalid client credentials.");
         }
-
-        var token = issuer.Authenticate(request.ClientId, request.ClientSecret);
-        if (token is null)
-        {
-            await failedAttempts.RecordFailureAsync(callerKey, cancellationToken);
-
-            // One message for unknown client and wrong secret: no hint about which client ids exist.
-            return ProblemResponse(StatusCodes.Status401Unauthorized, "invalid_client", "Invalid client credentials.");
-        }
-
-        return Ok(new TokenResponse(token.AccessToken, "Bearer", token.ExpiresInSeconds));
-    }
-
-    private ObjectResult ProblemResponse(int status, string errorCode, string detail)
-    {
-        var problem = ProblemDetailsFactory.CreateProblemDetails(
-            HttpContext,
-            status,
-            title: ReasonPhrases.GetReasonPhrase(status),
-            detail: detail);
-        problem.Extensions["errorCode"] = errorCode;
-        return new ObjectResult(problem) { StatusCode = status, ContentTypes = { ProblemJsonContentType } };
     }
 }

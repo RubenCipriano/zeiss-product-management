@@ -25,7 +25,7 @@ results = []
 created = []
 
 
-def call(method, path, body=None, token=None, retries=5):
+def call(method, path, body=None, token=None, retries=12):
     """One HTTP call; waits and retries when rate limited (429), like a well-behaved client."""
     data = json.dumps(body).encode() if body is not None else None
     headers = {"Content-Type": "application/json", "Cache-Control": "no-cache"}
@@ -130,10 +130,12 @@ def main():
     with ThreadPoolExecutor(max_workers=20) as pool:
         responses = list(pool.map(create, range(40)))
     ids = [body["id"] for status, body in responses if status == 201]
+    statuses = sorted({status for status, _ in responses})
     created.extend(ids)
     check("6-digit ids, no duplicates with several instances",
           "40 products created concurrently (spread over the replicas): 40 unique 6-digit ids",
-          len(ids) == 40 and len(set(ids)) == 40 and all(six_digits(i) for i in ids))
+          len(ids) == 40 and len(set(ids)) == 40 and all(six_digits(i) for i in ids),
+          f"{len(ids)} created, {len(set(ids))} unique, statuses {statuses}")
 
     status, problem = call("POST", "/api/products", {"name": "", "price": -1, "stockQuantity": -5, "categoryId": 1}, token)
     fields = sorted((problem or {}).get("errors", {}).keys())

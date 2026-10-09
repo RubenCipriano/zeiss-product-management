@@ -41,8 +41,11 @@ public sealed record Error
     public static Error PreconditionFailed(string code, string message) =>
         new(code, message, ErrorType.PreconditionFailed);
 
+    /// <summary>The <see cref="Code"/> of every validation error.</summary>
+    public const string ValidationFailedCode = "validation_failed";
+
     public static Error Validation(IReadOnlyDictionary<string, string[]> errors) =>
-        new("validation_failed", "One or more validation errors occurred.", ErrorType.Validation)
+        new(ValidationFailedCode, "One or more validation errors occurred.", ErrorType.Validation)
         {
             ValidationErrors = errors,
         };

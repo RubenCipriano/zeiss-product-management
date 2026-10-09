@@ -114,23 +114,4 @@ public sealed class ProductTests
         product.Description.ShouldBe("Original");
         product.UpdatedAt.ShouldBe(Now);
     }
-
-    [Theory]
-    [InlineData(10, -10, true)] // remove everything
-    [InlineData(10, -11, false)] // oversell
-    [InlineData(0, -1, false)]
-    [InlineData(0, 1, true)]
-    [InlineData(5, 0, true)]
-    [InlineData(ProductRules.MaxStockQuantity - 5, 5, true)] // reach the maximum exactly
-    [InlineData(ProductRules.MaxStockQuantity - 5, 6, false)] // exceed the maximum
-    [InlineData(ProductRules.MaxStockQuantity, int.MaxValue, false)] // would overflow in naive arithmetic
-    [InlineData(ProductRules.MaxStockQuantity, int.MinValue, false)]
-    public void CanAdjustStockBy_KeepsStockBetweenZeroAndTheMaximum(int currentStock, int delta, bool expected)
-    {
-        var product = Product.Create(123_456, "Frame", null, 10m, currentStock, 1, Now);
-
-        var rule = Product.CanAdjustStockBy(delta).Compile();
-
-        rule(product).ShouldBe(expected);
-    }
 }

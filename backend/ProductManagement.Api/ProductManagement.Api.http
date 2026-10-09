@@ -1,28 +1,63 @@
 # Requests for the Visual Studio / Rider / VS Code (REST Client) HTTP editor.
-# Start the API first (F5 in Visual Studio, or `dotnet run --project src/ProductManagement.Api`).
+# Start the API first (F5 in Visual Studio, or `dotnet run --project ProductManagement.Api` from backend/).
+# Then run "Get an access token" once: every other request sends it as a bearer token.
 
 @baseUrl = http://localhost:5080
 @productId = 100000
+@token = {{signIn.response.body.$.accessToken}}
+
+### Get an access token (local demo consumer "manager" from appsettings.Development.json)
+# @name signIn
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "clientId": "manager",
+  "clientSecret": "manager"
+}
+
+### Wrong credentials (401 invalid_client; repeated failures lead to 429 too_many_failed_attempts)
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+
+{
+  "clientId": "manager",
+  "clientSecret": "wrong"
+}
+
+### Public keys that verify the access tokens (JWKS, anonymous)
+GET {{baseUrl}}/.well-known/jwks.json
+Accept: application/json
 
 ### List products (paged)
 GET {{baseUrl}}/api/products?page=1&pageSize=10
 Accept: application/json
+Authorization: Bearer {{token}}
 
 ### Get one product (note the ETag response header)
 GET {{baseUrl}}/api/products/{{productId}}
 Accept: application/json
+Authorization: Bearer {{token}}
+
+### A product's stock history, newest first
+GET {{baseUrl}}/api/products/{{productId}}/stock-movements?page=1&pageSize=20
+Accept: application/json
+Authorization: Bearer {{token}}
 
 ### Search by name (case-insensitive, partial match)
 GET {{baseUrl}}/api/products/search?name=lens
 Accept: application/json
+Authorization: Bearer {{token}}
 
 ### Products with stock between min and max (inclusive)
 GET {{baseUrl}}/api/products/stock-level?min=0&max=10
 Accept: application/json
+Authorization: Bearer {{token}}
 
 ### Create a product
 POST {{baseUrl}}/api/products
 Content-Type: application/json
+Authorization: Bearer {{token}}
 
 {
   "name": "Single Vision Lens 1.74",
@@ -35,6 +70,7 @@ Content-Type: application/json
 ### Create a product - validation errors (400)
 POST {{baseUrl}}/api/products
 Content-Type: application/json
+Authorization: Bearer {{token}}
 
 {
   "name": "",
@@ -49,6 +85,7 @@ Content-Type: application/json
 # A stale value is rejected with 412 Precondition Failed.
 PUT {{baseUrl}}/api/products/{{productId}}
 Content-Type: application/json
+Authorization: Bearer {{token}}
 
 {
   "name": "Single Vision Lens 1.5 (updated)",
@@ -60,16 +97,22 @@ Content-Type: application/json
 
 ### Remove 5 units from stock
 POST {{baseUrl}}/api/products/{{productId}}/decrement-stock/5
+Authorization: Bearer {{token}}
 
-### Add 10 units to stock
+### Add 10 units to stock, safe to retry: send it again with the same key and it is replayed
+# (Idempotent-Replayed: true), not applied twice. The same key with a different request is refused (422).
 POST {{baseUrl}}/api/products/{{productId}}/add-to-stock/10
+Authorization: Bearer {{token}}
+Idempotency-Key: delivery-2026-10-10-001
 
 ### Delete a product
 DELETE {{baseUrl}}/api/products/{{productId}}
+Authorization: Bearer {{token}}
 
 ### Categories
 GET {{baseUrl}}/api/categories
 Accept: application/json
+Authorization: Bearer {{token}}
 
-### Health
+### Health (anonymous)
 GET {{baseUrl}}/health/ready

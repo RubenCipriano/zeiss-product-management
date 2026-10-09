@@ -18,5 +18,5 @@ public sealed class CategoriesController(ICategoryQueryService categoryQueries) 
     [HttpGet]
     [ProducesResponseType<IReadOnlyList<CategoryResponse>>(StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<CategoryResponse>>> GetCategories(CancellationToken cancellationToken) =>
-        Ok(await categoryQueries.ListAsync(cancellationToken));
+        ToActionResult(await categoryQueries.ListAsync(cancellationToken));
 }

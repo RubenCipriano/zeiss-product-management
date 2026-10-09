@@ -1,14 +1,14 @@
 namespace ProductManagement.Infrastructure.Persistence;
 
-public sealed class DatabaseOptions
+internal sealed class DatabaseOptions
 {
     public const string SectionName = "Database";
 
     public const string ConnectionStringName = "ProductManagement";
 
     /// <summary>
-    /// Applies pending EF Core migrations when the API starts. Convenient for local development and the Docker
-    /// Compose setup. In production, prefer running a migration bundle as a separate deployment step.
+    /// Applies pending EF Core migrations when the API starts. Convenient for local development and the in-memory test
+    /// host. In Kubernetes migrations run once per deployment instead, in a Job (the <c>migrate</c> command).
     /// </summary>
     public bool ApplyMigrationsOnStartup { get; init; }
 

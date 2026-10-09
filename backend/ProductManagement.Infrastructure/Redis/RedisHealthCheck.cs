@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using StackExchange.Redis;
 
-namespace ProductManagement.Infrastructure.Caching;
+namespace ProductManagement.Infrastructure.Redis;
 
 /// <summary>
 /// Reports Redis as <see cref="HealthStatus.Degraded"/>, never Unhealthy, when it is unreachable: the API keeps
@@ -18,7 +18,7 @@ internal sealed class RedisHealthCheck(IConnectionMultiplexer redis) : IHealthCh
             var latency = await redis.GetDatabase().PingAsync();
             return HealthCheckResult.Healthy($"Redis reachable ({latency.TotalMilliseconds:F1} ms).");
         }
-        catch (Exception exception) when (exception is RedisException or TimeoutException)
+        catch (Exception exception) when (RedisFailures.IsTransient(exception))
         {
             return HealthCheckResult.Degraded("Redis unreachable; serving from the database.", exception);
         }

@@ -23,9 +23,10 @@ WHERE  id = @id
   AND  stock_quantity <= @maxCurrent;     -- MAX - delta when adding
 ```
 
-* The **rule lives in the domain**: `Product.StockRangeAllowingAdjustment(delta)` returns the range the current stock
-  must be in for the change to be allowed, and that range becomes the `WHERE` clause. The domain still owns the
-  business rule, and the database evaluates it atomically.
+* The **rule lives in the domain**: `StockAdjustment.Plan(delta, …)` returns the range the current stock must be in
+  for the change to be allowed (`MinCurrentStock`..`MaxCurrentStock`), together with the validated ledger entry, or
+  nothing when no stock allows it. The repository only maps it to SQL: the range becomes the `WHERE` clause. The domain
+  still owns the business rule, and the database evaluates it atomically.
 * PostgreSQL locks the row for the statement and re-evaluates the `WHERE` against the latest committed version. Concurrent
   decrements therefore serialise at the row level and each one sees the result of the previous one.
 * A returned row means success. None means the product does not exist or the rule was not met. The service then reads the
@@ -46,7 +47,7 @@ requests lose nothing) and by the BDD scenario *"Simultaneous orders never overs
   (one short statement).
 * Stock changes bypass the load-modify-save path, so `Product` has no `DecreaseStock()` method. This is a deliberate
   deviation from "always go through the aggregate". The rule is still domain-owned and unit-tested
-  (`ProductTests.CanAdjustStockBy_*`).
+  (`StockAdjustmentTests.Plan_*`).
 * The UPDATE changes `xmin`, so an editor holding an older ETag gets a 412 instead of silently overwriting the new stock
   with an outdated value (see [0004](0004-optimistic-concurrency.md)).
 * **Connection retries are disabled on purpose** (`EnableRetryOnFailure` is not used). If a connection dropped after

@@ -4,6 +4,7 @@ using NSubstitute;
 using ProductManagement.Application.Categories.Abstractions;
 using ProductManagement.Application.Common.Errors;
 using ProductManagement.Application.Common.Persistence;
+using ProductManagement.Application.Common.Requests;
 using ProductManagement.Application.Common.Security;
 using ProductManagement.Application.Products;
 using ProductManagement.Application.Products.Abstractions;
@@ -29,13 +30,14 @@ public sealed class ProductCommandServiceTests
     private readonly IProductIdGenerator _idGenerator = Substitute.For<IProductIdGenerator>();
     private readonly IUnitOfWork _unitOfWork = Substitute.For<IUnitOfWork>();
     private readonly ICurrentActor _actor = Substitute.For<ICurrentActor>();
+    private readonly IRequestContext _request = Substitute.For<IRequestContext>();
     private readonly ProductCommandService _service;
 
     public ProductCommandServiceTests()
     {
         _categories.ExistsAsync(Arg.Any<int>(), Arg.Any<CancellationToken>()).Returns(true);
         _actor.Name.Returns("maria");
-        _actor.RequestKey.Returns((string?)null);
+        _request.IdempotencyKey.Returns((string?)null);
         _idGenerator.NextIdAsync(Arg.Any<CancellationToken>()).Returns(ProductId);
         _queries.GetByIdAsync(ProductId, Arg.Any<CancellationToken>()).Returns(Response(stock: 10));
 
@@ -46,6 +48,7 @@ public sealed class ProductCommandServiceTests
             _idGenerator,
             _unitOfWork,
             _actor,
+            _request,
             new CreateProductRequestValidator(),
             new UpdateProductRequestValidator(),
             new FakeTimeProvider(Now),
@@ -208,79 +211,39 @@ public sealed class ProductCommandServiceTests
         result.Error!.Type.ShouldBe(ErrorType.NotFound);
     }
 
+    [Fact]
+    public async Task Create_WithAnIdempotencyKey_RecordsItOnTheInitialStockMovement()
+    {
+        _request.IdempotencyKey.Returns("maria:create-1");
+
+        await _service.CreateAsync(ValidCreateRequest(), TestContext.Current.CancellationToken);
+
+        _repository.Received(1).AddMovement(Arg.Is<StockMovement>(movement => movement.RequestKey == "maria:create-1"));
+    }
+
+    [Fact]
+    public async Task Create_AlreadyAppliedByTheSameRequest_ReturnsTheProductItCreated()
+    {
+        _request.IdempotencyKey.Returns("maria:create-1");
+        _unitOfWork.SaveChangesAsync(Arg.Any<CancellationToken>()).Returns(Task.FromException(new DuplicateRequestException()));
+        _queries.FindCreatedByRequestAsync("maria:create-1", Arg.Any<CancellationToken>()).Returns(Response(stock: 3) with { Id = 100_001 });
+
+        var result = await _service.CreateAsync(ValidCreateRequest(), TestContext.Current.CancellationToken);
+
+        result.Value.Id.ShouldBe(100_001);
+    }
+
     [Theory]
-    [InlineData(0)]
-    [InlineData(-5)]
-    [InlineData(ProductRules.MaxStockQuantity + 1)]
-    public async Task StockOperations_RejectInvalidQuantitiesBeforeReachingTheDatabase(int quantity)
+    [InlineData(null, "product.concurrent_modification")]
+    [InlineData(0u, "product.version_mismatch")]
+    public async Task Delete_WhenRowChangesBetweenReadAndWrite_MapsTheConflictLikeUpdate(uint? expectedVersion, string expectedCode)
     {
-        var remove = await _service.DecrementStockAsync(ProductId, quantity, TestContext.Current.CancellationToken);
-        var add = await _service.AddToStockAsync(ProductId, quantity, TestContext.Current.CancellationToken);
+        _repository.GetByIdAsync(ProductId, Arg.Any<CancellationToken>()).Returns(ExistingProduct());
+        _unitOfWork.SaveChangesAsync(Arg.Any<CancellationToken>()).Returns(Task.FromException(new ConcurrencyConflictException()));
 
-        remove.Error!.ValidationErrors.ShouldContainKey("quantity");
-        add.Error!.ValidationErrors.ShouldContainKey("quantity");
-        await _repository.DidNotReceiveWithAnyArgs().TryAdjustStockAsync(default, default, default!, default, default, Arg.Any<CancellationToken>());
-    }
+        var result = await _service.DeleteAsync(ProductId, expectedVersion, TestContext.Current.CancellationToken);
 
-    [Fact]
-    public async Task DecrementStock_SendsANegativeDeltaAndReturnsTheUpdatedProduct()
-    {
-        _repository.TryAdjustStockAsync(ProductId, -3, "maria", null, Now, Arg.Any<CancellationToken>())
-            .Returns(StockAdjustmentOutcome.Applied);
-        _queries.GetByIdAsync(ProductId, Arg.Any<CancellationToken>()).Returns(Response(stock: 7));
-
-        var result = await _service.DecrementStockAsync(ProductId, 3, TestContext.Current.CancellationToken);
-
-        result.Value.StockQuantity.ShouldBe(7);
-    }
-
-    [Fact]
-    public async Task DecrementStock_AlreadyAppliedByTheSameRequest_ReportsSuccessWithoutChangingAnything()
-    {
-        _actor.RequestKey.Returns("maria:order-7");
-        _repository.TryAdjustStockAsync(ProductId, -3, "maria", "maria:order-7", Now, Arg.Any<CancellationToken>())
-            .Returns(StockAdjustmentOutcome.AlreadyApplied);
-        _queries.GetByIdAsync(ProductId, Arg.Any<CancellationToken>()).Returns(Response(stock: 7));
-
-        var result = await _service.DecrementStockAsync(ProductId, 3, TestContext.Current.CancellationToken);
-
-        result.IsSuccess.ShouldBeTrue();
-        result.Value.StockQuantity.ShouldBe(7);
-    }
-
-    [Fact]
-    public async Task DecrementStock_WhenTheRuleRejectsTheChange_ReportsInsufficientStockWithTheAvailableQuantity()
-    {
-        _repository.TryAdjustStockAsync(ProductId, -11, "maria", null, Now, Arg.Any<CancellationToken>())
-            .Returns(StockAdjustmentOutcome.NotApplied);
-
-        var result = await _service.DecrementStockAsync(ProductId, 11, TestContext.Current.CancellationToken);
-
-        result.Error!.Code.ShouldBe("product.insufficient_stock");
-        result.Error.Type.ShouldBe(ErrorType.Conflict);
-        result.Error.Metadata["available"].ShouldBe(10);
-        result.Error.Metadata["requested"].ShouldBe(11);
-    }
-
-    [Fact]
-    public async Task AddToStock_WhenTheRuleRejectsTheChange_ReportsStockLimitExceeded()
-    {
-        _repository.TryAdjustStockAsync(ProductId, ProductRules.MaxStockQuantity, "maria", null, Now, Arg.Any<CancellationToken>())
-            .Returns(StockAdjustmentOutcome.NotApplied);
-
-        var result = await _service.AddToStockAsync(ProductId, ProductRules.MaxStockQuantity, TestContext.Current.CancellationToken);
-
-        result.Error!.Code.ShouldBe("product.stock_limit_exceeded");
-    }
-
-    [Fact]
-    public async Task StockOperations_OnMissingProduct_ReturnNotFound()
-    {
-        _queries.GetByIdAsync(ProductId, Arg.Any<CancellationToken>()).Returns((ProductResponse?)null);
-
-        var result = await _service.AddToStockAsync(ProductId, 1, TestContext.Current.CancellationToken);
-
-        result.Error!.Type.ShouldBe(ErrorType.NotFound);
+        result.Error!.Code.ShouldBe(expectedCode);
     }
 
     private static CreateProductRequest ValidCreateRequest() => new()

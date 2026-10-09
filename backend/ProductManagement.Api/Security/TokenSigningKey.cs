@@ -51,7 +51,7 @@ public sealed class TokenSigningKey : IDisposable
         if (string.IsNullOrWhiteSpace(pem))
         {
             throw new InvalidOperationException(
-                $"'{AuthenticationSettings.SectionName}:SigningKey' is missing: a PEM-encoded ECDSA P-256 private key.");
+                $"'{AuthenticationOptions.SectionName}:SigningKey' is missing: a PEM-encoded ECDSA P-256 private key.");
         }
 
         var key = ECDsa.Create();
@@ -63,7 +63,7 @@ public sealed class TokenSigningKey : IDisposable
         {
             key.Dispose();
             throw new InvalidOperationException(
-                $"'{AuthenticationSettings.SectionName}:SigningKey' is not a valid PEM-encoded ECDSA private key.",
+                $"'{AuthenticationOptions.SectionName}:SigningKey' is not a valid PEM-encoded ECDSA private key.",
                 exception);
         }
 
@@ -71,7 +71,7 @@ public sealed class TokenSigningKey : IDisposable
         {
             key.Dispose();
             throw new InvalidOperationException(
-                $"'{AuthenticationSettings.SectionName}:SigningKey' must be a P-256 key (ES256).");
+                $"'{AuthenticationOptions.SectionName}:SigningKey' must be a P-256 key (ES256).");
         }
 
         return new TokenSigningKey(key);

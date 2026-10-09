@@ -1,4 +1,5 @@
 using System.Net;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using ProductManagement.Mcp.Api;
 using ProductManagement.Mcp.Tools;
@@ -20,15 +21,18 @@ public sealed class ToolTests : IDisposable
         _handler.Dispose();
     }
 
-    [Fact]
-    public async Task ListLowStock_AsksForStockBetweenZeroAndTheThreshold()
+    [Theory]
+    [InlineData(10)]
+    [InlineData(25)]
+    public async Task ListLowStock_AsksForStockBetweenZeroAndTheConfiguredThreshold(int threshold)
     {
         _handler.Respond(HttpStatusCode.OK, EmptyPage);
 
-        await new ProductTools(_api).ListLowStock(TestContext.Current.CancellationToken);
+        await new ProductTools(_api, Options.Create(new ProductApiOptions { LowStockThreshold = threshold }))
+            .ListLowStock(TestContext.Current.CancellationToken);
 
         _handler.Requests.Single().RequestUri!.PathAndQuery
-            .ShouldBe("/api/products/stock-level?page=1&pageSize=100&min=0&max=10");
+            .ShouldBe($"/api/products/stock-level?page=1&pageSize=100&min=0&max={threshold}");
     }
 
     [Fact]

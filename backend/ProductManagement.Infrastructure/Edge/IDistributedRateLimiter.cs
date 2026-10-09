@@ -1,4 +1,4 @@
-namespace ProductManagement.Application.Common.Security;
+namespace ProductManagement.Infrastructure.Edge;
 
 /// <summary>
 /// Token buckets shared by every API replica, so a caller's limit is the same with 2 replicas or 8. Per-replica,

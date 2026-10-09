@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using ProductManagement.Api.Http;
 
 namespace ProductManagement.Api.ErrorHandling;
 
@@ -44,7 +45,7 @@ internal sealed partial class GlobalExceptionHandler(
         var problem = new ProblemDetails { Status = statusCode, Title = title };
         if (statusCode >= StatusCodes.Status500InternalServerError)
         {
-            problem.Extensions["errorCode"] = "internal_error";
+            problem.WithErrorCode(ApiErrorCodes.InternalError);
         }
 
         httpContext.Response.StatusCode = statusCode;

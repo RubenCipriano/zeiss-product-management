@@ -41,7 +41,11 @@ endpoints. The API then guarantees: **one key, one execution**, on any replica.
 * **Optional for clients.** The key is not required, to keep the API usable from curl and the original
   specification. The web app always sends one (`crypto.randomUUID()` per user action, reused when the user retries
   after an error), and so do the load tests.
-* Implemented as an ASP.NET Core resource filter (`[Idempotent]`), so controllers and services do not know about it.
+* Implemented as an ASP.NET Core resource filter (`[Idempotent]`), so controllers do not know about it. Use cases see
+  only the accepted, consumer-scoped key (`IRequestContext.IdempotencyKey`), to record it on the ledger. The store is
+  an HTTP-edge port (`ProductManagement.Infrastructure.Edge.IIdempotencyStore`), not an application one.
+* Without Redis (local development only: elsewhere the API refuses to start without it) an in-memory store with the
+  same key lifetime and in-progress timeout is used.
 * **The database is the final guard.** Redis answers retries fast, but it cannot know whether a change committed:
   a claim can be released by an error that happens *after* the commit, or lost if Redis restarts. So the
   consumer-scoped key is also written into the ledger row the request creates (`stock_movements.request_key`),

@@ -2,7 +2,8 @@ namespace ProductManagement.Mcp.Api;
 
 /// <summary>
 /// Where the API is and how the MCP server signs in to it. Set through environment variables
-/// (<c>ProductApi__BaseUrl</c>, <c>ProductApi__ClientSecret</c>, ...), e.g. in <c>.mcp.json</c>.
+/// (<c>ProductApi__BaseUrl</c>, <c>ProductApi__ClientSecret</c>, <c>ProductApi__LowStockThreshold</c>, ...), e.g. in
+/// <c>.mcp.json</c>.
 /// </summary>
 internal sealed class ProductApiOptions
 {
@@ -21,4 +22,9 @@ internal sealed class ProductApiOptions
     public string ClientId { get; init; } = "mcp-server";
 
     public string ClientSecret { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Stock at or below which <c>list_low_stock</c> reports a product as running low (<c>ProductApi__LowStockThreshold</c>).
+    /// </summary>
+    public int LowStockThreshold { get; init; } = 10;
 }

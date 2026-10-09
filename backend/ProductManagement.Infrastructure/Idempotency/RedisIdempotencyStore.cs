@@ -1,8 +1,8 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using ProductManagement.Application.Common.Idempotency;
-using ProductManagement.Infrastructure.Caching;
+using ProductManagement.Infrastructure.Edge;
+using ProductManagement.Infrastructure.Redis;
 using StackExchange.Redis;
 
 namespace ProductManagement.Infrastructure.Idempotency;
@@ -14,7 +14,7 @@ namespace ProductManagement.Infrastructure.Idempotency;
 internal sealed partial class RedisIdempotencyStore(
     IConnectionMultiplexer redis,
     IOptions<IdempotencyOptions> options,
-    IOptions<CacheOptions> cacheOptions,
+    IOptions<RedisOptions> redisOptions,
     ILogger<RedisIdempotencyStore> logger) : IIdempotencyStore
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
@@ -49,7 +49,7 @@ internal sealed partial class RedisIdempotencyStore(
                 ? new IdempotencyClaim(IdempotencyClaimStatus.InProgress)
                 : new IdempotencyClaim(IdempotencyClaimStatus.Completed, entry.Response);
         }
-        catch (Exception exception) when (exception is RedisException or TimeoutException)
+        catch (Exception exception) when (RedisFailures.IsTransient(exception))
         {
             LogUnavailable(exception);
             return new IdempotencyClaim(IdempotencyClaimStatus.Unavailable);
@@ -69,7 +69,7 @@ internal sealed partial class RedisIdempotencyStore(
                 JsonSerializer.Serialize(new Entry(fingerprint, response), Json),
                 _options.KeyLifetime);
         }
-        catch (Exception exception) when (exception is RedisException or TimeoutException)
+        catch (Exception exception) when (RedisFailures.IsTransient(exception))
         {
             // The request was processed; a retry will see "in progress" until the claim times out, never a duplicate.
             LogUnavailable(exception);
@@ -82,13 +82,13 @@ internal sealed partial class RedisIdempotencyStore(
         {
             await redis.GetDatabase().KeyDeleteAsync(RedisKey(key));
         }
-        catch (Exception exception) when (exception is RedisException or TimeoutException)
+        catch (Exception exception) when (RedisFailures.IsTransient(exception))
         {
             LogUnavailable(exception);
         }
     }
 
-    private RedisKey RedisKey(string key) => $"{cacheOptions.Value.KeyPrefix}:idempotency:{key}";
+    private RedisKey RedisKey(string key) => $"{redisOptions.Value.KeyPrefix}:idempotency:{key}";
 
     private sealed record Entry(string Fingerprint, StoredResponse? Response);
 

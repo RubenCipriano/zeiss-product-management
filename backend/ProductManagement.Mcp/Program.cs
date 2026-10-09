@@ -15,6 +15,9 @@ builder.Services
     .Validate(
         options => !string.IsNullOrWhiteSpace(options.ClientSecret),
         "ProductApi__ClientSecret is not set: the MCP server needs it to get a token from the API.")
+    .Validate(
+        options => options.LowStockThreshold >= 0,
+        "ProductApi__LowStockThreshold must be zero or more.")
     .ValidateOnStart();
 
 builder.Services.AddSingleton(TimeProvider.System);

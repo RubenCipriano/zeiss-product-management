@@ -24,6 +24,11 @@
           "isRequired": false
         },
         {
+          "name": "ProductApi__LowStockThreshold",
+          "description": "Stock at or below which list_low_stock reports a product (default 10)",
+          "isRequired": false
+        },
+        {
           "name": "ProductApi__ClientSecret",
           "description": "API consumer secret of the MCP server",
           "isRequired": true,

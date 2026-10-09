@@ -63,10 +63,7 @@ public sealed class StockMovement
         DateTimeOffset occurredAt,
         string? requestKey = null)
     {
-        if (requestKey is { Length: > RequestKeyMaxLength })
-        {
-            throw new DomainException($"The request key cannot exceed {RequestKeyMaxLength} characters.");
-        }
+        GuardRequestKey(requestKey);
 
         if (stockAfter < 0)
         {
@@ -79,9 +76,46 @@ public sealed class StockMovement
             QuantityChange = quantityChange,
             StockAfter = stockAfter,
             Reason = reason,
-            PerformedBy = Guard.AgainstInvalidText(performedBy, PerformedByMaxLength, nameof(PerformedBy)),
+            PerformedBy = GuardPerformedBy(performedBy),
             OccurredAt = occurredAt,
             RequestKey = requestKey,
         };
+    }
+
+    /// <summary>The first entry of a newly created product: all of its stock, as of its creation.</summary>
+    public static StockMovement ForInitialStock(Product product, string performedBy, string? requestKey) =>
+        Record(
+            product.Id,
+            product.StockQuantity,
+            product.StockQuantity,
+            StockMovementReason.InitialStock,
+            performedBy,
+            product.CreatedAt,
+            requestKey);
+
+    /// <summary>
+    /// The entry for an edit that overwrote the stock (from <paramref name="stockBefore"/> to the product's current
+    /// stock), so the ledger keeps adding up; <c>null</c> when the edit left the stock unchanged.
+    /// </summary>
+    public static StockMovement? ForCorrection(Product product, int stockBefore, string performedBy, DateTimeOffset at) =>
+        product.StockQuantity == stockBefore
+            ? null
+            : Record(
+                product.Id,
+                product.StockQuantity - stockBefore,
+                product.StockQuantity,
+                StockMovementReason.Correction,
+                performedBy,
+                at);
+
+    internal static string GuardPerformedBy(string performedBy) =>
+        Guard.AgainstInvalidText(performedBy, PerformedByMaxLength, nameof(PerformedBy));
+
+    internal static void GuardRequestKey(string? requestKey)
+    {
+        if (requestKey is { Length: > RequestKeyMaxLength })
+        {
+            throw new DomainException($"The request key cannot exceed {RequestKeyMaxLength} characters.");
+        }
     }
 }

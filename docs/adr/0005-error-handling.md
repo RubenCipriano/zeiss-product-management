@@ -23,6 +23,8 @@ insufficient stock, version mismatch) easy to see and test.
     `http_<status>`, e.g. `http_404`);
   * `errors`: field → messages (camelCase, matching the JSON the client sent);
   * extra context where useful (`requested`, `available`, `maximum` for stock conflicts).
+* Every problem is built in one way (`ApiProblems`); the codes produced at the HTTP edge (idempotency, rate limiting,
+  the token endpoint, `internal_error`, `http_<status>`) are constants in `ApiErrorCodes`.
 * Model-binding errors (malformed JSON, `page=abc`) are reshaped to the same format. The redundant "request field is
   required" message is removed, and serializer exception text is hidden so CLR type names don't leak.
 * Unknown routes also return problem details (`UseStatusCodePages`).

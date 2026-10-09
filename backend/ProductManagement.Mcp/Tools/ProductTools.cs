@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol.Server;
 using ProductManagement.Mcp.Api;
 
@@ -6,10 +7,8 @@ namespace ProductManagement.Mcp.Tools;
 
 /// <summary>Read-only tools over the product catalogue.</summary>
 [McpServerToolType]
-internal sealed class ProductTools(ProductApiClient api)
+internal sealed class ProductTools(ProductApiClient api, IOptions<ProductApiOptions> options)
 {
-    private const int LowStockThreshold = 10;
-
     [McpServerTool(Name = "search_products", ReadOnly = true, Idempotent = true, OpenWorld = false)]
     [Description("Finds products whose name contains the given text (case-insensitive). Returns id, name, price, category and current stock for each match.")]
     public Task<ProductPage> SearchProducts(
@@ -45,9 +44,9 @@ internal sealed class ProductTools(ProductApiClient api)
         ToolErrors.CallAsync(() => api.ByStockLevelAsync(min, max, page, pageSize, cancellationToken));
 
     [McpServerTool(Name = "list_low_stock", ReadOnly = true, Idempotent = true, OpenWorld = false)]
-    [Description("Lists products that are running low (stock at or below 10 units, including out of stock), lowest first. Useful for restocking decisions.")]
+    [Description("Lists products that are running low (stock at or below the configured threshold, 10 units by default, including out of stock), lowest first. Useful for restocking decisions.")]
     public Task<ProductPage> ListLowStock(CancellationToken cancellationToken = default) =>
-        ToolErrors.CallAsync(() => api.ByStockLevelAsync(0, LowStockThreshold, 1, 100, cancellationToken));
+        ToolErrors.CallAsync(() => api.ByStockLevelAsync(0, options.Value.LowStockThreshold, 1, 100, cancellationToken));
 
     [McpServerTool(Name = "list_categories", ReadOnly = true, Idempotent = true, OpenWorld = false)]
     [Description("Lists the product categories.")]

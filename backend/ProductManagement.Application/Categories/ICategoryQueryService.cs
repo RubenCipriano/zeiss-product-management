@@ -1,8 +1,9 @@
 using ProductManagement.Application.Categories.Contracts;
+using ProductManagement.Application.Common.Results;
 
 namespace ProductManagement.Application.Categories;
 
 public interface ICategoryQueryService
 {
-    Task<IReadOnlyList<CategoryResponse>> ListAsync(CancellationToken cancellationToken);
+    Task<Result<IReadOnlyList<CategoryResponse>>> ListAsync(CancellationToken cancellationToken);
 }

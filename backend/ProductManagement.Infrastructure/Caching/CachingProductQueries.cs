@@ -8,8 +8,9 @@ using ProductManagement.Infrastructure.Products;
 namespace ProductManagement.Infrastructure.Caching;
 
 /// <summary>
-/// Cache-aside decorator over <see cref="ProductQueries"/>. The application layer is unaware of caching: it still
-/// depends on <see cref="IProductQueries"/>, and the decorator is wired in by dependency injection.
+/// Cache-aside implementation of <see cref="IProductQueries"/> over <see cref="ProductQueries"/>. The application layer
+/// is unaware of caching: it depends on <see cref="IProductQueries"/>, and this class is wired in by dependency injection.
+/// Without Redis the cache is a pass-through (<see cref="NullCatalogCache"/>) and every read goes to the database.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -47,23 +48,17 @@ internal sealed class CachingProductQueries(
         inner.FindCreatedByRequestAsync(requestKey, cancellationToken);
 
     public Task<PagedResponse<ProductResponse>> ListAsync(PageQuery page, CancellationToken cancellationToken) =>
-        ListingPageAsync(
-            "products:all",
-            page,
-            () => inner.CountListAsync(cancellationToken),
-            () => inner.FindListPageIdsAsync(page, cancellationToken),
-            cancellationToken);
+        ListingPageAsync(new ProductListing.All(), "products:all", page, cancellationToken);
 
     public Task<PagedResponse<ProductResponse>> SearchByNameAsync(
         string nameFragment,
         PageQuery page,
         CancellationToken cancellationToken) =>
         ListingPageAsync(
+            new ProductListing.NameContains(nameFragment),
             // The search is case-insensitive, so differently-cased terms share one entry.
             Invariant($"products:search:{nameFragment.ToUpperInvariant()}"),
             page,
-            () => inner.CountSearchAsync(nameFragment, cancellationToken),
-            () => inner.FindSearchPageIdsAsync(nameFragment, page, cancellationToken),
             cancellationToken);
 
     // Which products match depends on their stock here, so the whole page follows the data generation.
@@ -77,7 +72,7 @@ internal sealed class CachingProductQueries(
             0,
             Invariant($"products:stock:{min?.ToString(CultureInfo.InvariantCulture) ?? "*"}:{max?.ToString(CultureInfo.InvariantCulture) ?? "*"}:{PageKey(page)}"),
             _options.ListTtl,
-            async () => await inner.ListByStockLevelAsync(min, max, page, cancellationToken)))!;
+            async () => await inner.PageAsync(new ProductListing.StockBetween(min, max), page, cancellationToken)))!;
 
     public Task<PagedResponse<StockMovementResponse>?> ListStockMovementsAsync(
         int productId,
@@ -91,29 +86,26 @@ internal sealed class CachingProductQueries(
             () => inner.ListStockMovementsAsync(productId, page, cancellationToken));
 
     /// <summary>A list or search page: the count and the page's ids from the cache, the rows from the database.</summary>
-    private async Task<PagedResponse<ProductResponse>> ListingPageAsync(
+    private Task<PagedResponse<ProductResponse>> ListingPageAsync(
+        ProductListing listing,
         string listKey,
         PageQuery page,
-        Func<Task<int>> count,
-        Func<Task<int[]>> findIds,
-        CancellationToken cancellationToken)
-    {
-        var total = await GetOrLoadAsync(
-            CacheScope.Listing,
-            0,
-            $"{listKey}:count",
-            _options.ListingTtl,
-            async () => new CachedCount(await count()));
-        int[] ids = total!.Value <= page.Skip
-            ? []
-            : (await GetOrLoadAsync(
+        CancellationToken cancellationToken) =>
+        inner.PageAsync(
+            page,
+            async () => (await GetOrLoadAsync(
+                CacheScope.Listing,
+                0,
+                $"{listKey}:count",
+                _options.ListingTtl,
+                async () => new CachedCount(await inner.CountAsync(listing, cancellationToken))))!.Value,
+            async () => (await GetOrLoadAsync(
                 CacheScope.Listing,
                 0,
                 $"{listKey}:ids:{PageKey(page)}",
                 _options.ListingTtl,
-                async () => await findIds()))!;
-        return await inner.LoadPageAsync(new ProductPageIds(ids, total.Value), page, cancellationToken);
-    }
+                async () => await inner.PageIdsAsync(listing, page, cancellationToken)))!,
+            cancellationToken);
 
     /// <remarks>
     /// The version is read <em>before</em> the database. If a write commits in between, our (possibly older) result is

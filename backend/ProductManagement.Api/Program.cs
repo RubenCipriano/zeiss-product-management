@@ -1,26 +1,16 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
-using Microsoft.AspNetCore.HttpOverrides;
 using ProductManagement.Api.Configuration;
+using ProductManagement.Api.Hosting;
 using ProductManagement.Api.RateLimiting;
 using ProductManagement.Api.Security;
 using ProductManagement.Application;
 using ProductManagement.Infrastructure;
 using ProductManagement.Infrastructure.Persistence;
 
-// `dotnet ProductManagement.Api.dll hash-secret <secret>`: prints the hash to put in an API consumer's SecretHash.
-if (args is ["hash-secret", var secretToHash])
+// Command-line tools (hash-secret, generate-signing-key, migrate) run and exit without starting the web host.
+if (await ApiCommandLine.TryRunAsync(args) is { } exitCode)
 {
-    Console.WriteLine(SecretHasher.Hash(secretToHash));
-    return;
-}
-
-// `dotnet ProductManagement.Api.dll generate-signing-key`: prints a new ES256 (P-256) private key for
-// Authentication:SigningKey, in PEM.
-if (args is ["generate-signing-key"])
-{
-    using var key = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
-    Console.WriteLine(key.ExportPkcs8PrivateKeyPem());
-    return;
+    return exitCode;
 }
 
 var builder = WebApplication.CreateBuilder(args);
@@ -28,21 +18,15 @@ var builder = WebApplication.CreateBuilder(args);
 // Registered API consumers can also come from a file, e.g. mounted from a Kubernetes Secret (see deploy/).
 builder.Configuration.AddJsonFile("config/consumers.json", optional: true, reloadOnChange: false);
 
+// Development and the in-memory test host ("Testing") may run without Redis; a deployment with replicas may not.
+var requireRedis = !builder.Environment.IsDevelopment() && !builder.Environment.IsEnvironment("Testing");
+
 builder.Services
     .AddApplication()
-    .AddInfrastructure(builder.Configuration)
-    .AddApiPresentation(builder.Configuration)
-    .AddApiSecurity(builder.Configuration)
-    .AddApiRateLimiting(builder.Configuration);
-
-builder.Services.Configure<ForwardedHeadersOptions>(options =>
-{
-    // The API is only reachable through the gateway (Kubernetes NetworkPolicy), so the client address it
-    // forwards in X-Forwarded-For can be trusted; it is what rate limiting partitions anonymous callers by.
-    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-    options.KnownIPNetworks.Clear();
-    options.KnownProxies.Clear();
-});
+    .AddInfrastructure(builder.Configuration, requireRedis)
+    .AddApiPresentation()
+    .AddApiSecurity()
+    .AddApiRateLimiting();
 
 var app = builder.Build();
 
@@ -77,24 +61,6 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
     Predicate = check => check.Tags.Contains(InfrastructureServiceCollectionExtensions.ReadinessHealthCheckTag),
 }).AllowAnonymous();
 
-// `dotnet ProductManagement.Api.dll migrate`: apply migrations and exit. Used by the Kubernetes migration Job, so
-// schema changes run once per deployment instead of on every replica start.
-const string MigrateCommand = "migrate";
-if (args.Contains(MigrateCommand, StringComparer.OrdinalIgnoreCase))
-{
-    try
-    {
-        await app.Services.MigrateDatabaseAsync();
-    }
-    catch (Exception exception)
-    {
-        // Exit cleanly with a failure code so the Job controller retries it.
-        app.Logger.LogCritical(exception, "Database migration failed");
-        Environment.ExitCode = 1;
-    }
-
-    return;
-}
-
 await app.Services.InitializeDatabaseAsync();
 await app.RunAsync();
+return 0;

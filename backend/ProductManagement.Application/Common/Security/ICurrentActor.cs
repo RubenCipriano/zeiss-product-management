@@ -4,10 +4,4 @@ namespace ProductManagement.Application.Common.Security;
 public interface ICurrentActor
 {
     string Name { get; }
-
-    /// <summary>
-    /// The current request's <c>Idempotency-Key</c>, scoped to this actor, or <c>null</c> if it sent none. Recorded on
-    /// the ledger entry the request creates, under a unique index.
-    /// </summary>
-    string? RequestKey { get; }
 }

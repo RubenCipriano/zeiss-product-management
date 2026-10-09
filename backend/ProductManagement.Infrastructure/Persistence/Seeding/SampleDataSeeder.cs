@@ -55,10 +55,9 @@ internal static class SampleDataSeeder
 
         foreach (var sample in SampleProducts)
         {
-            var id = await idGenerator.NextIdAsync(cancellationToken);
-            products.Add(sample.ToProduct(id, now));
-            context.Set<StockMovement>().Add(StockMovement.Record(
-                id, sample.StockQuantity, sample.StockQuantity, StockMovementReason.InitialStock, "seed", now));
+            var product = sample.ToProduct(await idGenerator.NextIdAsync(cancellationToken), now);
+            products.Add(product);
+            context.Set<StockMovement>().Add(StockMovement.ForInitialStock(product, "seed", requestKey: null));
         }
 
         await context.SaveChangesAsync(cancellationToken);

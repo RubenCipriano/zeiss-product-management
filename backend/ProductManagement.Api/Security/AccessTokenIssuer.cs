@@ -11,7 +11,7 @@ public sealed record IssuedToken(string AccessToken, int ExpiresInSeconds);
 /// Checks a consumer's credentials and issues a signed JWT carrying its roles. Singleton.
 /// </summary>
 public sealed class AccessTokenIssuer(
-    IOptions<AuthenticationSettings> options,
+    IOptions<AuthenticationOptions> options,
     TokenSigningKey signingKey,
     TimeProvider timeProvider)
 {
@@ -19,12 +19,12 @@ public sealed class AccessTokenIssuer(
     // and an attacker cannot discover which client ids exist.
     private static readonly string DummyHash = SecretHasher.Hash(Guid.NewGuid().ToString());
 
-    private readonly AuthenticationSettings _settings = options.Value;
+    private readonly AuthenticationOptions _options = options.Value;
     private readonly JsonWebTokenHandler _handler = new();
 
     public IssuedToken? Authenticate(string clientId, string clientSecret)
     {
-        var consumer = _settings.Consumers.Find(c => string.Equals(c.ClientId, clientId, StringComparison.Ordinal));
+        var consumer = _options.Consumers.Find(c => string.Equals(c.ClientId, clientId, StringComparison.Ordinal));
         var secretIsValid = SecretHasher.Verify(clientSecret, consumer?.SecretHash ?? DummyHash);
         if (consumer is null || !secretIsValid)
         {
@@ -34,22 +34,22 @@ public sealed class AccessTokenIssuer(
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var claims = new List<Claim>
         {
-            new("sub", consumer.ClientId),
+            new(TokenClaims.Subject, consumer.ClientId),
             new("jti", Guid.NewGuid().ToString("N")),
         };
-        claims.AddRange(consumer.Roles.Select(role => new Claim("roles", role)));
+        claims.AddRange(consumer.Roles.Select(role => new Claim(TokenClaims.Roles, role)));
 
         var token = _handler.CreateToken(new SecurityTokenDescriptor
         {
-            Issuer = _settings.Issuer,
-            Audience = _settings.Audience,
+            Issuer = _options.Issuer,
+            Audience = _options.Audience,
             Subject = new ClaimsIdentity(claims),
             IssuedAt = now,
             NotBefore = now,
-            Expires = now.Add(_settings.AccessTokenLifetime),
+            Expires = now.Add(_options.AccessTokenLifetime),
             SigningCredentials = signingKey.SigningCredentials, // ES256, with the key id (kid) in the header
         });
 
-        return new IssuedToken(token, (int)_settings.AccessTokenLifetime.TotalSeconds);
+        return new IssuedToken(token, (int)_options.AccessTokenLifetime.TotalSeconds);
     }
 }

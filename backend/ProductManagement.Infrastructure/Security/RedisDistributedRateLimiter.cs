@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using ProductManagement.Application.Common.Security;
-using ProductManagement.Infrastructure.Caching;
+using ProductManagement.Infrastructure.Edge;
+using ProductManagement.Infrastructure.Redis;
 using StackExchange.Redis;
 
 namespace ProductManagement.Infrastructure.Security;
@@ -12,7 +12,7 @@ namespace ProductManagement.Infrastructure.Security;
 /// </summary>
 internal sealed partial class RedisDistributedRateLimiter(
     IConnectionMultiplexer redis,
-    IOptions<CacheOptions> options,
+    IOptions<RedisOptions> options,
     ILogger<RedisDistributedRateLimiter> logger) : IDistributedRateLimiter
 {
     // KEYS[1] = bucket; ARGV = tokens per second, capacity. Returns { allowed (0/1), retry after in ms }.
@@ -56,7 +56,7 @@ internal sealed partial class RedisDistributedRateLimiter(
                 new { bucket = key, rate = tokensPerSecond, capacity }))!;
             return new RateLimitDecision((int)result[0] == 1, TimeSpan.FromMilliseconds((int)result[1]));
         }
-        catch (Exception exception) when (exception is RedisException or TimeoutException)
+        catch (Exception exception) when (RedisFailures.IsTransient(exception))
         {
             LogUnavailable(exception);
             return null;

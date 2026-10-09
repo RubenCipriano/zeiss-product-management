@@ -1,36 +1,42 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using ProductManagement.Api.Idempotency;
+using ProductManagement.Application.Common.Requests;
 using ProductManagement.Application.Common.Security;
 
 namespace ProductManagement.Api.Security;
 
 internal static class SecurityServiceCollectionExtensions
 {
-    public static IServiceCollection AddApiSecurity(this IServiceCollection services, IConfiguration configuration)
+    public static IServiceCollection AddApiSecurity(this IServiceCollection services)
     {
-        var section = configuration.GetSection(AuthenticationSettings.SectionName);
-        var settings = section.Get<AuthenticationSettings>() ?? new AuthenticationSettings();
-        ValidateConsumers(settings);
-        var signingKey = TokenSigningKey.FromPem(settings.SigningKey);
+        services.AddOptions<AuthenticationOptions>()
+            .BindConfiguration(AuthenticationOptions.SectionName)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+        services.AddSingleton<IValidateOptions<AuthenticationOptions>, AuthenticationOptionsValidator>();
 
-        services.Configure<AuthenticationSettings>(section);
-        services.AddSingleton(signingKey);
+        services.AddSingleton(provider =>
+            TokenSigningKey.FromPem(provider.GetRequiredService<IOptions<AuthenticationOptions>>().Value.SigningKey));
         services.AddSingleton<AccessTokenIssuer>();
+        services.AddSingleton<TokenService>();
         services.AddHttpContextAccessor();
         services.AddScoped<ICurrentActor, HttpContextCurrentActor>();
+        services.AddScoped<IRequestContext, HttpRequestContext>();
 
-        services
-            .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-            .AddJwtBearer(options =>
+        services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
+        services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+            .Configure<IOptions<AuthenticationOptions>, TokenSigningKey>((options, authentication, signingKey) =>
             {
                 // Keep claim names as issued (sub, roles) instead of the legacy WS-Federation URIs.
                 options.MapInboundClaims = false;
                 options.TokenValidationParameters = new TokenValidationParameters
                 {
                     ValidateIssuer = true,
-                    ValidIssuer = settings.Issuer,
+                    ValidIssuer = authentication.Value.Issuer,
                     ValidateAudience = true,
-                    ValidAudience = settings.Audience,
+                    ValidAudience = authentication.Value.Audience,
                     ValidateLifetime = true,
                     RequireExpirationTime = true,
                     ValidateIssuerSigningKey = true,
@@ -39,26 +45,13 @@ internal static class SecurityServiceCollectionExtensions
                     // is rejected before any signature check (algorithm confusion).
                     ValidAlgorithms = [SecurityAlgorithms.EcdsaSha256],
                     ClockSkew = TimeSpan.FromSeconds(30),
-                    NameClaimType = "sub",
-                    RoleClaimType = "roles",
+                    NameClaimType = TokenClaims.Subject,
+                    RoleClaimType = TokenClaims.Roles,
                 };
             });
 
         services.AddAuthorization(Policies.Configure);
 
         return services;
-    }
-
-    /// <summary>Fail fast: an API that starts with a bad key or broken consumers is worse than one that does not start.</summary>
-    private static void ValidateConsumers(AuthenticationSettings settings)
-    {
-        foreach (var consumer in settings.Consumers)
-        {
-            if (string.IsNullOrWhiteSpace(consumer.ClientId) || !SecretHasher.IsWellFormed(consumer.SecretHash))
-            {
-                throw new InvalidOperationException(
-                    $"API consumer '{consumer.ClientId}' needs a client id and a secret hash (use the hash-secret command).");
-            }
-        }
     }
 }

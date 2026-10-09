@@ -29,6 +29,9 @@ public static class ProductRules
     /// </summary>
     public const int MaxStockQuantity = 1_000_000;
 
+    /// <summary>Smallest quantity a single stock addition or removal may move.</summary>
+    public const int MinAdjustmentQuantity = 1;
+
     public static bool IsValidId(int id) => id is >= MinId and <= MaxId;
 
     public static bool HasValidPricePrecision(decimal price) => decimal.Round(price, PriceDecimalPlaces) == price;

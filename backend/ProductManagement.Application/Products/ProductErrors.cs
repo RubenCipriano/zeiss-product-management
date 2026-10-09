@@ -15,7 +15,7 @@ public static class ProductErrors
         Error.Validation("categoryId", $"Category {categoryId} does not exist.");
 
     public static Error InvalidQuantity() =>
-        Error.Validation("quantity", $"'Quantity' must be between 1 and {ProductRules.MaxStockQuantity}.");
+        Error.Validation("quantity", $"'Quantity' must be between {ProductRules.MinAdjustmentQuantity} and {ProductRules.MaxStockQuantity}.");
 
     public static Error InsufficientStock(int id, int requested, int available) =>
         Error.Conflict(

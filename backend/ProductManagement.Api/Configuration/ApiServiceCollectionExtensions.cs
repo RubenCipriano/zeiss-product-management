@@ -1,9 +1,11 @@
-using System.Globalization;
 using System.Net.Mime;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Cors.Infrastructure;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
 using ProductManagement.Api.ErrorHandling;
 using ProductManagement.Api.Http;
@@ -14,7 +16,7 @@ internal static class ApiServiceCollectionExtensions
 {
     private const string BearerScheme = "Bearer";
 
-    public static IServiceCollection AddApiPresentation(this IServiceCollection services, IConfiguration configuration)
+    public static IServiceCollection AddApiPresentation(this IServiceCollection services)
     {
         services
             .AddControllers()
@@ -38,15 +40,13 @@ internal static class ApiServiceCollectionExtensions
 
                 var problemDetailsFactory = context.HttpContext.RequestServices
                     .GetRequiredService<Microsoft.AspNetCore.Mvc.Infrastructure.ProblemDetailsFactory>();
-                var problem = problemDetailsFactory.CreateValidationProblemDetails(
-                    context.HttpContext,
-                    context.ModelState,
-                    StatusCodes.Status400BadRequest);
-                problem.Extensions["errorCode"] = "validation_failed";
+                var problem = problemDetailsFactory
+                    .CreateValidationProblemDetails(context.HttpContext, context.ModelState, StatusCodes.Status400BadRequest)
+                    .WithErrorCode(ApiErrorCodes.ValidationFailed);
 
                 return new BadRequestObjectResult(problem)
                 {
-                    ContentTypes = { ApiControllerBase.ProblemJsonContentType, MediaTypeNames.Application.Json },
+                    ContentTypes = { ApiProblems.ContentType, MediaTypeNames.Application.Json },
                 };
             };
         });
@@ -60,8 +60,8 @@ internal static class ApiServiceCollectionExtensions
                 // Every problem carries an errorCode. Framework-generated ones (unknown route, 405, 415, ...)
                 // get a generic "http_<status>" code; application errors set their own, more specific code.
                 context.ProblemDetails.Extensions.TryAdd(
-                    "errorCode",
-                    string.Create(CultureInfo.InvariantCulture, $"http_{context.ProblemDetails.Status ?? context.HttpContext.Response.StatusCode}"));
+                    ApiProblems.ErrorCodeKey,
+                    ApiErrorCodes.ForStatus(context.ProblemDetails.Status ?? context.HttpContext.Response.StatusCode));
                 context.HttpContext.Features.Get<IHttpActivityFeature>()?.Activity
                     .SetTag("problem.status", context.ProblemDetails.Status);
             });
@@ -92,18 +92,32 @@ internal static class ApiServiceCollectionExtensions
                 return Task.CompletedTask;
             }));
 
-        var corsSettings = configuration.GetSection(CorsSettings.SectionName).Get<CorsSettings>() ?? new CorsSettings();
-        services.AddCors(options => options.AddDefaultPolicy(policy =>
-        {
-            if (corsSettings.AllowedOrigins.Length > 0)
+        services.AddOptions<CorsPolicyOptions>()
+            .BindConfiguration(CorsPolicyOptions.SectionName)
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+        services.AddCors();
+        services.AddOptions<CorsOptions>().Configure<IOptions<CorsPolicyOptions>>((options, origins) =>
+            options.AddDefaultPolicy(policy =>
             {
-                policy
-                    .WithOrigins(corsSettings.AllowedOrigins)
-                    .AllowAnyHeader()
-                    .AllowAnyMethod()
-                    .WithExposedHeaders("ETag", "Location");
-            }
-        }));
+                if (origins.Value.AllowedOrigins.Length > 0)
+                {
+                    policy
+                        .WithOrigins(origins.Value.AllowedOrigins)
+                        .AllowAnyHeader()
+                        .AllowAnyMethod()
+                        .WithExposedHeaders("ETag", "Location");
+                }
+            }));
+
+        services.Configure<ForwardedHeadersOptions>(options =>
+        {
+            // The API is only reachable through the gateway (Kubernetes NetworkPolicy), so the client address it
+            // forwards in X-Forwarded-For can be trusted; it is what rate limiting partitions anonymous callers by.
+            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+            options.KnownIPNetworks.Clear();
+            options.KnownProxies.Clear();
+        });
 
         return services;
     }

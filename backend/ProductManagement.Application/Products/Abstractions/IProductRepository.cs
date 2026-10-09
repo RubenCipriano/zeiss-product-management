@@ -18,18 +18,13 @@ public interface IProductRepository
     void AddMovement(StockMovement movement);
 
     /// <summary>
-    /// Atomically adds <paramref name="delta"/> (positive or negative) to the stock, but only if the result stays
-    /// within <see cref="Product.StockRangeAllowingAdjustment"/>, and records the matching
-    /// <see cref="StockMovement"/>. Change and ledger entry are a single SQL statement, so one never happens without
-    /// the other. Runs right away; it does not wait for the unit of work.
+    /// Atomically applies <paramref name="adjustment"/> if the current stock is within its allowed range, and records
+    /// the matching ledger entry. Change and ledger entry are a single SQL statement, so one never happens without the
+    /// other. Runs right away; it does not wait for the unit of work.
     /// </summary>
-    /// <param name="requestKey">The request's idempotency key, recorded on the movement under a unique index.</param>
     Task<StockAdjustmentOutcome> TryAdjustStockAsync(
-        int id,
-        int delta,
-        string performedBy,
-        string? requestKey,
-        DateTimeOffset now,
+        int productId,
+        StockAdjustment adjustment,
         CancellationToken cancellationToken);
 }
 

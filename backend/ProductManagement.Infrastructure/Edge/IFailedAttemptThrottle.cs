@@ -1,4 +1,4 @@
-namespace ProductManagement.Application.Common.Security;
+namespace ProductManagement.Infrastructure.Edge;
 
 /// <summary>
 /// Counts failed sign-in attempts per key (e.g. client IP) across all API replicas, and blocks a key once it has

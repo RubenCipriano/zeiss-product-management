@@ -36,10 +36,12 @@ Every stock change is recorded in an append-only **`stock_movements`** table:
   ```
 
   Atomicity comes for free (one statement), it stays one round trip, and `stock_after` is the value the row lock
-  produced, so the running totals are exact under any concurrency. The response still comes from a follow-up read
+  produced, so the running totals are exact under any concurrency. The values come from the domain's
+  `StockAdjustment`, validated like every other ledger entry (actor and request key lengths). The response still comes from a follow-up read
   of the product ([0003](0003-atomic-stock-updates.md)), which is what the endpoint returns.
 * Create and update go through EF Core: `AddMovement` adds the movement to the same unit of work, so it is saved in
-  the same transaction as the product.
+  the same transaction as the product. The domain builds those entries (`StockMovement.ForInitialStock`, and
+  `StockMovement.ForCorrection`, which records nothing when an edit left the stock unchanged).
 * `GET /api/products/{id}/stock-movements` pages through the history, newest first, served by the index
   `(product_id, occurred_at DESC, id DESC)`. Readers see it in the UI's *Stock history* dialog.
 * The migration backfills one `InitialStock` movement per existing product, so the invariant holds from day one.

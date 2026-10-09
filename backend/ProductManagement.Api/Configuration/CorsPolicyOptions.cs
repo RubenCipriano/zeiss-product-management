@@ -1,6 +1,6 @@
 namespace ProductManagement.Api.Configuration;
 
-internal sealed class CorsSettings
+internal sealed class CorsPolicyOptions
 {
     public const string SectionName = "Cors";
 

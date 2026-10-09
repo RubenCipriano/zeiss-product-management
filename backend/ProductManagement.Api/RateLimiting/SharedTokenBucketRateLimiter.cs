@@ -1,5 +1,5 @@
 using System.Threading.RateLimiting;
-using ProductManagement.Application.Common.Security;
+using ProductManagement.Infrastructure.Edge;
 
 namespace ProductManagement.Api.RateLimiting;
 

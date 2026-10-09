@@ -16,6 +16,7 @@ public static class ApplicationServiceCollectionExtensions
 
         services.AddScoped<IProductQueryService, ProductQueryService>();
         services.AddScoped<IProductCommandService, ProductCommandService>();
+        services.AddScoped<IStockCommandService, StockCommandService>();
         services.AddScoped<ICategoryQueryService, CategoryQueryService>();
 
         services.TryAddSingleton(TimeProvider.System);

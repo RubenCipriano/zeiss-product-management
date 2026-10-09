@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using ProductManagement.Infrastructure.Redis;
 using StackExchange.Redis;
 
 namespace ProductManagement.Infrastructure.Caching;
@@ -11,12 +12,14 @@ namespace ProductManagement.Infrastructure.Caching;
 /// </summary>
 internal sealed partial class RedisCatalogCache(
     IConnectionMultiplexer redis,
+    IOptions<RedisOptions> redisOptions,
     IOptions<CacheOptions> options,
+    TimeProvider timeProvider,
     ILogger<RedisCatalogCache> logger) : ICatalogCache
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
 
-    private readonly string _prefix = options.Value.KeyPrefix;
+    private readonly string _prefix = redisOptions.Value.KeyPrefix;
 
     private IDatabase Database => redis.GetDatabase();
 
@@ -50,7 +53,7 @@ internal sealed partial class RedisCatalogCache(
 
             return string.Join('.', values.Select(value => (long)value));
         }
-        catch (Exception exception) when (IsCacheFailure(exception))
+        catch (Exception exception) when (RedisFailures.IsTransient(exception))
         {
             LogCacheUnavailable(exception, "read the generation");
             return null;
@@ -65,7 +68,7 @@ internal sealed partial class RedisCatalogCache(
             var value = await Database.StringGetAsync(Key(key));
             return value.HasValue ? JsonSerializer.Deserialize<T>((string)value!, SerializerOptions) : null;
         }
-        catch (Exception exception) when (IsCacheFailure(exception) || exception is JsonException)
+        catch (Exception exception) when (RedisFailures.IsTransient(exception) || exception is JsonException)
         {
             LogCacheUnavailable(exception, "read an entry");
             return null;
@@ -79,7 +82,7 @@ internal sealed partial class RedisCatalogCache(
         {
             await Database.StringSetAsync(Key(key), JsonSerializer.Serialize(value, SerializerOptions), timeToLive);
         }
-        catch (Exception exception) when (IsCacheFailure(exception))
+        catch (Exception exception) when (RedisFailures.IsTransient(exception))
         {
             LogCacheUnavailable(exception, "write an entry");
         }
@@ -99,7 +102,7 @@ internal sealed partial class RedisCatalogCache(
             // Pipelined: one round trip's latency for all counters.
             await Task.WhenAll(keys.Select(IncrementAsync));
         }
-        catch (Exception exception) when (IsCacheFailure(exception))
+        catch (Exception exception) when (RedisFailures.IsTransient(exception))
         {
             // The write itself succeeded; readers may see the previous state until the entries' TTL expires.
             LogInvalidationFailed(exception);
@@ -117,14 +120,11 @@ internal sealed partial class RedisCatalogCache(
     private Task StartAsync(RedisKey key) =>
         Database.StringSetAsync(
             key,
-            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            timeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
             key == DataGeneration || key == ListingGeneration ? null : _productGenerationTtl,
             When.NotExists);
 
     private RedisKey Key(string key) => $"{_prefix}:{key}";
-
-    private static bool IsCacheFailure(Exception exception) =>
-        exception is RedisException or TimeoutException or ObjectDisposedException;
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Cache unavailable while trying to {Operation}; using the database")]
     private partial void LogCacheUnavailable(Exception exception, string operation);

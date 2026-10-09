@@ -8,7 +8,11 @@ using ProductManagement.Infrastructure.Persistence;
 
 namespace ProductManagement.Infrastructure.Products;
 
-internal sealed class ProductQueries(ProductManagementDbContext context) : IProductQueries
+/// <summary>
+/// The product read queries, uncached. <see cref="Caching.CachingProductQueries"/>, the registered
+/// <see cref="IProductQueries"/>, composes them with the cache (which, without Redis, is a pass-through).
+/// </summary>
+internal sealed class ProductQueries(ProductManagementDbContext context)
 {
     private const string LikeEscapeCharacter = "\\";
 
@@ -45,55 +49,26 @@ internal sealed class ProductQueries(ProductManagementDbContext context) : IProd
         return productId is null ? null : await GetByIdAsync(productId.Value, cancellationToken);
     }
 
-    public async Task<PagedResponse<ProductResponse>> ListAsync(PageQuery page, CancellationToken cancellationToken) =>
-        await LoadPageAsync(await FindListPageAsync(page, cancellationToken), page, cancellationToken);
-
-    public async Task<PagedResponse<ProductResponse>> SearchByNameAsync(
-        string nameFragment,
+    /// <summary>
+    /// One page of a listing, found in two narrow queries (count, then ids) and then read by primary key. This is a late
+    /// row lookup: skipping rows for a deep page walks the (name, id) index without touching the table, so page 40,000
+    /// of 850,000 products takes ~0.5 s instead of ~1.3 s. It also lets the cache keep the expensive part (count and
+    /// ids) across stock changes, which only affect the rows (see <see cref="Caching.CachingProductQueries"/>). Offset
+    /// paging stays linear in the page number; keyset paging would make it constant.
+    /// </summary>
+    /// <param name="count">The total number of matching products (by default <see cref="CountAsync"/>).</param>
+    /// <param name="pageIds">The page's ids, in order (by default <see cref="PageIdsAsync"/>).</param>
+    public async Task<PagedResponse<ProductResponse>> PageAsync(
         PageQuery page,
-        CancellationToken cancellationToken) =>
-        await LoadPageAsync(await FindSearchPageAsync(nameFragment, page, cancellationToken), page, cancellationToken);
-
-    internal Task<ProductPageIds> FindListPageAsync(PageQuery page, CancellationToken cancellationToken) =>
-        FindPageAsync(Products, ByName, page, cancellationToken);
-
-    internal Task<int> CountListAsync(CancellationToken cancellationToken) => Products.CountAsync(cancellationToken);
-
-    internal Task<int[]> FindListPageIdsAsync(PageQuery page, CancellationToken cancellationToken) =>
-        PageIdsAsync(Products, ByName, page, cancellationToken);
-
-    internal Task<ProductPageIds> FindSearchPageAsync(
-        string nameFragment,
-        PageQuery page,
-        CancellationToken cancellationToken) =>
-        FindPageAsync(NameContains(nameFragment), ByName, page, cancellationToken);
-
-    internal Task<int> CountSearchAsync(string nameFragment, CancellationToken cancellationToken) =>
-        NameContains(nameFragment).CountAsync(cancellationToken);
-
-    internal Task<int[]> FindSearchPageIdsAsync(
-        string nameFragment,
-        PageQuery page,
-        CancellationToken cancellationToken) =>
-        PageIdsAsync(NameContains(nameFragment), ByName, page, cancellationToken);
-
-    private IQueryable<Product> NameContains(string nameFragment)
-    {
-        // Wildcards typed by the user are matched literally: searching "50%" finds "50% off", not everything.
-        var pattern = $"%{EscapeLikePattern(nameFragment)}%";
-        return Products.Where(product => EF.Functions.ILike(product.Name, pattern, LikeEscapeCharacter));
-    }
-
-    /// <summary>Reads the current rows of a page found by one of the Find…PageAsync methods, in the page's order.</summary>
-    internal async Task<PagedResponse<ProductResponse>> LoadPageAsync(
-        ProductPageIds pageIds,
-        PageQuery page,
+        Func<Task<int>> count,
+        Func<Task<int[]>> pageIds,
         CancellationToken cancellationToken)
     {
-        var ids = pageIds.Ids;
-        if (ids.Count == 0)
+        var totalCount = await count();
+        int[] ids = totalCount <= page.Skip ? [] : await pageIds();
+        if (ids.Length == 0)
         {
-            return new PagedResponse<ProductResponse>([], page.Page, page.PageSize, pageIds.TotalCount);
+            return new PagedResponse<ProductResponse>([], page.Page, page.PageSize, totalCount);
         }
 
         var rows = await Products
@@ -103,8 +78,29 @@ internal sealed class ProductQueries(ProductManagementDbContext context) : IProd
 
         // A product deleted since the page was found is simply missing from it.
         var items = ids.Where(rows.ContainsKey).Select(id => rows[id]).ToList();
-        return new PagedResponse<ProductResponse>(items, page.Page, page.PageSize, pageIds.TotalCount);
+        return new PagedResponse<ProductResponse>(items, page.Page, page.PageSize, totalCount);
     }
+
+    /// <summary>One page of <paramref name="listing"/>, straight from the database.</summary>
+    public Task<PagedResponse<ProductResponse>> PageAsync(
+        ProductListing listing,
+        PageQuery page,
+        CancellationToken cancellationToken) =>
+        PageAsync(
+            page,
+            () => CountAsync(listing, cancellationToken),
+            () => PageIdsAsync(listing, page, cancellationToken),
+            cancellationToken);
+
+    public Task<int> CountAsync(ProductListing listing, CancellationToken cancellationToken) =>
+        Filter(listing).CountAsync(cancellationToken);
+
+    public Task<int[]> PageIdsAsync(ProductListing listing, PageQuery page, CancellationToken cancellationToken) =>
+        Order(listing, Filter(listing))
+            .Skip(page.Skip)
+            .Take(page.PageSize)
+            .Select(product => product.Id)
+            .ToArrayAsync(cancellationToken);
 
     public async Task<PagedResponse<StockMovementResponse>?> ListStockMovementsAsync(
         int productId,
@@ -138,11 +134,22 @@ internal sealed class ProductQueries(ProductManagementDbContext context) : IProd
         return new PagedResponse<StockMovementResponse>(items, page.Page, page.PageSize, totalCount);
     }
 
-    public async Task<PagedResponse<ProductResponse>> ListByStockLevelAsync(
-        int? min,
-        int? max,
-        PageQuery page,
-        CancellationToken cancellationToken)
+    private IQueryable<Product> Filter(ProductListing listing) =>
+        listing switch
+        {
+            ProductListing.NameContains(var fragment) => NameContains(fragment),
+            ProductListing.StockBetween(var min, var max) => StockBetween(min, max),
+            _ => Products,
+        };
+
+    private IQueryable<Product> NameContains(string fragment)
+    {
+        // Wildcards typed by the user are matched literally: searching "50%" finds "50% off", not everything.
+        var pattern = $"%{EscapeLikePattern(fragment)}%";
+        return Products.Where(product => EF.Functions.ILike(product.Name, pattern, LikeEscapeCharacter));
+    }
+
+    private IQueryable<Product> StockBetween(int? min, int? max)
     {
         var query = Products;
         if (min is not null)
@@ -155,56 +162,17 @@ internal sealed class ProductQueries(ProductManagementDbContext context) : IProd
             query = query.Where(product => product.StockQuantity <= max);
         }
 
-        var pageIds = await FindPageAsync(
-            query,
-            products => products
-                .OrderBy(product => product.StockQuantity)
-                .ThenBy(product => product.Name)
-                .ThenBy(product => product.Id),
-            page,
-            cancellationToken);
-        return await LoadPageAsync(pageIds, page, cancellationToken);
+        return query;
     }
+
+    private static IOrderedQueryable<Product> Order(ProductListing listing, IQueryable<Product> products) =>
+        listing is ProductListing.StockBetween
+            ? products.OrderBy(product => product.StockQuantity).ThenBy(product => product.Name).ThenBy(product => product.Id)
+            : products.OrderBy(product => product.Name).ThenBy(product => product.Id);
 
     private static string EscapeLikePattern(string value) =>
         value
             .Replace(LikeEscapeCharacter, LikeEscapeCharacter + LikeEscapeCharacter, StringComparison.Ordinal)
             .Replace("%", LikeEscapeCharacter + "%", StringComparison.Ordinal)
             .Replace("_", LikeEscapeCharacter + "_", StringComparison.Ordinal);
-
-    private static IOrderedQueryable<Product> ByName(IQueryable<Product> products) =>
-        products.OrderBy(product => product.Name).ThenBy(product => product.Id);
-
-    /// <summary>
-    /// Finds a page in two narrow queries: the count, and the page's ids. The rows themselves are read afterwards by
-    /// primary key (<see cref="LoadPageAsync"/>). This is a late row lookup: skipping rows for a deep page walks the
-    /// (name, id) index without touching the table, so page 40,000 of 850,000 products takes ~0.5 s instead of
-    /// ~1.3 s. It also lets the cache keep this expensive part across stock changes, which only affect the rows
-    /// (see <see cref="Caching.CachingProductQueries"/>). Offset paging stays linear in the page number; keyset
-    /// paging would make it constant.
-    /// </summary>
-    private static async Task<ProductPageIds> FindPageAsync(
-        IQueryable<Product> filtered,
-        Func<IQueryable<Product>, IOrderedQueryable<Product>> order,
-        PageQuery page,
-        CancellationToken cancellationToken)
-    {
-        var totalCount = await filtered.CountAsync(cancellationToken);
-        int[] ids = totalCount <= page.Skip ? [] : await PageIdsAsync(filtered, order, page, cancellationToken);
-        return new ProductPageIds(ids, totalCount);
-    }
-
-    private static Task<int[]> PageIdsAsync(
-        IQueryable<Product> filtered,
-        Func<IQueryable<Product>, IOrderedQueryable<Product>> order,
-        PageQuery page,
-        CancellationToken cancellationToken) =>
-        order(filtered)
-            .Skip(page.Skip)
-            .Take(page.PageSize)
-            .Select(product => product.Id)
-            .ToArrayAsync(cancellationToken);
 }
-
-/// <summary>The ids on one page of a list, in order, and the total number of matching products.</summary>
-internal sealed record ProductPageIds(IReadOnlyList<int> Ids, int TotalCount);

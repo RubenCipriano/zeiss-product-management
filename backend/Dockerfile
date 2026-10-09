@@ -1,5 +1,5 @@
 # API image. Build from this folder:  docker build -t product-management/api:local .
-# The same image also runs the database migrations (`migrate` command), see deploy/k8s/base/api/migrate-job.yaml.
+# The same image also runs the database migrations (`migrate` command): the db-migrate Job in deploy/kubernetes.yaml.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src

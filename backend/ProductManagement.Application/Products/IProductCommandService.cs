@@ -4,7 +4,7 @@ using ProductManagement.Application.Products.Contracts;
 namespace ProductManagement.Application.Products;
 
 /// <summary>
-/// Product write use cases.
+/// Product write use cases (create, edit, delete). Stock movements are in <see cref="IStockCommandService"/>.
 /// </summary>
 public interface IProductCommandService
 {
@@ -21,8 +21,4 @@ public interface IProductCommandService
         CancellationToken cancellationToken);
 
     Task<Result> DeleteAsync(int id, uint? expectedVersion, CancellationToken cancellationToken);
-
-    Task<Result<ProductResponse>> DecrementStockAsync(int id, int quantity, CancellationToken cancellationToken);
-
-    Task<Result<ProductResponse>> AddToStockAsync(int id, int quantity, CancellationToken cancellationToken);
 }
