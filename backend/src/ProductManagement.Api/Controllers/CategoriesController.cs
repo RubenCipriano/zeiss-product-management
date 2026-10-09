@@ -1,5 +1,7 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using ProductManagement.Api.Http;
+using ProductManagement.Api.Security;
 using ProductManagement.Application.Categories;
 using ProductManagement.Application.Categories.Contracts;
 
@@ -9,6 +11,7 @@ namespace ProductManagement.Api.Controllers;
 /// Product categories (read-only reference data).
 /// </summary>
 [Route("api/categories")]
+[Authorize(Policy = Policies.ProductsRead)]
 public sealed class CategoriesController(ICategoryQueryService categoryQueries) : ApiControllerBase
 {
     /// <summary>Lists all categories, ordered by name.</summary>

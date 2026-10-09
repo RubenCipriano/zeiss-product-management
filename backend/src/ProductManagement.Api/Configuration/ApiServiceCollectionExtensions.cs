@@ -4,6 +4,7 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.OpenApi;
 using ProductManagement.Api.ErrorHandling;
 using ProductManagement.Api.Http;
 
@@ -11,6 +12,8 @@ namespace ProductManagement.Api.Configuration;
 
 internal static class ApiServiceCollectionExtensions
 {
+    private const string BearerScheme = "Bearer";
+
     public static IServiceCollection AddApiPresentation(this IServiceCollection services, IConfiguration configuration)
     {
         services
@@ -70,7 +73,22 @@ internal static class ApiServiceCollectionExtensions
                 document.Info.Title = "Product Management API";
                 document.Info.Description =
                     "Manage products and their stock. Errors follow RFC 9457 (application/problem+json) and carry a " +
-                    "machine-readable `errorCode`. Conditional updates use ETag / If-Match.";
+                    "machine-readable `errorCode`. Conditional updates use ETag / If-Match. All endpoints require " +
+                    "a bearer token issued by the identity provider (roles: viewer, stock-clerk, manager).";
+
+                document.Components ??= new OpenApiComponents();
+                document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
+                document.Components.SecuritySchemes[BearerScheme] = new OpenApiSecurityScheme
+                {
+                    Type = SecuritySchemeType.Http,
+                    Scheme = "bearer",
+                    BearerFormat = "JWT",
+                    Description = "Access token from the identity provider (Keycloak).",
+                };
+                document.Security =
+                [
+                    new OpenApiSecurityRequirement { [new OpenApiSecuritySchemeReference(BearerScheme, document)] = [] },
+                ];
                 return Task.CompletedTask;
             }));
 

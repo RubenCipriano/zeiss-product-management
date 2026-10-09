@@ -54,17 +54,24 @@ public sealed class ApiTestEnvironment : IAsyncDisposable
         return environment;
     }
 
-    public ProductApiClient CreateClient() => new(Factory.CreateClient());
+    /// <summary>A client signed in with the given role (default: manager, who may call every endpoint).</summary>
+    public ProductApiClient CreateClient(string? role = TestTokens.Manager) => Authorize(Factory.CreateClient(), role);
+
+    /// <summary>Starts a separate API instance with extra settings (e.g. low rate limits).</summary>
+    public ProductApiClient CreateClientForInstanceWith(
+        IReadOnlyDictionary<string, string> settings,
+        string? role = TestTokens.Manager) =>
+        CreateInstance(_infrastructure.RedisConnectionString, role, settings);
 
     /// <summary>
     /// Starts another, independent API instance sharing the same database and cache (as in a scaled-out deployment).
     /// </summary>
     public ProductApiClient CreateClientForAdditionalInstance() =>
-        CreateInstance(_infrastructure.RedisConnectionString);
+        CreateInstance(_infrastructure.RedisConnectionString, TestTokens.Manager);
 
     /// <summary>Starts an API instance whose Redis endpoint does not exist, to prove the cache fails open.</summary>
     public ProductApiClient CreateClientWithUnreachableCache() =>
-        CreateInstance("127.0.0.1:1,connectTimeout=200");
+        CreateInstance("127.0.0.1:1,connectTimeout=200", TestTokens.Manager);
 
     /// <summary>Empties the product table and the cache, so every test starts from the same state.</summary>
     public async Task ResetAsync()
@@ -89,13 +96,27 @@ public sealed class ApiTestEnvironment : IAsyncDisposable
         await _infrastructure.DisposeAsync();
     }
 
-    private ProductApiClient CreateInstance(string redisConnectionString)
+    private ProductApiClient CreateInstance(
+        string redisConnectionString,
+        string? role,
+        IReadOnlyDictionary<string, string>? settings = null)
     {
         var instance = new ProductManagementApiFactory(
             _infrastructure.DatabaseConnectionString,
             redisConnectionString,
-            applyMigrations: false);
+            applyMigrations: false,
+            settings);
         _additionalInstances.Add(instance);
-        return new ProductApiClient(instance.CreateClient());
+        return Authorize(instance.CreateClient(), role);
+    }
+
+    private static ProductApiClient Authorize(HttpClient client, string? role)
+    {
+        if (role is not null)
+        {
+            client.DefaultRequestHeaders.Authorization = new("Bearer", TestTokens.Create(role));
+        }
+
+        return new ProductApiClient(client);
     }
 }
