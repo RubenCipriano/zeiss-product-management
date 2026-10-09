@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using StackExchange.Redis;
 using ProductManagement.Application.Categories.Abstractions;
+using ProductManagement.Application.Common.Idempotency;
 using ProductManagement.Application.Common.Persistence;
 using ProductManagement.Application.Common.Security;
 using ProductManagement.Application.Products.Abstractions;
@@ -10,6 +11,7 @@ using ProductManagement.Infrastructure.Caching;
 using ProductManagement.Infrastructure.Categories;
 using ProductManagement.Infrastructure.Persistence;
 using ProductManagement.Infrastructure.Persistence.Seeding;
+using ProductManagement.Infrastructure.Idempotency;
 using ProductManagement.Infrastructure.Products;
 using ProductManagement.Infrastructure.Security;
 
@@ -74,12 +76,14 @@ public static class InfrastructureServiceCollectionExtensions
     {
         services.Configure<CacheOptions>(configuration.GetSection(CacheOptions.SectionName));
         services.Configure<FailedAttemptThrottleOptions>(configuration.GetSection(FailedAttemptThrottleOptions.SectionName));
+        services.Configure<IdempotencyOptions>(configuration.GetSection(IdempotencyOptions.SectionName));
 
         var redisConnectionString = configuration.GetConnectionString(CacheOptions.ConnectionStringName);
         if (string.IsNullOrWhiteSpace(redisConnectionString))
         {
             services.AddSingleton<ICatalogCache, NullCatalogCache>();
             services.AddSingleton<IFailedAttemptThrottle, InMemoryFailedAttemptThrottle>();
+            services.AddSingleton<IIdempotencyStore, InMemoryIdempotencyStore>();
             return;
         }
 
@@ -94,6 +98,7 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisOptions));
         services.AddSingleton<ICatalogCache, RedisCatalogCache>();
         services.AddSingleton<IFailedAttemptThrottle, RedisFailedAttemptThrottle>();
+        services.AddSingleton<IIdempotencyStore, RedisIdempotencyStore>();
         healthChecks.AddCheck<RedisHealthCheck>("cache", tags: [ReadinessHealthCheckTag]);
     }
 }

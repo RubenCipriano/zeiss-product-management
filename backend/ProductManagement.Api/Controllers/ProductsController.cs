@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using ProductManagement.Api.Http;
+using ProductManagement.Api.Idempotency;
 using ProductManagement.Api.RateLimiting;
 using ProductManagement.Api.Security;
 using ProductManagement.Application.Common.Paging;
@@ -19,7 +20,8 @@ namespace ProductManagement.Api.Controllers;
 /// persistence live in the application, domain and infrastructure layers.
 /// <para>
 /// Every endpoint needs <see cref="Policies.ProductsRead"/>; mutating endpoints additionally need a write
-/// permission and use the stricter <see cref="RateLimitPolicies.Writes"/> rate limit.
+/// permission and use the stricter <see cref="RateLimitPolicies.Writes"/> rate limit. Create and the stock
+/// operations accept an optional <c>Idempotency-Key</c> header, so retries are never applied twice.
 /// </para>
 /// </remarks>
 [Route("api/products")]
@@ -85,6 +87,7 @@ public sealed class ProductsController(
     [HttpPost]
     [Authorize(Policy = Policies.ProductsWrite)]
     [EnableRateLimiting(RateLimitPolicies.Writes)]
+    [Idempotent]
     [Consumes(MediaTypeNames.Application.Json)]
     [ProducesResponseType<ProductResponse>(StatusCodes.Status201Created)]
     [ProducesResponseType<ValidationProblemDetails>(StatusCodes.Status400BadRequest, ProblemJsonContentType)]
@@ -162,6 +165,7 @@ public sealed class ProductsController(
     [HttpPost("{id:int}/decrement-stock/{quantity}")]
     [Authorize(Policy = Policies.StockWrite)]
     [EnableRateLimiting(RateLimitPolicies.Writes)]
+    [Idempotent]
     [ProducesResponseType<ProductResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ValidationProblemDetails>(StatusCodes.Status400BadRequest, ProblemJsonContentType)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound, ProblemJsonContentType)]
@@ -181,6 +185,7 @@ public sealed class ProductsController(
     [HttpPost("{id:int}/add-to-stock/{quantity}")]
     [Authorize(Policy = Policies.StockWrite)]
     [EnableRateLimiting(RateLimitPolicies.Writes)]
+    [Idempotent]
     [ProducesResponseType<ProductResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ValidationProblemDetails>(StatusCodes.Status400BadRequest, ProblemJsonContentType)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound, ProblemJsonContentType)]
