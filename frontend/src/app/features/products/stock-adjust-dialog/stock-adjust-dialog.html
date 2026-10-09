@@ -1,0 +1,53 @@
+<h2 mat-dialog-title>Adjust stock</h2>
+
+@if (saving()) {
+  <mat-progress-bar mode="indeterminate" />
+}
+
+<form [formGroup]="form" (ngSubmit)="submit()" novalidate>
+  <mat-dialog-content>
+    <div class="product-summary">
+      <div>
+        <div class="product-summary__name">{{ product.name }}</div>
+        <div class="product-summary__meta">#{{ product.id }} · {{ product.categoryName }}</div>
+      </div>
+      <app-stock-status [quantity]="product.stockQuantity" />
+    </div>
+
+    <mat-button-toggle-group
+      formControlName="operation"
+      aria-label="Stock operation"
+      class="operation"
+    >
+      <mat-button-toggle value="remove">Remove stock</mat-button-toggle>
+      <mat-button-toggle value="add">Add stock</mat-button-toggle>
+    </mat-button-toggle-group>
+
+    <mat-form-field class="full-width">
+      <mat-label>Quantity</mat-label>
+      <input matInput type="number" formControlName="quantity" min="1" step="1" cdkFocusInitial />
+      @if (quantityError(); as message) {
+        <mat-error>{{ message }}</mat-error>
+      }
+    </mat-form-field>
+
+    @let result = resultingStock();
+    @if (result !== null) {
+      <p class="preview" [class.preview--invalid]="result < 0">
+        Stock after this change: <strong>{{ result }}</strong>
+        @if (result < 0) {
+          <span> (not enough stock)</span>
+        }
+      </p>
+    }
+
+    @if (errorMessage(); as message) {
+      <p class="error-banner" role="alert">{{ message }}</p>
+    }
+  </mat-dialog-content>
+
+  <mat-dialog-actions align="end">
+    <button mat-button type="button" mat-dialog-close>Cancel</button>
+    <button mat-flat-button type="submit" [disabled]="saving()">Apply</button>
+  </mat-dialog-actions>
+</form>

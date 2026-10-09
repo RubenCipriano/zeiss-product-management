@@ -36,4 +36,23 @@ body {
   margin: 0;
   height: 100%;
 }
-/* You can add global styles to this file, and also import other style files */
+// Application-level design tokens (stock status colours) layered on top of the Material theme.
+:root {
+  --app-stock-ok-bg: #dff3e4;
+  --app-stock-ok-fg: #0f5223;
+  --app-stock-low-bg: #fff1d6;
+  --app-stock-low-fg: #6b4400;
+}
+
+.error-banner {
+  margin: 8px 0 0;
+  padding: 12px 16px;
+  border-radius: 8px;
+  background: var(--mat-sys-error-container);
+  color: var(--mat-sys-on-error-container);
+}
+
+.snackbar-error {
+  --mat-snack-bar-container-color: var(--mat-sys-error-container);
+  --mat-snack-bar-supporting-text-color: var(--mat-sys-on-error-container);
+}
