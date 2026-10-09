@@ -109,8 +109,9 @@ spec:
         - port: 8080
 ---
 # ---------------------------------------------------------------------------------------------------- gateway
-# Entry point of the application. Reach it with:
-#   kubectl -n product-management port-forward service/gateway 8080:80     -> http://localhost:8080
+# Entry point of the application. LoadBalancer: Docker Desktop publishes it on http://localhost:8080; a cloud
+# cluster provisions a load balancer. On MicroK8s (no load-balancer add-on) use:
+#   kubectl -n product-management port-forward service/gateway 8080:8080    -> http://localhost:8080
 apiVersion: v1
 kind: Service
 metadata:
@@ -119,14 +120,13 @@ metadata:
   labels:
     app.kubernetes.io/name: gateway
 spec:
-  type: NodePort
+  type: LoadBalancer
   selector:
     app.kubernetes.io/name: gateway
   ports:
     - name: http
-      port: 80
+      port: 8080
       targetPort: http
-      nodePort: 30080
 ---
 apiVersion: apps/v1
 kind: Deployment

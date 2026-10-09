@@ -3,19 +3,21 @@
 import { check } from 'k6';
 import { api, createProducts, deleteProducts, signIn, tokenForVu } from './lib/api.js';
 
+const PEAK = Number(__ENV.PEAK || 800); // requests per second at the last step
+
 export const options = {
   scenarios: {
     stress: {
       executor: 'ramping-arrival-rate',
       startRate: 50,
       timeUnit: '1s',
-      preAllocatedVUs: 100,
-      maxVUs: 800,
+      preAllocatedVUs: 200,
+      maxVUs: 1500,
       stages: [
-        { target: 200, duration: '1m' },
-        { target: 400, duration: '1m' },
-        { target: 600, duration: '1m' },
-        { target: 800, duration: '1m' },
+        { target: Math.round(PEAK * 0.25), duration: '1m' },
+        { target: Math.round(PEAK * 0.5), duration: '1m' },
+        { target: Math.round(PEAK * 0.75), duration: '1m' },
+        { target: PEAK, duration: '1m' },
         { target: 0, duration: '20s' },
       ],
     },

@@ -11,3 +11,11 @@ Short records of the decisions that shape this codebase: the context, the decisi
 | 0005 | [Result pattern and RFC 9457 problem details](0005-error-handling.md)        |
 | 0006 | [PostgreSQL as the database](0006-postgresql.md)                             |
 | 0007 | [Frontend state with signals and `rxResource`](0007-frontend-state.md)       |
+| 0008 | [Redis read cache with generation-based invalidation](0008-redis-cache.md)  |
+| 0009 | [Authentication (OIDC) and permission-based RBAC](0009-authentication-authorization.md) |
+| 0010 | [Rate limiting in two layers](0010-rate-limiting.md)                         |
+| 0011 | [Kubernetes deployment, one manifest per project](0011-kubernetes-deployment.md) |
+| 0012 | [nginx gateway in front of the application](0012-gateway.md)                 |
+| 0013 | [UI with Tailwind CSS and Angular CDK](0013-ui-tailwind-cdk.md)              |
+| 0014 | [MCP server for AI assistants](0014-mcp-server.md)                          |
+| 0015 | [Load testing with k6, inside the cluster](0015-load-testing.md)            |

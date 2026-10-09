@@ -28,7 +28,9 @@ stringData:
   POSTGRES_DB: product_management
   POSTGRES_USER: product_management
   POSTGRES_PASSWORD: product_management
-  connection-string: Host=postgres.product-management.svc.cluster.local;Port=5432;Database=product_management;Username=product_management;Password=product_management;Maximum Pool Size=50
+  # Pool size per API replica. Keep (replicas x pool) within what PostgreSQL can serve: beyond that, extra
+  # connections only add contention (see docs/load-test-results.md).
+  connection-string: Host=postgres.product-management.svc.cluster.local;Port=5432;Database=product_management;Username=product_management;Password=product_management;Maximum Pool Size=20
 ---
 apiVersion: v1
 kind: Secret
@@ -119,8 +121,8 @@ spec:
             periodSeconds: 15
             failureThreshold: 6
           resources:
-            requests: { cpu: 200m, memory: 256Mi }
-            limits: { cpu: "1", memory: 512Mi }
+            requests: { cpu: 500m, memory: 256Mi }
+            limits: { cpu: "2", memory: 768Mi }
           volumeMounts:
             # PostgreSQL 18 images keep data under /var/lib/postgresql/<major>/.
             - name: data

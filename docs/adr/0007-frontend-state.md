@@ -15,6 +15,8 @@ changes made through the API"*, including changes made by other users or other c
   * changing the query automatically cancels the in-flight request (no out-of-order responses);
   * the previous page stays visible while reloading (no flicker);
   * the query signal uses structural equality, so re-applying the same filter does not trigger a request.
+* **Summary cards** (total / low stock / out of stock) come from the same list endpoints with `pageSize=1`, using
+  only `totalCount`, so no statistics endpoint is needed and the counts are cached like any other read.
 * **Freshness:** after each mutation the store shows the server's response immediately, then re-fetches, because the
   change may move the product out of the current filter or page. A **background refresh every 15 s** (paused while the
   tab is hidden) shows changes made by others. A manual **Refresh** button is always available.

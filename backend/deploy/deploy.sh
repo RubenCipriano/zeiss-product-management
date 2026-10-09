@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Builds the API image, pushes it to the cluster registry and applies backend/deploy/kubernetes.yaml with that
-# image version.
+# Builds the API image, makes it available to the current Kubernetes context (Docker Desktop or MicroK8s) and
+# applies backend/deploy/kubernetes.yaml with that image version.
 #
-#   KUBECONFIG=.kube/microk8s backend/deploy/deploy.sh
+#   backend/deploy/deploy.sh                                   # current kubectl context (e.g. docker-desktop)
+#   KUBECONFIG=.kube/microk8s backend/deploy/deploy.sh         # the MicroK8s VM
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -17,13 +18,13 @@ IMAGE="product-management/api:$TAG"
 echo "==> Building $IMAGE"
 docker build --quiet --tag "$IMAGE" "$BACKEND" >/dev/null
 
-echo "==> Pushing $IMAGE to the cluster registry"
-push_image "$IMAGE" "$IMAGE"
+echo "==> Publishing $IMAGE to the $(cluster_kind) cluster"
+IMAGE_REF="$(publish_image "$IMAGE")"
 
 echo "==> Applying backend manifests"
 # Jobs are immutable: the migration Job is recreated for every deployment.
 kubectl -n "$NAMESPACE" delete job db-migrate --ignore-not-found >/dev/null 2>&1 || true
-sed "s#localhost:32000/product-management/api:latest#localhost:32000/$IMAGE#g" "$HERE/kubernetes.yaml" \
+sed "s#localhost:32000/product-management/api:latest#$IMAGE_REF#g" "$HERE/kubernetes.yaml" \
   | kubectl apply -f -
 
 echo "==> Waiting for PostgreSQL, Redis and Keycloak"

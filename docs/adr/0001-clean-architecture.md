@@ -9,7 +9,9 @@ The domain is small (one aggregate), so the structure should separate concerns w
 
 ## Decision
 
-Four projects with dependencies pointing inwards:
+Four projects with dependencies pointing inwards. Following the usual .NET convention, each project sits in its
+own folder directly under `backend/` (no `src/`), and Visual Studio groups them with the `Source`, `Tests` and
+`Mcp` solution folders.
 
 ```
 Api ──► Application ──► Domain

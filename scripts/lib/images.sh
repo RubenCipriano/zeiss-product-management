@@ -1,5 +1,6 @@
-# Shared by the deploy scripts: build an image, tag it immutably and push it to the cluster's registry.
-# (Copied into each project's deploy script in their own repositories; kept here once to avoid drift.)
+# Shared by the deploy scripts: tag images immutably and make them available to the target cluster.
+# Works with Docker Desktop's Kubernetes (images are used straight from the local Docker engine) and with MicroK8s
+# (images are pushed to its built-in registry at localhost:32000).
 
 VM_NAME="${VM_NAME:-microk8s-vm}"
 
@@ -13,20 +14,35 @@ image_tag() {
   echo "$tag"
 }
 
-# Pods always pull from localhost:32000 (MicroK8s' built-in registry, trusted by the node). From the developer machine
-# the same registry is reached through the VM's address (macOS/Windows) or localhost (Linux, CI).
-push_image() {
-  local local_image="$1" remote_path="$2"
+cluster_kind() {
+  case "$(kubectl config current-context 2>/dev/null)" in
+    docker-desktop) echo docker-desktop ;;
+    *) echo microk8s ;;
+  esac
+}
+
+# Prints the image reference the cluster should use, after making the image available to it.
+publish_image() {
+  local image="$1"
+  if [[ "$(cluster_kind)" == docker-desktop ]]; then
+    # Docker Desktop's Kubernetes runs on the same engine that built the image: nothing to push.
+    echo "$image"
+    return
+  fi
+
+  # MicroK8s: pods pull from localhost:32000 (the node's own registry). From this machine that registry is
+  # reached through the VM address (Multipass on macOS/Windows) or localhost (Linux, CI).
   if multipass info "$VM_NAME" >/dev/null 2>&1; then
     local vm_ip archive
     vm_ip="$(multipass info "$VM_NAME" --format csv | awk -F, 'NR==2 {print $3}')"
     archive="$(mktemp -d)/image.tar"
-    docker save "$local_image" -o "$archive"
+    docker save "$image" -o "$archive"
     # Plain-HTTP registry inside the local VM; crane pushes without changing Docker Desktop's settings.
-    crane push --insecure "$archive" "$vm_ip:32000/$remote_path" >/dev/null
+    crane push --insecure "$archive" "$vm_ip:32000/$image" >/dev/null 2>&1
     rm -rf "$(dirname "$archive")"
   else
-    docker tag "$local_image" "localhost:32000/$remote_path"
-    docker push -q "localhost:32000/$remote_path" >/dev/null
+    docker tag "$image" "localhost:32000/$image"
+    docker push -q "localhost:32000/$image" >/dev/null
   fi
+  echo "localhost:32000/$image"
 }

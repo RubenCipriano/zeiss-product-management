@@ -4,15 +4,15 @@
 #
 #   load-tests/run.sh smoke | load | stress | spike | stock-consistency | rate-limit
 #   RATE=300 load-tests/run.sh load
+#   PEAK=2000 load-tests/run.sh stress
 #
-# For stress and spike runs the gateway's per-IP limit is raised for the duration of the test (all k6 traffic
-# comes from one pod IP, unlike real users), then restored.
+# Stress and spike runs measure capacity, not throttling: the gateway's per-IP limit (all k6 traffic comes from one
+# pod IP) and the API's per-user limits (k6 simulates only 10 users) are raised for the duration of the test and
+# restored afterwards. The rate-limit scenario verifies the limits themselves.
 set -euo pipefail
 
 SCENARIO="${1:?usage: run.sh <scenario>}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
-export KUBECONFIG="${KUBECONFIG:-$ROOT/.kube/microk8s}"
 NAMESPACE=product-management
 JOB="k6-$SCENARIO"
 K6_IMAGE="${K6_IMAGE:-grafana/k6:2.3.0}"
@@ -24,16 +24,22 @@ if [[ "$SCENARIO" == "stress" || "$SCENARIO" == "spike" ]]; then relax_limits=tr
 
 restore() {
   if $relax_limits; then
-    echo "==> Restoring gateway rate limit"
+    echo "==> Restoring rate limits"
     kubectl -n "$NAMESPACE" set env deployment/gateway GATEWAY_RATE_LIMIT_RPS=200 GATEWAY_RATE_LIMIT_BURST=400 >/dev/null
+    kubectl -n "$NAMESPACE" set env deployment/api RateLimiting__RequestsPerSecond- RateLimiting__RequestBurst- \
+      RateLimiting__WritesPerSecond- RateLimiting__WriteBurst- >/dev/null
   fi
 }
 trap restore EXIT
 
 if $relax_limits; then
-  echo "==> Raising the gateway's per-IP limit for this run"
-  kubectl -n "$NAMESPACE" set env deployment/gateway GATEWAY_RATE_LIMIT_RPS=10000 GATEWAY_RATE_LIMIT_BURST=10000 >/dev/null
-  kubectl -n "$NAMESPACE" rollout status deployment/gateway --timeout=120s >/dev/null
+  echo "==> Raising gateway and API rate limits for this run"
+  kubectl -n "$NAMESPACE" set env deployment/gateway GATEWAY_RATE_LIMIT_RPS=100000 GATEWAY_RATE_LIMIT_BURST=100000 >/dev/null
+  # Container env overrides the ConfigMap values (envFrom) for these keys.
+  kubectl -n "$NAMESPACE" set env deployment/api RateLimiting__RequestsPerSecond=100000 RateLimiting__RequestBurst=100000 \
+    RateLimiting__WritesPerSecond=100000 RateLimiting__WriteBurst=100000 >/dev/null
+  kubectl -n "$NAMESPACE" rollout status deployment/gateway --timeout=180s >/dev/null
+  kubectl -n "$NAMESPACE" rollout status deployment/api --timeout=300s >/dev/null
 fi
 
 echo "==> Uploading scripts"
@@ -65,8 +71,9 @@ spec:
           image: $K6_IMAGE
           args: ["run", "--quiet", "/scripts/$SCENARIO.js"]
           env:
-            - { name: BASE_URL, value: "http://gateway.product-management.svc.cluster.local" }
+            - { name: BASE_URL, value: "http://gateway.product-management.svc.cluster.local:8080" }
             - { name: RATE, value: "${RATE:-150}" }
+            - { name: PEAK, value: "${PEAK:-800}" }
           resources:
             requests: { cpu: 500m, memory: 256Mi }
             limits: { cpu: "2", memory: 1Gi }

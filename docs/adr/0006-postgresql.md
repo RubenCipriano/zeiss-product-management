@@ -10,7 +10,7 @@ tested against the real engine.
 
 ## Decision
 
-PostgreSQL 18 via the Npgsql EF Core provider, run in Docker (`docker compose`) and in tests (Testcontainers).
+PostgreSQL 18 via the Npgsql EF Core provider, run in Kubernetes (StatefulSet with a persistent volume) and in tests (Testcontainers).
 
 It gives this design what it needs:
 
@@ -25,7 +25,7 @@ database tools feel native.
 
 ## Consequences
 
-* Tests use the real database, not EF Core InMemory or SQLite. Those would fake exactly the behaviour under test
-  (sequences, locking, `xmin`, `ILIKE`). Integration tests therefore need Docker.
+* Tests use the real database (and, since ADR 0008, real Redis), not EF Core InMemory or SQLite. Those would fake
+  exactly the behaviour under test (sequences, locking, `xmin`, `ILIKE`). Integration tests therefore need Docker.
 * Moving to SQL Server would mean: a `rowversion` column instead of `xmin`, `LIKE` with a case-insensitive collation
   instead of `ILIKE`, and `NEXT VALUE FOR` in the id generator. Each of these is confined to Infrastructure.
