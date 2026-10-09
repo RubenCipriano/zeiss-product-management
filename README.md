@@ -154,8 +154,9 @@ cd frontend && npm ci && npm start    # http://localhost:4200; /api proxied to :
 ## Tests
 
 ```bash
-cd backend && dotnet test --solution ProductManagement.sln     # 232 tests (Docker must be running)
-cd frontend && npm run test:ci                                   # 92 tests
+cd backend && dotnet test --solution ProductManagement.sln     # 236 tests (Docker must be running)
+cd frontend && npm run test:ci                                   # 93 tests
+scripts/check-requirements.py                                    # the assessment PDF, checked against the running system
 load-tests/run.sh smoke                                          # against the running cluster
 ```
 
@@ -163,10 +164,10 @@ load-tests/run.sh smoke                                          # against the r
 | ------------------------------------- | ----: | -------------- |
 | `Domain.UnitTests`                    | 32 | Invariants (six-digit ids, price precision, stock range); a failed update leaves no partial changes; the stock rule at its edges, including deltas that would overflow naive arithmetic. |
 | `Application.UnitTests`               | 59 | Use-case orchestration: validation first, no id consumed by invalid requests, version checks, conflicts mapped to 409/412, stock errors carry the available quantity; validators at their boundaries. |
-| `Api.IntegrationTests`                | 119 | Real HTTP against **real PostgreSQL and Redis** (Testcontainers). Every endpoint and the problem-details contract. **Concurrency:** 60 parallel orders on 25 units → exactly 25 succeed; no lost updates; two API instances never produce a duplicate id. **Ledger:** every kind of change recorded, ledger sum = stock under concurrency. **Idempotency:** 20 simultaneous copies over two replicas run once; a retry on the other replica is replayed; a retry after Redis lost the claim is still not applied twice (database guard), for stock changes and creates; reused or invalid keys refused; no Redis → refused rather than risk a duplicate. **Cache:** hits, invalidation visible across replicas, lists kept across stock changes yet showing current stock, 404s not cached, works with Redis down. **Security:** token endpoint (valid, invalid, missing, throttled, failed attempts adding up across two replicas); 30-case role × operation matrix; missing, expired, foreign and forged tokens; anonymous probes. **Rate limiting:** per user, stricter for writes, `Retry-After`. |
+| `Api.IntegrationTests`                | 123 | Real HTTP against **real PostgreSQL and Redis** (Testcontainers). Every endpoint and the problem-details contract. **Concurrency:** 60 parallel orders on 25 units → exactly 25 succeed; no lost updates; two API instances never produce a duplicate id. **Ledger:** every kind of change recorded, ledger sum = stock under concurrency. **Idempotency:** 20 simultaneous copies over two replicas run once; a retry on the other replica is replayed; a retry after Redis lost the claim is still not applied twice (database guard), for stock changes and creates; reused or invalid keys refused; no Redis → refused rather than risk a duplicate. **Cache:** hits, invalidation visible across replicas, lists kept across stock changes yet showing current stock, 404s not cached, works with Redis down. **Security:** token endpoint (valid, invalid, missing, throttled, failed attempts adding up across two replicas); 30-case role × operation matrix; missing, expired, foreign and forged tokens, `alg: none`, HS256 signed with the public key; the published JWKS has no private part and matches the tokens' `kid`; anonymous probes. **Rate limiting:** per user, shared by two replicas, stricter for writes, `Retry-After`. |
 | `Api.AcceptanceTests` (BDD, Reqnroll) | 10 | Gherkin scenarios from the user's point of view (`Features/*.feature`). |
 | `Mcp.UnitTests`                       | 12 | MCP tools → API contract, token caching (fake clock, concurrent callers), API errors surfaced to the assistant. |
-| Frontend (Vitest)                     | 92 | API client contract (URLs, `If-Match`, `Idempotency-Key`, cache bypass after own changes), **browser cache** (fresh hit without a request, stale-while-revalidate, bypass, cleared after writes, LRU eviction), store (next-page prefetch, page change vs background refresh), pipes, progress bar, stock history dialog, a retried stock change reuses its key, login opened without `returnUrl`, error normalisation, store (no duplicate requests, no flicker, background refresh paused in hidden tabs), auth (login against the token endpoint, session restore and expiry, role → permission mapping, guard, interceptor never leaks the token to other origins), login page (safe `returnUrl`, 401/429 messages), dialogs (validation, server field errors, 412 conflict + reload), role-specific UI, paginator, toasts. |
+| Frontend (Vitest)                     | 93 | API client contract (URLs, `If-Match`, `Idempotency-Key`, cache bypass after own changes), **browser cache** (fresh hit without a request, stale-while-revalidate, bypass, cleared after writes, LRU eviction), store (next-page prefetch, page change vs background refresh), pipes, progress bar, stock history dialog, a retried stock change reuses its key, login opened without `returnUrl`, error normalisation, store (no duplicate requests, no flicker, background refresh paused in hidden tabs), auth (login against the token endpoint, session restore and expiry, role → permission mapping, guard, interceptor never leaks the token to other origins), login page (safe `returnUrl`, 401/429 messages), dialogs (validation, server field errors, 412 conflict + reload), role-specific UI, paginator, toasts. |
 | Load (k6, in cluster)                 | 8 scenarios | smoke, load (SLO thresholds), stress, spike, **stock consistency across replicas**, rate limiting, **teams** (ten consumers on 850,000 products, 30 % duplicate retries, then ledger = applied changes; `PEAK=` turns it into a capacity staircase), **browse** (read capacity with a hot set). See the [results](docs/load-test-results.md). |
 
 CI (`.github/workflows/ci.yml`) runs:
@@ -179,20 +180,24 @@ CI (`.github/workflows/ci.yml`) runs:
 
 ## Requirements checklist
 
+Every row below is also **checked against the running system** by `scripts/check-requirements.py` (14 checks
+through the gateway: the 9 endpoints, add and decrement by any quantity, partial search, stock range, 40 concurrent
+creates over the replicas → 40 unique 6-digit ids, validation, stock in every list).
+
 | Requirement (assessment PDF)                                | Where / how |
 | ----------------------------------------------------------- | ----------- |
 | CRUD endpoints                                              | `ProductsController`: `GET/POST /api/products`, `GET/PUT/DELETE /api/products/{id}` |
 | `POST /api/products/{id}/decrement-stock/{quantity}` → OK    | One atomic conditional UPDATE; 200 + updated product ([ADR 0003](docs/adr/0003-atomic-stock-updates.md)) |
-| `POST /api/products/{id}/add-to-stock/{quantity}` → OK       | Same mechanism, upper bound enforced |
+| `POST /api/products/{id}/add-to-stock/{quantity}` → OK       | Same mechanism, upper bound enforced. Any quantity: in the UI the + / − buttons move 1, 5, 10, 25 or 100 units per click, and *Adjust stock* takes any amount |
 | `GET /api/products/search?name=` (partial match)            | Case-insensitive `ILIKE`, wildcards escaped, trigram index |
 | `GET /api/products/stock-level?min=&max=`                   | Inclusive range, either bound optional |
-| Unique 6-digit id, no duplicates across instances           | PostgreSQL sequence `100000–999999 NO CYCLE` ([ADR 0002](docs/adr/0002-product-id-generation.md)); tested with two API hosts, and with four replicas under load |
+| Unique 6-digit id, no duplicates across instances           | PostgreSQL sequence `100000–999999 NO CYCLE` ([ADR 0002](docs/adr/0002-product-id-generation.md)); tested with two API hosts, with 40 concurrent creates over the replicas (`check-requirements.py`) and on 850,000 products (`verify-data.sh`) |
 | Validation of create/update                                 | FluentValidation + domain guards + database check constraints ([ADR 0005](docs/adr/0005-error-handling.md)) |
 | Stock included in every list response                       | `stockQuantity` on every `ProductResponse` |
 | EF Core code-first migrations                               | `backend/ProductManagement.Infrastructure/Persistence/Migrations` (generated by `dotnet ef`), applied by a Kubernetes Job |
 | Database seeding                                            | Categories via `HasData`; sample products via `UseSeeding`/`UseAsyncSeeding` |
 | Angular frontend; reflects changes made through the API     | `frontend/`: every endpoint used; refetch after changes + background refresh ([ADR 0007](docs/adr/0007-frontend-state.md)) |
-| Unit tests for various scenarios                            | 99 backend unit tests + 70 frontend tests (plus 113 integration and acceptance tests) |
+| Unit tests for various scenarios                            | 103 backend unit tests + 93 frontend tests (plus 133 integration and acceptance tests) |
 | *Optional:* BDD tests                                       | `ProductManagement.Api.AcceptanceTests` (Reqnroll / Gherkin) |
 | Documentation for running locally                           | This README and [`docs/`](docs) |
 
@@ -263,6 +268,7 @@ full schema is in Swagger.
 | Method | Path                                              | Permission       | Success                        | Errors             |
 | ------ | ------------------------------------------------- | ---------------- | ------------------------------ | ------------------ |
 | POST   | `/auth/token` `{ clientId, clientSecret }`        | anonymous        | 200 `{ accessToken, tokenType, expiresIn }` | 400, 401, 429 |
+| GET    | `/.well-known/jwks.json` (outside `/api`; the gateway reads it in-cluster) | anonymous | 200 JWKS: the public key that verifies tokens | – |
 | GET    | `/products?page=&pageSize=`                       | `products:read`  | 200 `PagedResponse<Product>`   | 400                |
 | GET    | `/products/{id}`                                  | `products:read`  | 200 `Product` + `ETag`         | 404                |
 | GET    | `/products/search?name=&page=&pageSize=`          | `products:read`  | 200 `PagedResponse<Product>`   | 400                |
@@ -329,11 +335,11 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
 
 | Concern        | How |
 | -------------- | --- |
-| Authentication | The API issues HS256 JWTs to registered consumers at `POST /api/auth/token` and verifies signature, algorithm, issuer, audience and lifetime on every request. Consumer secrets are stored only as PBKDF2 hashes; unknown client and wrong secret are indistinguishable; one signing key (Kubernetes Secret) for all replicas ([ADR 0009](docs/adr/0009-authentication-authorization.md)). |
+| Authentication | The API issues **ES256** JWTs to registered consumers at `POST /api/auth/token` and publishes only its public key (`/.well-known/jwks.json`). **The gateway verifies every token** (signature, `ES256` only, issuer, audience, expiry) and rejects bad ones at the edge; the API verifies again. Consumer secrets are stored only as PBKDF2 hashes; unknown client and wrong secret are indistinguishable ([ADR 0009](docs/adr/0009-authentication-authorization.md), [ADR 0020](docs/adr/0020-edge-token-verification.md)). |
 | Authorization  | Permission policies (`products:read`, `stock:write`, `products:write`) mapped from roles (`viewer`, `stock-clerk`, `manager`) in one place. Secure by default: an endpoint without a policy still requires a signed-in user. The UI hides what a role can't do, and the API enforces it. |
 | Machine access | The MCP server is its own consumer (`mcp-server`) with only the `stock-clerk` role. |
 | Brute force    | Failed sign-ins are counted per IP in Redis across all replicas: 10 per minute, then `429` even with the right secret. |
-| Rate limiting  | The gateway limits per IP and the API per user (stricter for writes); both answer `429` + `Retry-After` ([ADR 0010](docs/adr/0010-rate-limiting.md)). |
+| Rate limiting  | The gateway limits per IP; the API per user (stricter for writes), with token buckets **shared by all replicas in Redis**, so the limit does not grow as the autoscaler adds pods. Both answer `429` + `Retry-After` ([ADR 0010](docs/adr/0010-rate-limiting.md)). |
 | Network        | NetworkPolicies: the database and cache are reachable only from the API (and the migration Job); the API and web app only from the gateway. |
 | Containers     | Non-root, read-only root filesystem where possible, no capabilities, no privilege escalation, `RuntimeDefault` seccomp, resource limits. |
 | Edge           | Strict **Content-Security-Policy** (`'self'` only, no inline scripts, no framing), `Permissions-Policy`, COOP/CORP, `nosniff`, `X-Frame-Options: DENY`, referrer policy, 1 MB body limit, `server_tokens off` ([ADR 0019](docs/adr/0019-content-security-policy.md)). |
@@ -360,9 +366,10 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
   ([ADR 0018](docs/adr/0018-autoscaling-and-scale-testing.md)).
 * **Browser cache:** pages already seen open instantly (stale-while-revalidate), the next page is prefetched, and
   paging quickly cancels obsolete requests ([ADR 0007](docs/adr/0007-frontend-state.md)).
-* **Capacity on one 8-CPU laptop** (everything, load generator included, on the same machine): **5,200–5,500
-  req/s** of catalogue reads and **2,500 req/s** of the worst-case mix (25 % writes, uniform reads over 850,000
-  products), both with **0 errors**; at that point the machine's CPU is the limit, not a tier.
+* **Capacity on one 8-CPU laptop** (everything, load generator included, on the same machine): **18,177 req/s** of
+  catalogue reads (p95 47 ms, 96 % answered by the gateway, which verifies tokens itself and shares its microcache per
+  role) and **~2,400 req/s** of the worst-case mix (25 % writes, uniform reads over 850,000 products), both with
+  **0 errors** ([ADR 0020](docs/adr/0020-edge-token-verification.md)).
 * **Load test highlights** ([full results](docs/load-test-results.md)):
   * **ten teams on 850,000 products**, 30 % of stock changes sent twice: **281 req/s, 0 errors, p95 13 ms**;
     17,213 changes applied → exactly 17,213 ledger rows (no duplicate among 6,916 copies); the API scaled 3 → 7.
@@ -510,7 +517,7 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 | -------- | ----- |
 | Backend  | .NET 10, ASP.NET Core, EF Core 10, Npgsql, FluentValidation, StackExchange.Redis, JWT bearer, rate limiting, OpenAPI + Swagger UI |
 | Data     | PostgreSQL 18, Redis 8 |
-| Security | JWT (HS256) issued by the API, PBKDF2 secret hashes, ASP.NET Core authorization and rate limiting |
+| Security | JWT (ES256) issued by the API and verified at the gateway (nginx njs), PBKDF2 secret hashes, ASP.NET Core authorization and rate limiting |
 | Frontend | Angular 22 (standalone, zoneless, signals), Tailwind CSS 4, Angular CDK, Vitest, ESLint, Prettier |
 | AI       | Model Context Protocol C# SDK |
 | Testing  | xUnit v3 (Microsoft Testing Platform), Shouldly, NSubstitute, Testcontainers, Respawn, Reqnroll, k6 |

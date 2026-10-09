@@ -34,6 +34,23 @@ public sealed class RateLimitingTests(ApiFixture fixture) : ApiTestBase(fixture)
     }
 
     [Fact]
+    public async Task AUsersLimit_IsSharedByAllReplicas()
+    {
+        // Two replicas, one user, a burst of 5: alternating between replicas must not double the allowance.
+        using var replicaA = Environment.CreateClientForInstanceWith(LowLimits);
+        using var replicaB = Environment.CreateClientForInstanceWith(LowLimits);
+
+        var statuses = new List<HttpStatusCode>();
+        for (var i = 0; i < 10; i++)
+        {
+            using var response = await (i % 2 == 0 ? replicaA : replicaB).ListAsync();
+            statuses.Add(response.StatusCode);
+        }
+
+        statuses.Count(status => status == HttpStatusCode.OK).ShouldBeInRange(5, 6);
+    }
+
+    [Fact]
     public async Task Writes_HaveAStricterLimitThanReads()
     {
         using var client = Environment.CreateClientForInstanceWith(LowLimits);

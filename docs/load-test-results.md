@@ -129,6 +129,33 @@ the next levers are:
 * **more nodes**: the API and gateway already scale horizontally (HPA); the database would get its own machine and
   read replicas for lists and searches.
 
+## Five digits: tokens verified at the gateway, microcache shared per role
+
+[ADR 0020](adr/0020-edge-token-verification.md): the API signs with ES256 and publishes its public key; the gateway
+verifies every token (nginx njs) and keys the microcache by role instead of by token. Same laptop, same 850,000
+products, load generator included.
+
+| Run | Requests | Sustained req/s | Errors | p50 | p95 | Answered by nginx |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| browse, constant 10,000/s (before: per-token cache) | 351,680 | 5,470 | 0.01 % | 99.9 ms | 793 ms | 48 % |
+| browse, constant 10,000/s | 596,352 | **9,712** | **0 %** | **0.3 ms** | **7 ms** | 94 % |
+| browse, constant 20,000/s | 1,078,380 | **17,359** | **0 %** | 10.7 ms | 79 ms | 92 % |
+| browse, constant 20,000/s, shared rate limits (final) | 1,139,168 | **18,177** | **0 %** | 1.2 ms | 47 ms | 96 % |
+| teams, 300/s (correctness, final) | 92,859 | 281 | 0.01 % | 1.3 ms | **4.3 ms** | – |
+| teams, staircase to 6,000 (worst case, final) | 781,268 | 2,365 average | **0 %** | 40 ms | 2.6 s at the top step | – |
+
+* The worst case (25 % writes, reads spread uniformly over 850,000 products) does not benefit from a shared cache:
+  it stays at ~2,400 requests/s, bound by the machine's CPU, with 135,076 changes → exactly 135,076 ledger rows.
+  Reaching five digits for *that* mix needs more machines (the API and gateway already scale out; the database would
+  get its own node and read replicas).
+* At 20,000/s the load generator is the limit: k6 used 2.3 CPUs and could not start ~5–10 % of the requests; the
+  node still had CPU to spare.
+* **teams, final:** 16,880 changes applied → exactly 16,880 ledger rows; 4,991 replays and 1,753 simultaneous copies,
+  none applied twice; all invariants 0. p95 4.3 ms (13.4 ms before, with the per-token cache).
+* **Found on the way: per-replica rate limits grow with the autoscaler.** With 6 API replicas the `rate-limit`
+  scenario (one user at 300 requests/s) saw no 429 at all: 6 × 50/s. The per-user buckets are now in Redis, shared by
+  all replicas: the same run gives ~72/s accepted (50/s + the burst) and 4,566 × 429 ([ADR 0010](adr/0010-rate-limiting.md)).
+
 ## MicroK8s runs (capacity investigation)
 
 The runs below were made earlier on MicroK8s (Multipass VM, 4 vCPU / 6 GB), before the API issued its own tokens.

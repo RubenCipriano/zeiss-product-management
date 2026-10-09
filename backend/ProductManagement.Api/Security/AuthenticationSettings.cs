@@ -8,9 +8,6 @@ public sealed class AuthenticationSettings
 {
     public const string SectionName = "Authentication";
 
-    /// <summary>Minimum signing key size for HMAC-SHA256 (RFC 7518 §3.2).</summary>
-    public const int MinimumSigningKeyBytes = 32;
-
     /// <summary><c>iss</c> claim written into, and required from, every token.</summary>
     public string Issuer { get; init; } = "product-management-api";
 
@@ -18,8 +15,9 @@ public sealed class AuthenticationSettings
     public string Audience { get; init; } = "product-management-api";
 
     /// <summary>
-    /// Base64-encoded HMAC-SHA256 key (at least 32 bytes). Shared by all replicas through a Kubernetes Secret, so any
-    /// replica can verify a token another one issued.
+    /// PEM-encoded ECDSA P-256 private key (ES256). Shared by all replicas through a Kubernetes Secret, so any replica
+    /// can verify a token another one issued. Only the API holds it; verifiers use the public key (JWKS).
+    /// Generate one with <c>openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256</c>.
     /// </summary>
     public string SigningKey { get; init; } = string.Empty;
 

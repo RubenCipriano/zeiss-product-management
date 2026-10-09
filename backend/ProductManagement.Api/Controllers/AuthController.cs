@@ -21,8 +21,23 @@ namespace ProductManagement.Api.Controllers;
 /// </remarks>
 [Route("api/auth")]
 [AllowAnonymous]
-public sealed class AuthController(AccessTokenIssuer issuer, IFailedAttemptThrottle failedAttempts) : ApiControllerBase
+public sealed class AuthController(
+    AccessTokenIssuer issuer,
+    TokenSigningKey signingKey,
+    IFailedAttemptThrottle failedAttempts) : ApiControllerBase
 {
+    /// <summary>
+    /// The public key(s) that verify access tokens (JWKS, RFC 7517). Lets the gateway and other services check tokens
+    /// without being able to issue them. Public by nature: it contains no secret.
+    /// </summary>
+    [HttpGet("/.well-known/jwks.json")]
+    [ProducesResponseType<JsonWebKeySet>(StatusCodes.Status200OK)]
+    public ActionResult<JsonWebKeySet> GetSigningKeys()
+    {
+        Response.Headers.CacheControl = "public, max-age=300";
+        return new JsonWebKeySet([signingKey.PublicJwk]);
+    }
+
     /// <summary>Issues an access token for a registered API consumer (client credentials).</summary>
     [HttpPost("token")]
     [EnableRateLimiting(RateLimitPolicies.Authentication)]

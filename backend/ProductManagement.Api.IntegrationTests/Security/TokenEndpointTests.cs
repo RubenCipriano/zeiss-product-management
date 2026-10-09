@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text.Json;
+using Microsoft.IdentityModel.JsonWebTokens;
 using ProductManagement.Api.IntegrationTests.Infrastructure;
 using ProductManagement.Api.Security;
 using ProductManagement.Testing;
@@ -26,6 +28,27 @@ public sealed class TokenEndpointTests(ApiFixture fixture) : ApiTestBase(fixture
         anonymous.Http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
         using var products = await anonymous.ListAsync();
         products.StatusCode.ShouldBe(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task TheSigningKeysArePublished_PublicPartOnly_AndMatchTheTokens()
+    {
+        using var anonymous = Environment.CreateClient(role: null);
+        using var tokenResponse = await RequestTokenAsync(anonymous, TestTokens.ConsumerId, TestTokens.ConsumerSecret);
+        var token = new JsonWebToken((await ReadAsync<TokenResponse>(tokenResponse)).AccessToken);
+
+        using var response = await anonymous.Http.GetAsync(
+            new Uri("/.well-known/jwks.json", UriKind.Relative), CancellationToken);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var jwks = JsonDocument.Parse(await response.Content.ReadAsStringAsync(CancellationToken));
+        var key = jwks.RootElement.GetProperty("keys").EnumerateArray().Single();
+        key.GetProperty("kty").GetString().ShouldBe("EC");
+        key.GetProperty("crv").GetString().ShouldBe("P-256");
+        key.GetProperty("alg").GetString().ShouldBe("ES256");
+        key.TryGetProperty("d", out _).ShouldBeFalse(); // never the private key
+        token.Alg.ShouldBe("ES256");
+        token.Kid.ShouldBe(key.GetProperty("kid").GetString());
     }
 
     [Fact]

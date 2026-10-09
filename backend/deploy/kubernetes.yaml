@@ -44,9 +44,11 @@ metadata:
   namespace: product-management
 type: Opaque
 stringData:
-  # HMAC-SHA256 key used to sign and verify access tokens. Every replica uses the same key, so a token issued by one
-  # replica is accepted by all. Generate with: openssl rand -base64 32
-  Authentication__SigningKey: (development key removed from history)
+  # ES256 private key (P-256, PEM) that signs access tokens. Every replica uses the same key, so a token issued by one
+  # replica is accepted by all. Only the API holds it: the gateway and other verifiers get the public key from
+  # /.well-known/jwks.json. New key: dotnet ProductManagement.Api.dll generate-signing-key
+  Authentication__SigningKey: |
+    (development key removed from history)
 ---
 apiVersion: v1
 kind: Secret

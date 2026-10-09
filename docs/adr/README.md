@@ -23,3 +23,4 @@ Short records of the decisions that shape this codebase: the context, the decisi
 | 0017 | [Idempotency keys for create and stock changes](0017-idempotency-keys.md)   |
 | 0018 | [Autoscaling and testing at scale](0018-autoscaling-and-scale-testing.md)   |
 | 0019 | [Content Security Policy and no third-party assets](0019-content-security-policy.md) |
+| 0020 | [Token verification at the gateway and a microcache shared per role](0020-edge-token-verification.md) |

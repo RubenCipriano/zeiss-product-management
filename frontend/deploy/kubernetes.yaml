@@ -164,6 +164,14 @@ spec:
               value: "200"
             - name: GATEWAY_RATE_LIMIT_BURST
               value: "400"
+            # Access-token verification at the edge: the API's public keys (JWKS) and the claims it must find.
+            # The contract with the backend, like the api-headless Service name.
+            - name: JWKS_URL
+              value: http://api.product-management.svc.cluster.local:8080/.well-known/jwks.json
+            - name: JWT_ISSUER
+              value: product-management-api
+            - name: JWT_AUDIENCE
+              value: product-management-api
           ports:
             - name: http
               containerPort: 8080

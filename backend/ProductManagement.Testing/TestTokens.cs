@@ -6,7 +6,7 @@ using Microsoft.IdentityModel.Tokens;
 namespace ProductManagement.Testing;
 
 /// <summary>
-/// Builds access tokens exactly like the API's token endpoint (issuer, audience, <c>sub</c>, <c>roles</c>, HMAC-SHA256),
+/// Builds access tokens exactly like the API's token endpoint (issuer, audience, <c>sub</c>, <c>roles</c>, ES256),
 /// signed with the key the test host is configured with. Lets tests pick any role, expiry or key without going
 /// through the token endpoint (which has its own tests).
 /// </summary>
@@ -27,16 +27,17 @@ public static class TestTokens
 
     public const string ConsumerSecret = "test-consumer-secret";
 
-    public static byte[] SigningKeyBytes { get; } = RandomNumberGenerator.GetBytes(32);
+    /// <summary>The test host's signing key (a fresh P-256 key per test run).</summary>
+    public static ECDsa SigningKey { get; } = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
-    public static string SigningKeyBase64 => Convert.ToBase64String(SigningKeyBytes);
+    public static string SigningKeyPem { get; } = SigningKey.ExportPkcs8PrivateKeyPem();
 
     public static string Create(
         string role,
         string? subject = null,
         string audience = Audience,
         DateTime? expires = null,
-        byte[]? signingKey = null)
+        ECDsa? signingKey = null)
     {
         var now = DateTime.UtcNow;
         return new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor
@@ -48,8 +49,8 @@ public static class TestTokens
             Expires = expires ?? now.AddMinutes(30),
             Subject = new ClaimsIdentity([new Claim("sub", subject ?? $"{role}-user"), new Claim("roles", role)]),
             SigningCredentials = new SigningCredentials(
-                new SymmetricSecurityKey(signingKey ?? SigningKeyBytes),
-                SecurityAlgorithms.HmacSha256),
+                new ECDsaSecurityKey(signingKey ?? SigningKey),
+                SecurityAlgorithms.EcdsaSha256),
         });
     }
 }

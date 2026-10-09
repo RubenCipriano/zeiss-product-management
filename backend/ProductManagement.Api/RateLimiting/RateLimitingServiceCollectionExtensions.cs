@@ -3,15 +3,17 @@ using System.Security.Claims;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using ProductManagement.Application.Common.Security;
 
 namespace ProductManagement.Api.RateLimiting;
 
 internal static class RateLimitingServiceCollectionExtensions
 {
     /// <remarks>
-    /// Limits are kept in memory, per replica, so the effective cluster-wide limit is roughly
-    /// <c>limit × replicas</c>. Coarse, cluster-wide protection is the gateway's job (nginx <c>limit_req</c>); this
-    /// layer protects each replica and keeps one user from starving others. See docs/adr/0010.
+    /// Per-user limits are shared by all replicas (token buckets in Redis), so a user's allowance does not grow as the
+    /// autoscaler adds pods. If Redis is unavailable each replica falls back to its own in-memory bucket. The token
+    /// endpoint's per-IP limit stays per replica; its cluster-wide guard is the failed-attempt throttle.
+    /// See docs/adr/0010.
     /// </remarks>
     public static IServiceCollection AddApiRateLimiting(this IServiceCollection services, IConfiguration configuration)
     {
@@ -26,11 +28,11 @@ internal static class RateLimitingServiceCollectionExtensions
             options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
                 !settings.Enabled || context.Request.Path.StartsWithSegments("/health")
                     ? RateLimitPartition.GetNoLimiter("unlimited")
-                    : TokenBucket(PartitionKey(context), settings.RequestsPerSecond, settings.RequestBurst));
+                    : TokenBucket(context, "requests", settings.RequestsPerSecond, settings.RequestBurst));
 
             options.AddPolicy(RateLimitPolicies.Writes, context =>
                 settings.Enabled
-                    ? TokenBucket(PartitionKey(context), settings.WritesPerSecond, settings.WriteBurst)
+                    ? TokenBucket(context, "writes", settings.WritesPerSecond, settings.WriteBurst)
                     : RateLimitPartition.GetNoLimiter("unlimited"));
 
             options.AddPolicy(RateLimitPolicies.Authentication, context =>
@@ -54,15 +56,12 @@ internal static class RateLimitingServiceCollectionExtensions
             ? $"user:{subject}"
             : $"ip:{context.Connection.RemoteIpAddress}";
 
-    private static RateLimitPartition<string> TokenBucket(string key, int perSecond, int burst) =>
-        RateLimitPartition.GetTokenBucketLimiter(key, _ => new TokenBucketRateLimiterOptions
-        {
-            TokenLimit = burst,
-            TokensPerPeriod = perSecond,
-            ReplenishmentPeriod = TimeSpan.FromSeconds(1),
-            QueueLimit = 0,
-            AutoReplenishment = true,
-        });
+    private static RateLimitPartition<string> TokenBucket(HttpContext context, string kind, int perSecond, int burst)
+    {
+        var bucket = $"{kind}:{PartitionKey(context)}";
+        var store = context.RequestServices.GetRequiredService<IDistributedRateLimiter>();
+        return RateLimitPartition.Get(bucket, key => new SharedTokenBucketRateLimiter(store, key, perSecond, burst));
+    }
 
     private static async ValueTask WriteRejectionAsync(OnRejectedContext context, CancellationToken cancellationToken)
     {

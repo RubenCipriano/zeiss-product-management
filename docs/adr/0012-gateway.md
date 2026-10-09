@@ -24,9 +24,10 @@ A dedicated **nginx gateway** (`frontend/gateway`) is the only entry point:
   old pods.
 * **Microcache for API reads.** Identical GETs within 1 s are answered by nginx without reaching the API. This
   flattens bursts such as many dashboards polling or a refresh storm. The design keeps it safe and correct:
-  * the cache key includes the `Authorization` header, so a response is only ever reused for the same token: a
-    caller never sees data cached for another, and requests without a token are never served from cache (their 401
-    is not cached);
+  * the gateway verifies the access token first and keys the cache by the caller's **roles**, so a response is only
+    reused for callers allowed to see it, and requests without a valid token never reach the cache (they get 401 at
+    the edge). Until [0020](0020-edge-token-verification.md) the key was the `Authorization` header (one copy per
+    token);
   * only `200` responses to `GET`/`HEAD` are stored;
   * a request with `Cache-Control: no-cache` bypasses the cache. The web app sends it right after the user's own
     changes and on manual refresh, so users always see the result of what they just did;

@@ -14,6 +14,15 @@ if (args is ["hash-secret", var secretToHash])
     return;
 }
 
+// `dotnet ProductManagement.Api.dll generate-signing-key`: prints a new ES256 (P-256) private key for
+// Authentication:SigningKey, in PEM.
+if (args is ["generate-signing-key"])
+{
+    using var key = System.Security.Cryptography.ECDsa.Create(System.Security.Cryptography.ECCurve.NamedCurves.nistP256);
+    Console.WriteLine(key.ExportPkcs8PrivateKeyPem());
+    return;
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Registered API consumers can also come from a file, e.g. mounted from a Kubernetes Secret (see deploy/).

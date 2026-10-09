@@ -10,16 +10,16 @@ public sealed record IssuedToken(string AccessToken, int ExpiresInSeconds);
 /// <summary>
 /// Checks a consumer's credentials and issues a signed JWT carrying its roles. Singleton.
 /// </summary>
-public sealed class AccessTokenIssuer(IOptions<AuthenticationSettings> options, TimeProvider timeProvider)
+public sealed class AccessTokenIssuer(
+    IOptions<AuthenticationSettings> options,
+    TokenSigningKey signingKey,
+    TimeProvider timeProvider)
 {
     // Verified against when the client id is unknown, so "unknown consumer" and "wrong secret" take the same time
     // and an attacker cannot discover which client ids exist.
     private static readonly string DummyHash = SecretHasher.Hash(Guid.NewGuid().ToString());
 
     private readonly AuthenticationSettings _settings = options.Value;
-    private readonly SigningCredentials _signingCredentials = new(
-        new SymmetricSecurityKey(Convert.FromBase64String(options.Value.SigningKey)),
-        SecurityAlgorithms.HmacSha256);
     private readonly JsonWebTokenHandler _handler = new();
 
     public IssuedToken? Authenticate(string clientId, string clientSecret)
@@ -47,7 +47,7 @@ public sealed class AccessTokenIssuer(IOptions<AuthenticationSettings> options, 
             IssuedAt = now,
             NotBefore = now,
             Expires = now.Add(_settings.AccessTokenLifetime),
-            SigningCredentials = _signingCredentials,
+            SigningCredentials = signingKey.SigningCredentials, // ES256, with the key id (kid) in the header
         });
 
         return new IssuedToken(token, (int)_settings.AccessTokenLifetime.TotalSeconds);

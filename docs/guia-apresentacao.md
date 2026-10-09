@@ -161,11 +161,15 @@ réplica. Com 850 mil produtos, a verificação `count(*) - count(DISTINCT id)` 
     `consumers.json`), e do secret guarda-se **apenas o hash PBKDF2** (com salt, 100 mil iterações). O comando
     `dotnet ProductManagement.Api.dll hash-secret <secret>` gera o hash.
   * **Endpoint de token:** `POST /api/auth/token` com `{ clientId, clientSecret }` devolve um **JWT assinado com
-    HMAC-SHA256**, com `iss`, `aud`, `sub`, `roles`, `exp` e `jti`, válido 1 hora.
-  * **Verificação:** em cada pedido a API verifica a assinatura, o algoritmo (só HS256), o issuer, a audience e a
-    validade.
-  * **Várias réplicas:** a mesma chave (num Secret) é partilhada por todas, por isso um token emitido por uma é aceite
-    por todas.
+    ES256** (ECDSA P-256), com `kid` no header e `iss`, `aud`, `sub`, `roles`, `exp` e `jti`, válido 1 hora.
+  * **Chave pública publicada** em `/.well-known/jwks.json` (JWKS): quem verifica tokens (o gateway, outros
+    serviços) recebe só a chave pública e **não consegue emitir tokens**. Com HMAC precisariam do segredo.
+  * **Verificação a dois níveis:** o **gateway** verifica cada token (assinatura, só ES256, issuer, audience,
+    validade) e recusa os maus com 401 sem chegar à API; a **API** volta a verificar tudo (defesa em profundidade).
+    Testado: `alg: none` e HS256 assinado com a chave pública (o ataque clássico de "algorithm confusion") são
+    recusados.
+  * **Várias réplicas:** a mesma chave privada (num Secret) é partilhada por todas, por isso um token emitido por uma
+    é aceite por todas. `dotnet ProductManagement.Api.dll generate-signing-key` gera uma nova.
   * **Porque não Keycloak?** Para uma API e meia dúzia de clientes conhecidos, um IdP é mais uma peça a operar sem
     resolver nenhum problema. Se um dia houver SSO ou muitos sistemas, troca-se o emissor; a verificação na API
     mantém-se.
@@ -385,6 +389,30 @@ seguintes são (1) o gateway validar o token (ES256: a API assina, o gateway ver
 microcache ser partilhada por role e não por token, e (2) mais nós: API e gateway já escalam sozinhos (HPA), a BD
 iria para uma máquina própria com réplicas de leitura.
 
+### 9.6 Cinco dígitos: token verificado no gateway (ES256)
+
+* **Antes:** a microcache do nginx era por token (o gateway não sabia distinguir um token verdadeiro de um falso),
+  por isso cada utilizador tinha a sua cópia de cada página: 48–65% de acertos e ~5 500 pedidos/s no máximo.
+* **Agora:** a API assina com **ES256** e publica a chave pública; o gateway verifica o token em **njs** (JavaScript
+  dentro do nginx, WebCrypto) e guarda os tokens já verificados em memória partilhada (a assinatura só se verifica
+  uma vez por token). A chave da cache passa a ser **método + URL + roles**.
+* **Medido (mesma máquina de 8 CPUs, k6 incluído):** **9 712 pedidos/s** a 10 000 pedidos (p95 7 ms) e
+  **17 359 pedidos/s** a 20 000 (p95 79 ms), 0 erros, 92–94% respondidos pelo nginx. O limite passou a ser o próprio
+  k6.
+* **Efeito secundário encontrado e corrigido:** com o HPA a 6 réplicas, o limite por utilizador (50/s **por
+  réplica**) passou a valer 300/s. Agora os token buckets estão no **Redis**, partilhados por todas as réplicas
+  (script Lua atómico, relógio do Redis): 300 pedidos/s de um utilizador → ~72/s aceites (50/s + burst), seja qual
+  for o número de réplicas. Se o Redis cair, cada réplica volta ao limite local.
+
+### 9.7 "Incrementar mais do que um" e a validação contra o PDF
+
+* O PDF pede `add-to-stock/{quantity}` e `decrement-stock/{quantity}`: a API sempre aceitou qualquer quantidade, e o
+  diálogo *Adjust stock* também. O que faltava era na tabela: os botões + / − só mexiam 1. Agora há um seletor
+  **±1 · ±5 · ±10 · ±25 · ±100** no cabeçalho "Stock" (e o − fica desativado se não houver stock suficiente).
+* **`scripts/check-requirements.py`** valida o PDF contra o sistema a correr, requisito a requisito (14 verificações:
+  os 9 endpoints, somar 25 e tirar 7, recusar ficar negativo, pesquisa parcial, intervalo de stock, 40 criações em
+  simultâneo pelas réplicas → 40 IDs únicos de 6 dígitos, validação, stock em todas as listas). **14/14.**
+
 ### 9.5 Frontend: rapidez e segurança
 
 * **Paginar depressa:** barra de progresso fina, linhas atuais esbatidas (só depois de 150 ms, para não piscar) e
@@ -443,9 +471,15 @@ interessa, e está provado com testes concorrentes e com o teste de carga.
 
 **"Porque não usaste um Identity Provider (Keycloak, Entra ID)?"**
 Para uma API e poucos clientes conhecidos, um IdP é mais uma peça a operar, proteger e explicar, sem resolver nenhum
-problema que este sistema tenha. A API emite JWT assinados com HMAC, com uma chave partilhada pelas réplicas e os
-secrets guardados só em hash. Se um dia for preciso SSO ou outros serviços a verificar tokens, troco para um IdP ou
-para RS256 + JWKS, e a verificação na API mantém-se.
+problema que este sistema tenha. A API emite JWT assinados com ES256 e publica a chave pública (JWKS); os secrets
+ficam só em hash. Se um dia for preciso SSO, troca-se o emissor por um IdP; quem verifica (API e gateway) já usa
+JWKS, por isso quase nada muda.
+
+**"Porque é que o gateway verifica o token se a API também verifica?"**
+Duas razões. (1) Tokens falsos ou expirados morrem na borda, sem custo para a API. (2) Sobretudo: a microcache do
+nginx passa a poder ser **partilhada por role** em vez de por token, porque o gateway sabe que o role é genuíno.
+Resultado medido: de ~5 500 para **17 359 pedidos/s** de leitura na mesma máquina, com 92–94% respondidos pelo nginx.
+A API continua a verificar tudo: o gateway é otimização e filtro, não a autoridade.
 
 **"Como evitas força bruta no login?"**
 Com um limite por réplica e, sobretudo, um contador de falhas por IP no Redis, partilhado por todas as réplicas:

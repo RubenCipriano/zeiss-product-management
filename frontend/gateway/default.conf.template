@@ -32,6 +32,12 @@ limit_req_log_level warn;
 # Edge cache for the web app's hashed static files.
 proxy_cache_path /tmp/static-cache levels=1:2 keys_zone=static_cache:10m max_size=256m inactive=7d use_temp_path=off;
 
+# Access-token verification at the edge (jwt.js): the API's public keys, and tokens already verified.
+js_path "/etc/nginx/njs/";
+js_import jwt from jwt.js;
+js_shared_dict_zone zone=jwt_keys:64k timeout=1h;
+js_shared_dict_zone zone=jwt_tokens:8m timeout=10m evict;
+
 # Microcache for API reads (see location /api/).
 proxy_cache_path /tmp/api-cache levels=1:2 keys_zone=api_cache:10m max_size=64m inactive=1m use_temp_path=off;
 
@@ -76,23 +82,35 @@ server {
     return 200 "ok\n";
   }
 
+  # Token endpoint: anonymous by definition (this is where tokens come from); never cached.
+  location = /api/auth/token {
+    limit_req zone=api_per_ip burst=${GATEWAY_RATE_LIMIT_BURST} nodelay;
+    proxy_pass http://api;
+  }
+
+  # Every other /api request needs a valid access token, checked here first (jwt.js) and again by the API.
   # ^~ : this prefix match wins over the static-file regex below.
   location ^~ /api/ {
     limit_req zone=api_per_ip burst=${GATEWAY_RATE_LIMIT_BURST} nodelay;
+    auth_request /_jwt;
+    auth_request_set $jwt_scope $sent_http_x_jwt_scope;
+    auth_request_set $jwt_error $sent_http_x_jwt_error;
+    error_page 401 = @unauthorized;
     proxy_pass http://api;
 
     # Microcache for reads: identical GETs within 1 s are answered by nginx without reaching the API. This flattens
-    # bursts (many dashboards polling, a refresh storm) while staying at most 1 s behind.
-    #  - The key includes the Authorization header: a cached response is only ever reused for the same token, so a
-    #    caller can never receive data it was not authorised to read, and requests without a token are never served
-    #    from cache (they get 401 from the API, which is not cached).
+    # bursts (many users on the same pages, dashboards polling, a refresh storm) while staying at most 1 s behind.
+    #  - The key includes the caller's roles, taken from a token whose signature the gateway has just verified. Every
+    #    read endpoint returns the same data to everyone allowed to call it, so users with the same roles share one
+    #    entry. A response that depends on who asks must say so with `Cache-Control: private` (nginx never stores
+    #    those), or the key must include the subject.
     #  - Only 200 responses to GET/HEAD are stored; writes always reach the API.
     #  - A request with `Cache-Control: no-cache` (or `Pragma`) skips the cache: the web app sends it right after
     #    its own changes, so a user always sees the result of what they just did.
     #  - proxy_cache_lock collapses concurrent misses for the same key into a single upstream request.
     proxy_cache api_cache;
     proxy_cache_methods GET HEAD;
-    proxy_cache_key "$request_method|$request_uri|$http_authorization";
+    proxy_cache_key "$request_method|$request_uri|$jwt_scope";
     proxy_cache_valid 200 1s;
     proxy_cache_lock on;
     proxy_cache_lock_timeout 2s;
@@ -100,6 +118,22 @@ server {
     proxy_cache_bypass $http_cache_control $http_pragma;
     add_header X-Cache-Status $upstream_cache_status always;
     include /etc/nginx/snippets/security-headers.conf;
+  }
+
+  location = /_jwt {
+    internal;
+    set $jwks_url "${JWKS_URL}";
+    set $jwt_issuer "${JWT_ISSUER}";
+    set $jwt_audience "${JWT_AUDIENCE}";
+    js_content jwt.verify;
+  }
+
+  # Rejected at the edge: the same problem-details shape the API uses.
+  location @unauthorized {
+    default_type application/problem+json;
+    add_header WWW-Authenticate 'Bearer error="invalid_token"' always;
+    include /etc/nginx/snippets/security-headers.conf;
+    return 401 '{"type":"https://tools.ietf.org/html/rfc9110#section-15.5.2","title":"Unauthorized","status":401,"detail":"A valid access token is required ($jwt_error).","errorCode":"invalid_token"}';
   }
 
   # Hashed bundles: served from the edge cache after the first request.

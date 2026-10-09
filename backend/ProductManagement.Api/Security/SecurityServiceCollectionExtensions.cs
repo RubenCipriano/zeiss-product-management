@@ -10,9 +10,11 @@ internal static class SecurityServiceCollectionExtensions
     {
         var section = configuration.GetSection(AuthenticationSettings.SectionName);
         var settings = section.Get<AuthenticationSettings>() ?? new AuthenticationSettings();
-        var signingKey = Validate(settings);
+        ValidateConsumers(settings);
+        var signingKey = TokenSigningKey.FromPem(settings.SigningKey);
 
         services.Configure<AuthenticationSettings>(section);
+        services.AddSingleton(signingKey);
         services.AddSingleton<AccessTokenIssuer>();
         services.AddHttpContextAccessor();
         services.AddScoped<ICurrentActor, HttpContextCurrentActor>();
@@ -32,8 +34,10 @@ internal static class SecurityServiceCollectionExtensions
                     ValidateLifetime = true,
                     RequireExpirationTime = true,
                     ValidateIssuerSigningKey = true,
-                    IssuerSigningKey = new SymmetricSecurityKey(signingKey),
-                    ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
+                    IssuerSigningKey = signingKey.VerificationKey,
+                    // ES256 only: a token claiming another algorithm (HS256 "signed" with the public key, none, RS256)
+                    // is rejected before any signature check (algorithm confusion).
+                    ValidAlgorithms = [SecurityAlgorithms.EcdsaSha256],
                     ClockSkew = TimeSpan.FromSeconds(30),
                     NameClaimType = "sub",
                     RoleClaimType = "roles",
@@ -45,25 +49,9 @@ internal static class SecurityServiceCollectionExtensions
         return services;
     }
 
-    /// <summary>Fail fast: an API that starts with a weak key or broken consumers is worse than one that does not start.</summary>
-    private static byte[] Validate(AuthenticationSettings settings)
+    /// <summary>Fail fast: an API that starts with a bad key or broken consumers is worse than one that does not start.</summary>
+    private static void ValidateConsumers(AuthenticationSettings settings)
     {
-        byte[] key;
-        try
-        {
-            key = Convert.FromBase64String(settings.SigningKey);
-        }
-        catch (FormatException)
-        {
-            throw new InvalidOperationException($"'{AuthenticationSettings.SectionName}:SigningKey' must be Base64.");
-        }
-
-        if (key.Length < AuthenticationSettings.MinimumSigningKeyBytes)
-        {
-            throw new InvalidOperationException(
-                $"'{AuthenticationSettings.SectionName}:SigningKey' must be at least {AuthenticationSettings.MinimumSigningKeyBytes} bytes.");
-        }
-
         foreach (var consumer in settings.Consumers)
         {
             if (string.IsNullOrWhiteSpace(consumer.ClientId) || !SecretHasher.IsWellFormed(consumer.SecretHash))
@@ -72,7 +60,5 @@ internal static class SecurityServiceCollectionExtensions
                     $"API consumer '{consumer.ClientId}' needs a client id and a secret hash (use the hash-secret command).");
             }
         }
-
-        return key;
     }
 }

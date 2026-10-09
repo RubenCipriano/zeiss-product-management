@@ -29,7 +29,9 @@ export function setup() {
 }
 
 export default function ({ token }) {
-  const response = api.list(token, 1, 5);
+  // Different pages, like a client scraping the catalogue. (Repeating one URL would be answered by the gateway's
+  // shared microcache without reaching the API: cheap enough not to count against the user's allowance.)
+  const response = api.list(token, 1 + Math.floor(Math.random() * 5000), 5);
   if (response.status === 429) {
     throttled.add(1);
   }

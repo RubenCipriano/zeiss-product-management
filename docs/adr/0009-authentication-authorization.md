@@ -19,16 +19,20 @@ component to run, secure and explain, without solving a problem this system has.
   `dotnet ProductManagement.Api.dll hash-secret <secret>` command generates them.
 * **Token endpoint:** `POST /api/auth/token` with `{ "clientId", "clientSecret" }` returns
   `{ "accessToken", "tokenType": "Bearer", "expiresIn" }`.
-  * The token is a JWT signed with **HMAC-SHA256**. Claims: `iss`, `aud`, `sub` (client id), `roles`, `jti`, `iat`,
+  * The token is a JWT signed with **ES256** (ECDSA P-256; HMAC-SHA256 until the edge verification of
+    [0020](0020-edge-token-verification.md)). The header carries the key id (`kid`). Claims: `iss`, `aud`, `sub` (client id), `roles`, `jti`, `iat`,
     `nbf`, `exp`. Default lifetime: 1 hour.
   * Unknown client and wrong secret give the **same** 401 (`invalid_client`) and take the same time: the secret is
     verified against a dummy hash when the client does not exist, and compared in constant time. An attacker cannot
     find out which client ids exist.
-* **Verification on every request** (`AddJwtBearer`): signature, `HS256` only (no algorithm confusion), issuer,
+* **Public key published** at `GET /.well-known/jwks.json` (JWKS, public members only), so the gateway and any other
+  service can verify tokens without being able to issue them.
+* **Verification on every request** (`AddJwtBearer`): signature, `ES256` only (tested: `alg: none` and HS256 signed
+  with the public key are rejected), issuer,
   audience, lifetime (30 s clock skew). Claims keep their issued names (`MapInboundClaims = false`).
-* **One key for all replicas.** The signing key (≥ 256 bits, Base64) comes from a Kubernetes Secret, so a token
-  issued by one replica is accepted by every replica. The API refuses to start with a missing or short key, or with
-  a consumer that has no valid hash.
+* **One key for all replicas.** The private key (PEM, P-256) comes from a Kubernetes Secret, so a token issued by
+  one replica is accepted by every replica. The API refuses to start with a missing or invalid key, or with a
+  consumer that has no valid hash. `dotnet ProductManagement.Api.dll generate-signing-key` creates one.
 * **Permissions, not roles, on endpoints.** Policies are named after permissions and mapped from roles in one place
   (`Policies.Configure`):
 
@@ -62,9 +66,9 @@ component to run, secure and explain, without solving a problem this system has.
 * Tokens cannot be revoked before they expire (stateless JWTs). Mitigations: a short lifetime, and rotating the
   signing key invalidates all tokens at once. If per-token revocation is needed, keep a deny-list of `jti` values in
   Redis.
-* HMAC means every verifier holds the signing key. That is fine while only the API verifies tokens. If other
-  services must verify them without being able to issue them, switch to RS256/ES256 and publish the public key
-  (JWKS). This is a configuration change in the issuer and the bearer options.
+* ES256 means only the API can sign; verifiers hold the public key only. Rotation: publish the new key in the JWKS
+  next to the old one, switch signing, remove the old key after the longest token lifetime (verifiers pick keys by
+  `kid`; the gateway re-downloads the JWKS when it sees an unknown one).
 * Consumers are managed in configuration (a deploy to add one). At larger scale, consumers move to a database table
   with an admin endpoint, or the system adopts a real identity provider, and the API's verification side stays the
   same.

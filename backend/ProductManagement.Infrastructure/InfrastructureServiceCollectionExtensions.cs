@@ -85,6 +85,7 @@ public static class InfrastructureServiceCollectionExtensions
             services.AddSingleton<ICatalogCache, NullCatalogCache>();
             services.AddSingleton<IFailedAttemptThrottle, InMemoryFailedAttemptThrottle>();
             services.AddSingleton<IIdempotencyStore, InMemoryIdempotencyStore>();
+            services.AddSingleton<IDistributedRateLimiter, LocalOnlyRateLimiter>();
             return;
         }
 
@@ -100,6 +101,7 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<ICatalogCache, RedisCatalogCache>();
         services.AddSingleton<IFailedAttemptThrottle, RedisFailedAttemptThrottle>();
         services.AddSingleton<IIdempotencyStore, RedisIdempotencyStore>();
+        services.AddSingleton<IDistributedRateLimiter, RedisDistributedRateLimiter>();
         healthChecks.AddCheck<RedisHealthCheck>("cache", tags: [ReadinessHealthCheckTag]);
     }
 }

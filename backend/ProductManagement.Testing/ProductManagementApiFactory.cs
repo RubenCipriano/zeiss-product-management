@@ -24,7 +24,7 @@ public sealed class ProductManagementApiFactory(
         builder.UseSetting("Database:ApplyMigrationsOnStartup", applyMigrations.ToString());
         builder.UseSetting("Database:SeedSampleData", bool.FalseString);
         builder.UseSetting("OpenApi:Enabled", bool.TrueString);
-        builder.UseSetting("Authentication:SigningKey", TestTokens.SigningKeyBase64);
+        builder.UseSetting("Authentication:SigningKey", TestTokens.SigningKeyPem);
         builder.UseSetting("Authentication:Consumers:0:ClientId", TestTokens.ConsumerId);
         builder.UseSetting("Authentication:Consumers:0:SecretHash", ConsumerSecretHash.Value);
         builder.UseSetting("Authentication:Consumers:0:Roles:0", TestTokens.Viewer);

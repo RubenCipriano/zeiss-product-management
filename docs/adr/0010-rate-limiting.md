@@ -32,3 +32,16 @@ everyone. Limits must also hold with several replicas behind a load balancer.
   quotas are needed.
 * Load tests that originate from a single pod IP would hit the gateway's per-IP limit. `load-tests/run.sh` raises it
   for stress and spike runs only and restores it afterwards, and simulates 10 distinct users for the per-user limits.
+
+## Update: limits shared by all replicas
+
+With the autoscaler, per-replica in-memory limits became `limit × replicas`: with 6 API pods a user could send
+300 requests/s against a limit of 50, and the `rate-limit` load test stopped seeing any 429. The per-user token
+buckets now live in **Redis** (`RedisDistributedRateLimiter`: one Lua script reads, refills and takes atomically,
+with Redis's clock), plugged into ASP.NET Core's rate limiter as a custom `RateLimiter`, so policies, `429` and
+`Retry-After` are unchanged. If Redis is unavailable each replica falls back to its own in-memory bucket (looser,
+never failing requests). Tested with two API instances sharing Redis (`AUsersLimit_IsSharedByAllReplicas`); in the
+cluster, with 6 replicas, 300 requests/s from one user → ~72/s accepted (50/s + the burst), 4,566 × 429.
+
+Cost: one Redis round trip per request that reaches the API. Reads answered by the gateway's microcache never reach
+it, and do not count against the user: they cost almost nothing.

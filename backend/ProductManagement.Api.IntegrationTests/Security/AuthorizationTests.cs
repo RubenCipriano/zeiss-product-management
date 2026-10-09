@@ -1,6 +1,9 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Claims;
 using System.Security.Cryptography;
+using Microsoft.IdentityModel.JsonWebTokens;
+using Microsoft.IdentityModel.Tokens;
 using ProductManagement.Api.IntegrationTests.Infrastructure;
 using ProductManagement.Testing;
 using static ProductManagement.Testing.ProductApiClient;
@@ -100,8 +103,42 @@ public sealed class AuthorizationTests(ApiFixture fixture) : ApiTestBase(fixture
     [Fact]
     public async Task TokensSignedWithAnUnknownKey_AreRejected()
     {
-        var forgedKey = RandomNumberGenerator.GetBytes(32);
+        using var forgedKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         using var client = ClientWithToken(TestTokens.Create(TestTokens.Manager, signingKey: forgedKey));
+
+        using var response = await client.ListAsync();
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task AlgorithmConfusion_HS256SignedWithThePublicKey_IsRejected()
+    {
+        // The classic attack on asymmetric JWTs: take the (public) verification key and use it as an HMAC secret.
+        var publicKey = TestTokens.SigningKey.ExportSubjectPublicKeyInfo();
+        var token = new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor
+        {
+            Issuer = TestTokens.Issuer,
+            Audience = TestTokens.Audience,
+            Expires = DateTime.UtcNow.AddMinutes(5),
+            Subject = new ClaimsIdentity([new Claim("sub", "attacker"), new Claim("roles", TestTokens.Manager)]),
+            SigningCredentials = new SigningCredentials(new SymmetricSecurityKey(publicKey), SecurityAlgorithms.HmacSha256),
+        });
+        using var client = ClientWithToken(token);
+
+        using var response = await client.ListAsync();
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task UnsignedTokens_AreRejected()
+    {
+        var exp = DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds();
+        var header = Base64UrlEncoder.Encode("""{"alg":"none","typ":"JWT"}""");
+        var payload = Base64UrlEncoder.Encode(
+            $$"""{"sub":"attacker","roles":"manager","iss":"{{TestTokens.Issuer}}","aud":"{{TestTokens.Audience}}","exp":{{exp}}}""");
+        using var client = ClientWithToken($"{header}.{payload}.");
 
         using var response = await client.ListAsync();
 
