@@ -12,6 +12,8 @@ public sealed class ProductManagementDbContext(DbContextOptions<ProductManagemen
 
     public DbSet<Category> Categories => Set<Category>();
 
+    public DbSet<StockMovement> StockMovements => Set<StockMovement>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         // Trigram index support for fast case-insensitive partial name search (ILIKE '%term%').

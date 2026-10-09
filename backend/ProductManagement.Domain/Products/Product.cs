@@ -84,18 +84,28 @@ public sealed class Product
     /// </remarks>
     public static Expression<Func<Product, bool>> CanAdjustStockBy(int delta)
     {
-        // Bounds are computed here, in C#, so the SQL never evaluates "stock + delta" and cannot overflow.
-        var minimumCurrentStock = delta < 0 ? -(long)delta : 0L;
-        var maximumCurrentStock = (long)ProductRules.MaxStockQuantity - Math.Max(delta, 0);
-
-        if (minimumCurrentStock > ProductRules.MaxStockQuantity || maximumCurrentStock < 0)
+        if (StockRangeAllowingAdjustment(delta) is not var (min, max))
         {
             return _ => false;
         }
 
-        var min = (int)minimumCurrentStock;
-        var max = (int)maximumCurrentStock;
         return product => product.StockQuantity >= min && product.StockQuantity <= max;
+    }
+
+    /// <summary>
+    /// The stock range in which adding <paramref name="delta"/> keeps the stock between zero and
+    /// <see cref="ProductRules.MaxStockQuantity"/>, or <c>null</c> when no stock allows it. Used by persistence to put
+    /// the rule into a single atomic SQL statement.
+    /// </summary>
+    public static (int Min, int Max)? StockRangeAllowingAdjustment(int delta)
+    {
+        // Computed here, in C#, so the SQL never evaluates "stock + delta" and cannot overflow.
+        var minimumCurrentStock = delta < 0 ? -(long)delta : 0L;
+        var maximumCurrentStock = (long)ProductRules.MaxStockQuantity - Math.Max(delta, 0);
+
+        return minimumCurrentStock > ProductRules.MaxStockQuantity || maximumCurrentStock < 0
+            ? null
+            : ((int)minimumCurrentStock, (int)maximumCurrentStock);
     }
 
     private void Apply(

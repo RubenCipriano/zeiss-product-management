@@ -18,6 +18,12 @@ public interface IProductQueries
         PageQuery page,
         CancellationToken cancellationToken);
 
+    /// <summary>A product's stock history, newest first; <c>null</c> when the product does not exist.</summary>
+    Task<PagedResponse<StockMovementResponse>?> ListStockMovementsAsync(
+        int productId,
+        PageQuery page,
+        CancellationToken cancellationToken);
+
     Task<PagedResponse<ProductResponse>> ListByStockLevelAsync(
         int? min,
         int? max,

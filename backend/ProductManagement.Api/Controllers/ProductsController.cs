@@ -52,6 +52,17 @@ public sealed class ProductsController(
         return result.IsSuccess ? OkWithEntityTag(result.Value) : Problem(result.Error);
     }
 
+    /// <summary>A product's stock history (every addition, removal and correction), newest first.</summary>
+    [HttpGet("{id:int}/stock-movements")]
+    [ProducesResponseType<PagedResponse<StockMovementResponse>>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ValidationProblemDetails>(StatusCodes.Status400BadRequest, ProblemJsonContentType)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound, ProblemJsonContentType)]
+    public async Task<ActionResult<PagedResponse<StockMovementResponse>>> GetStockMovements(
+        int id,
+        [FromQuery] PageQuery query,
+        CancellationToken cancellationToken) =>
+        ToActionResult(await productQueries.ListStockMovementsAsync(id, query, cancellationToken));
+
     /// <summary>Searches products whose name contains the given text (case-insensitive partial match).</summary>
     [HttpGet("search")]
     [ProducesResponseType<PagedResponse<ProductResponse>>(StatusCodes.Status200OK)]

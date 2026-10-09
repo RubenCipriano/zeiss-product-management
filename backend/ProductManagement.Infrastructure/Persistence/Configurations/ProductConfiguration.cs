@@ -64,5 +64,10 @@ internal sealed class ProductConfiguration : IEntityTypeConfiguration<Product>
             .HasOperators("gin_trgm_ops");
 
         builder.HasIndex(product => product.StockQuantity);
+
+        // B-tree for "all products ordered by name" (the default list): without it, a large catalogue is sorted on
+        // every request. The trigram index above serves only the contains-search.
+        builder.HasIndex(product => new { product.Name, product.Id })
+            .HasDatabaseName("ix_products_name_id");
     }
 }

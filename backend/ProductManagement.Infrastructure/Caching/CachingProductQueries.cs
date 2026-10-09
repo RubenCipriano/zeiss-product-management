@@ -47,6 +47,15 @@ internal sealed class CachingProductQueries(
             Invariant($"products:stock:{min?.ToString(CultureInfo.InvariantCulture) ?? "*"}:{max?.ToString(CultureInfo.InvariantCulture) ?? "*"}:{PageKey(page)}"),
             () => inner.ListByStockLevelAsync(min, max, page, cancellationToken));
 
+    public Task<PagedResponse<StockMovementResponse>?> ListStockMovementsAsync(
+        int productId,
+        PageQuery page,
+        CancellationToken cancellationToken) =>
+        GetOrLoadAsync(
+            Invariant($"product:{productId}:movements:{PageKey(page)}"),
+            _options.ListTtl,
+            () => inner.ListStockMovementsAsync(productId, page, cancellationToken));
+
     private async Task<PagedResponse<ProductResponse>> GetOrLoadRequiredAsync(
         string key,
         Func<Task<PagedResponse<ProductResponse>>> load) =>

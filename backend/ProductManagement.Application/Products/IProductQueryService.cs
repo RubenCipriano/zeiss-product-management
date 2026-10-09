@@ -17,6 +17,11 @@ public interface IProductQueryService
         ProductSearchQuery query,
         CancellationToken cancellationToken);
 
+    Task<Result<PagedResponse<StockMovementResponse>>> ListStockMovementsAsync(
+        int productId,
+        PageQuery query,
+        CancellationToken cancellationToken);
+
     Task<Result<PagedResponse<ProductResponse>>> ListByStockLevelAsync(
         StockLevelQuery query,
         CancellationToken cancellationToken);

@@ -141,6 +141,9 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                     b.HasIndex("StockQuantity")
                         .HasDatabaseName("ix_products_stock_quantity");
 
+                    b.HasIndex("Name", "Id")
+                        .HasDatabaseName("ix_products_name_id");
+
                     b.ToTable("products", null, t =>
                         {
                             t.HasCheckConstraint("ck_products_id_six_digits", "id BETWEEN 100000 AND 999999");
@@ -148,6 +151,56 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("ck_products_price_range", "price BETWEEN 0.01 AND 1000000");
 
                             t.HasCheckConstraint("ck_products_stock_quantity_range", "stock_quantity BETWEEN 0 AND 1000000");
+                        });
+                });
+
+            modelBuilder.Entity("ProductManagement.Domain.Products.StockMovement", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityAlwaysColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("OccurredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("occurred_at");
+
+                    b.Property<string>("PerformedBy")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("performed_by");
+
+                    b.Property<int>("ProductId")
+                        .HasColumnType("integer")
+                        .HasColumnName("product_id");
+
+                    b.Property<int>("QuantityChange")
+                        .HasColumnType("integer")
+                        .HasColumnName("quantity_change");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("reason");
+
+                    b.Property<int>("StockAfter")
+                        .HasColumnType("integer")
+                        .HasColumnName("stock_after");
+
+                    b.HasKey("Id")
+                        .HasName("pk_stock_movements");
+
+                    b.HasIndex("ProductId", "OccurredAt", "Id")
+                        .IsDescending(false, true, true)
+                        .HasDatabaseName("ix_stock_movements_product_id_occurred_at_id");
+
+                    b.ToTable("stock_movements", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_stock_movements_stock_after_non_negative", "stock_after >= 0");
                         });
                 });
 
@@ -161,6 +214,16 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                         .HasConstraintName("fk_products_categories_category_id");
 
                     b.Navigation("Category");
+                });
+
+            modelBuilder.Entity("ProductManagement.Domain.Products.StockMovement", b =>
+                {
+                    b.HasOne("ProductManagement.Domain.Products.Product", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_stock_movements_products_product_id");
                 });
 #pragma warning restore 612, 618
         }

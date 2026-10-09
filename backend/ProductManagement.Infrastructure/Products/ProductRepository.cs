@@ -15,32 +15,46 @@ internal sealed class ProductRepository(ProductManagementDbContext context, ICat
 
     public void Remove(Product product) => context.Products.Remove(product);
 
-    public async Task<bool> TryAdjustStockAsync(
+    public void AddMovement(StockMovement movement) => context.StockMovements.Add(movement);
+
+    public async Task<int?> TryAdjustStockAsync(
         int id,
         int delta,
+        string performedBy,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        // UPDATE products SET stock_quantity = stock_quantity + @delta, updated_at = @now
-        // WHERE id = @id AND stock_quantity >= @min AND stock_quantity <= @max
-        //
-        // PostgreSQL row-locks the product for the statement and re-checks the WHERE clause against the latest
-        // committed row, so concurrent decrements serialize and can never drive stock below zero.
-        var affectedRows = await context.Products
-            .Where(product => product.Id == id)
-            .Where(Product.CanAdjustStockBy(delta))
-            .ExecuteUpdateAsync(
-                setters => setters
-                    .SetProperty(product => product.StockQuantity, product => product.StockQuantity + delta)
-                    .SetProperty(product => product.UpdatedAt, now),
-                cancellationToken);
-
-        if (affectedRows != 1)
+        if (Product.StockRangeAllowingAdjustment(delta) is not var (min, max))
         {
-            return false;
+            return null;
+        }
+
+        var reason = (delta < 0 ? StockMovementReason.StockRemoved : StockMovementReason.StockAdded).ToString();
+
+        // One statement (a data-modifying CTE): the conditional UPDATE and the ledger INSERT succeed or fail together.
+        // PostgreSQL row-locks the product and re-checks the WHERE clause against the latest committed row, so
+        // concurrent decrements serialise and can never drive stock below zero. If the condition fails, `updated` is
+        // empty and nothing is inserted. All values are parameters (interpolation becomes DbParameters).
+        var stockAfter = await context.Database
+            .SqlQuery<int>($"""
+                WITH updated AS (
+                    UPDATE products
+                    SET stock_quantity = stock_quantity + {delta}, updated_at = {now}
+                    WHERE id = {id} AND stock_quantity BETWEEN {min} AND {max}
+                    RETURNING id, stock_quantity
+                )
+                INSERT INTO stock_movements (product_id, quantity_change, stock_after, reason, performed_by, occurred_at)
+                SELECT id, {delta}, stock_quantity, {reason}, {performedBy}, {now} FROM updated
+                RETURNING stock_after AS "Value"
+                """)
+            .ToListAsync(cancellationToken);
+
+        if (stockAfter.Count == 0)
+        {
+            return null;
         }
 
         await cache.InvalidateAsync();
-        return true;
+        return stockAfter[0];
     }
 }

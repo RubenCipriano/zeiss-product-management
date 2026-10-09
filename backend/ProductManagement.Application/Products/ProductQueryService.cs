@@ -45,6 +45,21 @@ internal sealed class ProductQueryService(
         return await products.SearchByNameAsync(query.Name!.Trim(), query, cancellationToken);
     }
 
+    public async Task<Result<PagedResponse<StockMovementResponse>>> ListStockMovementsAsync(
+        int productId,
+        PageQuery query,
+        CancellationToken cancellationToken)
+    {
+        var validation = await pageValidator.ValidateAsync(query, cancellationToken);
+        if (!validation.IsValid)
+        {
+            return validation.ToError();
+        }
+
+        var movements = await products.ListStockMovementsAsync(productId, query, cancellationToken);
+        return movements is null ? ProductErrors.NotFound(productId) : movements;
+    }
+
     public async Task<Result<PagedResponse<ProductResponse>>> ListByStockLevelAsync(
         StockLevelQuery query,
         CancellationToken cancellationToken)

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using ProductManagement.Application.Common.Security;
 
 namespace ProductManagement.Api.Security;
 
@@ -13,6 +14,8 @@ internal static class SecurityServiceCollectionExtensions
 
         services.Configure<AuthenticationSettings>(section);
         services.AddSingleton<AccessTokenIssuer>();
+        services.AddHttpContextAccessor();
+        services.AddScoped<ICurrentActor, HttpContextCurrentActor>();
 
         services
             .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)

@@ -59,6 +59,38 @@ internal sealed class ProductQueries(ProductManagementDbContext context) : IProd
             cancellationToken);
     }
 
+    public async Task<PagedResponse<StockMovementResponse>?> ListStockMovementsAsync(
+        int productId,
+        PageQuery page,
+        CancellationToken cancellationToken)
+    {
+        if (!await context.Products.AnyAsync(product => product.Id == productId, cancellationToken))
+        {
+            return null;
+        }
+
+        var history = context.StockMovements
+            .AsNoTracking()
+            .Where(movement => movement.ProductId == productId);
+
+        var totalCount = await history.CountAsync(cancellationToken);
+        var items = await history
+            .OrderByDescending(movement => movement.OccurredAt)
+            .ThenByDescending(movement => movement.Id)
+            .Skip(page.Skip)
+            .Take(page.PageSize)
+            .Select(movement => new StockMovementResponse(
+                movement.Id,
+                movement.QuantityChange,
+                movement.StockAfter,
+                movement.Reason.ToString(),
+                movement.PerformedBy,
+                movement.OccurredAt))
+            .ToListAsync(cancellationToken);
+
+        return new PagedResponse<StockMovementResponse>(items, page.Page, page.PageSize, totalCount);
+    }
+
     public Task<PagedResponse<ProductResponse>> ListByStockLevelAsync(
         int? min,
         int? max,

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using ProductManagement.Application.Categories.Abstractions;
 using ProductManagement.Application.Common.Persistence;
 using ProductManagement.Application.Common.Results;
+using ProductManagement.Application.Common.Security;
 using ProductManagement.Application.Common.Validation;
 using ProductManagement.Application.Products.Abstractions;
 using ProductManagement.Application.Products.Contracts;
@@ -16,6 +17,7 @@ internal sealed partial class ProductCommandService(
     ICategoryQueries categories,
     IProductIdGenerator idGenerator,
     IUnitOfWork unitOfWork,
+    ICurrentActor actor,
     IValidator<CreateProductRequest> createValidator,
     IValidator<UpdateProductRequest> updateValidator,
     TimeProvider timeProvider,
@@ -48,6 +50,13 @@ internal sealed partial class ProductCommandService(
             timeProvider.GetUtcNow());
 
         products.Add(product);
+        products.AddMovement(StockMovement.Record(
+            product.Id,
+            product.StockQuantity,
+            product.StockQuantity,
+            StockMovementReason.InitialStock,
+            actor.Name,
+            product.CreatedAt));
         await unitOfWork.SaveChangesAsync(cancellationToken);
 
         LogProductCreated(product.Id, product.StockQuantity);
@@ -83,13 +92,27 @@ internal sealed partial class ProductCommandService(
             return ProductErrors.CategoryNotFound(categoryId);
         }
 
+        var stockBefore = product.StockQuantity;
+        var now = timeProvider.GetUtcNow();
         product.Update(
             request.Name!,
             request.Description,
             request.Price!.Value,
             request.StockQuantity!.Value,
             categoryId,
-            timeProvider.GetUtcNow());
+            now);
+
+        // Overwriting the stock is recorded too, in the same transaction, so the ledger always adds up.
+        if (product.StockQuantity != stockBefore)
+        {
+            products.AddMovement(StockMovement.Record(
+                id,
+                product.StockQuantity - stockBefore,
+                product.StockQuantity,
+                StockMovementReason.Correction,
+                actor.Name,
+                now));
+        }
 
         try
         {
@@ -158,7 +181,13 @@ internal sealed partial class ProductCommandService(
         }
 
         var delta = operation == StockOperation.Remove ? -quantity : quantity;
-        var adjusted = await products.TryAdjustStockAsync(id, delta, timeProvider.GetUtcNow(), cancellationToken);
+        var stockAfter = await products.TryAdjustStockAsync(
+            id,
+            delta,
+            actor.Name,
+            timeProvider.GetUtcNow(),
+            cancellationToken);
+        var adjusted = stockAfter is not null;
 
         // The current state tells us both what to return on success and why it failed otherwise.
         var current = await productQueries.GetByIdAsync(id, cancellationToken);
