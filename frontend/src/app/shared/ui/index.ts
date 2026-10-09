@@ -1,4 +1,5 @@
 export * from './confirm-dialog/confirm-dialog';
+export * from './dialog/app-dialog';
 export * from './icon/icon';
 export * from './paginator/paginator';
 export * from './progress-bar/progress-bar';

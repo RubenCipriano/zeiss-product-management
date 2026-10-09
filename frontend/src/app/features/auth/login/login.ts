@@ -3,7 +3,7 @@ import { FormControl, FormGroup, ReactiveFormsModule, Validators } from '@angula
 import { Router } from '@angular/router';
 import { Auth } from '../../../core/auth/auth';
 import { ApiError } from '../../../core/http/api-error';
-import { Icon } from '../../../shared/ui/icon/icon';
+import { Icon } from '../../../shared/ui';
 
 /** Sign-in with the credentials of a registered API consumer. */
 @Component({

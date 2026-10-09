@@ -41,6 +41,12 @@ describe('ProductsApi', () => {
     expect(request.request.params.get('name')).toBe('lens');
   });
 
+  it('treats an empty name search as the full list', () => {
+    api.query({ filter: { kind: 'name', name: '  ' }, page: 1, pageSize: 20 }).subscribe();
+
+    httpTesting.expectOne((req) => req.url === '/api/products' && !req.params.has('name'));
+  });
+
   it('uses the stock-level endpoint and omits open bounds', () => {
     api.query({ filter: { kind: 'stock', min: 0, max: null }, page: 1, pageSize: 20 }).subscribe();
 

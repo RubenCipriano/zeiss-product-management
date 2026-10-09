@@ -1,0 +1,87 @@
+<section class="card flex flex-wrap items-center gap-3 p-3" aria-label="Filters">
+  <div
+    class="inline-flex rounded-lg bg-slate-100 p-1"
+    role="radiogroup"
+    aria-label="Filter products"
+  >
+    @for (option of options; track option.kind) {
+      <button
+        type="button"
+        role="radio"
+        class="rounded-md px-3 py-1.5 text-sm font-medium transition"
+        [class]="
+          filter().kind === option.kind
+            ? 'bg-white text-slate-900 shadow-sm'
+            : 'text-slate-600 hover:text-slate-900'
+        "
+        [attr.aria-checked]="filter().kind === option.kind"
+        (click)="select(option.kind)"
+      >
+        {{ option.label }}
+      </button>
+    }
+  </div>
+
+  @switch (filter().kind) {
+    @case ('name') {
+      <div class="relative w-full sm:max-w-sm">
+        <app-icon
+          name="search"
+          class="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-slate-400"
+        />
+        <input
+          class="input pr-9 pl-9"
+          [formControl]="name"
+          placeholder="Name contains… e.g. lens"
+          aria-label="Name contains"
+          autocomplete="off"
+        />
+        @if (name.value) {
+          <button
+            type="button"
+            class="btn-icon absolute top-1/2 right-1 size-7 -translate-y-1/2"
+            aria-label="Clear search"
+            (click)="name.setValue('')"
+          >
+            <app-icon name="x" />
+          </button>
+        }
+      </div>
+    }
+    @case ('stock') {
+      <div class="flex flex-wrap items-center gap-2" [formGroup]="stockRange">
+        <input
+          class="input w-28"
+          type="number"
+          min="0"
+          step="1"
+          formControlName="min"
+          placeholder="Min"
+          aria-label="Min stock"
+        />
+        <span class="text-slate-400">–</span>
+        <input
+          class="input w-28"
+          type="number"
+          min="0"
+          step="1"
+          formControlName="max"
+          placeholder="Max"
+          aria-label="Max stock"
+        />
+        <div class="flex flex-wrap gap-1.5" aria-label="Stock presets">
+          <button type="button" class="preset" (click)="setStockRange(0, 0)">Out of stock</button>
+          <button type="button" class="preset" (click)="setStockRange(0, lowStockThreshold)">
+            Low stock (≤ {{ lowStockThreshold }})
+          </button>
+          <button type="button" class="preset" (click)="setStockRange(null, null)">Any</button>
+        </div>
+        @if (stockRange.invalid) {
+          <p class="field-error w-full" role="alert">
+            Use whole numbers from 0, with min not greater than max.
+          </p>
+        }
+      </div>
+    }
+  }
+</section>

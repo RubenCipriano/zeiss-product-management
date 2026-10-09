@@ -1,0 +1,98 @@
+<form
+  class="dialog-panel w-[min(28rem,calc(100vw-2rem))]"
+  [formGroup]="form"
+  (ngSubmit)="submit()"
+  novalidate
+>
+  <header class="flex items-start justify-between gap-4 border-b border-slate-200 px-6 py-4">
+    <div>
+      <h2 [id]="titleId" class="text-base font-semibold text-slate-900">Adjust stock</h2>
+      <p class="mt-0.5 text-sm text-slate-500">{{ product.name }} · #{{ product.id }}</p>
+    </div>
+    <app-stock-status [quantity]="product.stockQuantity" />
+  </header>
+
+  <div class="space-y-5 px-6 py-5">
+    <div
+      class="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1"
+      role="radiogroup"
+      aria-label="Stock operation"
+    >
+      @for (option of operationOptions; track option.value) {
+        <button
+          type="button"
+          role="radio"
+          class="flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition"
+          [class]="
+            operation() === option.value
+              ? 'bg-white text-slate-900 shadow-sm'
+              : 'text-slate-600 hover:text-slate-900'
+          "
+          [attr.aria-checked]="operation() === option.value"
+          (click)="setOperation(option.value)"
+        >
+          <app-icon [name]="option.icon" />
+          {{ option.label }}
+        </button>
+      }
+    </div>
+
+    <div>
+      <label class="label" for="stock-quantity">Quantity</label>
+      <input
+        id="stock-quantity"
+        class="input"
+        type="number"
+        formControlName="quantity"
+        min="1"
+        step="1"
+        [attr.aria-invalid]="!!quantityError()"
+      />
+      @if (quantityError(); as message) {
+        <p class="field-error">{{ message }}</p>
+      }
+    </div>
+
+    @let result = resultingStock();
+    @if (result !== null) {
+      <div
+        class="flex items-center justify-between rounded-lg px-4 py-3 text-sm"
+        [class]="result < 0 ? 'bg-red-50 text-red-700' : 'bg-slate-50 text-slate-600'"
+      >
+        <span>Stock after this change</span>
+        <span class="font-semibold tabular-nums">
+          {{ result }}
+          @if (result < 0) {
+            <span class="font-normal"> (not enough stock)</span>
+          }
+        </span>
+      </div>
+    }
+
+    @if (errorMessage(); as message) {
+      <p
+        class="flex items-start gap-2 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700"
+        role="alert"
+      >
+        <app-icon name="alert" class="mt-0.5" />
+        {{ message }}
+      </p>
+    }
+  </div>
+
+  <footer
+    class="flex justify-end gap-2 border-t border-slate-200 bg-slate-50/60 px-6 py-4 rounded-b-2xl"
+  >
+    <button
+      type="button"
+      class="btn btn-secondary"
+      [disabled]="saving()"
+      (click)="dialogRef.close()"
+    >
+      Cancel
+    </button>
+    <button type="submit" class="btn btn-primary" [disabled]="saving()">
+      {{ saving() ? 'Applying…' : 'Apply' }}
+    </button>
+  </footer>
+</form>

@@ -14,7 +14,7 @@ export const routes: Routes = [
     canActivate: [authGuard],
     // Lazy-loaded: the feature is only downloaded when visited.
     loadComponent: () =>
-      import('./features/products/product-list/product-list').then((m) => m.ProductList),
+      import('./features/products/feature/products-page/products-page').then((m) => m.ProductsPage),
   },
   { path: '**', redirectTo: 'products' },
 ];

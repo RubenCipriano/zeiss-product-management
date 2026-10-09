@@ -56,7 +56,6 @@ const ICONS = {
     ],
   },
   check: { paths: ['m9 12 2 2 4-4'], circles: [[12, 12, 10]] },
-  info: { paths: ['M12 16v-4', 'M12 8h.01'], circles: [[12, 12, 10]] },
   ban: { paths: ['m4.9 4.9 14.2 14.2'], circles: [[12, 12, 10]] },
   trendingDown: { paths: ['M16 17h6v-6', 'm22 17-8.5-8.5-5 5L2 7'] },
   arrowUpDown: { paths: ['m21 16-4 4-4-4', 'M17 20V4', 'm3 8 4-4 4 4', 'M7 4v16'] },

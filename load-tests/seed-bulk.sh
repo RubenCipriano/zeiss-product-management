@@ -18,9 +18,11 @@ psql() {
 echo "==> Seeding $PRODUCTS products and their stock history"
 psql -v products="$PRODUCTS" -f - < "$HERE/data/bulk-seed.sql"
 
-# Cached lists still describe the old catalogue: move the cache generation on, as the API does after a write.
+# Cached entries still describe the old catalogue: move the generations on, as the API does after creating
+# products (data: stock-level lists; listing: the full list and searches, their counts and page ids).
 echo "==> Invalidating the API cache"
 kubectl -n "$NAMESPACE" exec deploy/redis -- redis-cli INCR product-management:catalog:generation >/dev/null
+kubectl -n "$NAMESPACE" exec deploy/redis -- redis-cli INCR product-management:catalog:listing-generation >/dev/null
 
 echo "==> Checking the data invariants"
 "$HERE/verify-data.sh"

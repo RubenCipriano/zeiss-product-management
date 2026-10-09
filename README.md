@@ -90,28 +90,37 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8080/api/products
 
 ### What gets deployed
 
-```
-                                   ┌───────────────────── namespace product-management ──────────────────────┐
- browser ──► gateway (nginx ×2) ──┬─► web (Angular static files ×2)                                         │
-   :8080     rate limit, per-     └─► api (ASP.NET Core, 2–8, HPA) ┬─► PostgreSQL (StatefulSet + volume)    │
-             request LB, caches:      JWT, RBAC, idempotency       └─► Redis (cache, idempotency keys,     │
-             static files + 1 s                                         sign-in throttle)                 │
-             API microcache           db-migrate Job (EF Core migrations, once per deployment)              │
-                                   └──────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    client(["browser, k6, MCP server"]) -->|":8080"| gw
+    subgraph ns["namespace product-management"]
+        gw["<b>gateway</b> nginx ×2–6 (HPA)<br/>rate limit per IP · JWT check<br/>1 s microcache per role · static cache"]
+        web["<b>web</b> ×2<br/>Angular static files"]
+        api["<b>api</b> ASP.NET Core ×2–8 (HPA)<br/>JWT · RBAC · idempotency"]
+        pg[("<b>PostgreSQL</b><br/>StatefulSet + volume")]
+        redis[("<b>Redis</b><br/>cache · idempotency keys<br/>rate limits · sign-in throttle")]
+        job["<b>db-migrate</b> Job<br/>EF Core migrations, once per deployment"]
+    end
+    gw --> web
+    gw -->|"per request, least busy pod"| api
+    api --> pg & redis
+    job --> pg
 ```
 
-Diagrams (topology, read path, stock change, scaling, data model) and **what each component does** (every
-Service, workload, Secret and policy): [docs/architecture.md](docs/architecture.md).
+Full topology and **what each component does** (every Service, workload, Secret and policy):
+[docs/architecture.md](docs/architecture.md). Every flow (sign-in, token check at the gateway, the cache layers,
+stock changes with idempotency, rate limiting, deployment, autoscaling, load tests) as a diagram:
+[docs/flows.md](docs/flows.md).
 
-The API scales on its own (HorizontalPodAutoscaler, 2–8 replicas at 60 % CPU; needs metrics-server:
-`scripts/cluster-addons.sh`). Change its range without touching the frontend:
+The API scales on its own (HorizontalPodAutoscaler, 2–8 replicas at 60 % CPU; the gateway 2–6 at 70 %; needs
+metrics-server: `scripts/cluster-addons.sh`). Change its range without touching the frontend:
 
 ```bash
 kubectl -n product-management patch hpa api -p '{"spec":{"minReplicas":4}}'
 kubectl -n product-management get hpa api -w
 ```
 
-Large dataset for scale testing: `load-tests/seed-bulk.sh` (850,000 products, 5 million stock movements, ~2
+Large dataset for scale testing: `load-tests/seed-bulk.sh` (850,000 products, 5 million stock movements, ~3–6
 minutes), checked by `load-tests/verify-data.sh`.
 
 ---

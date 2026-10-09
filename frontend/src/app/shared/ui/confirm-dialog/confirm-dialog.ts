@@ -15,6 +15,10 @@ export interface ConfirmDialogData {
   templateUrl: './confirm-dialog.html',
 })
 export class ConfirmDialog {
+  /** Id of the title: the dialog is opened with it as its accessible name (AppDialog). */
+  static readonly TITLE_ID = 'confirm-dialog-title';
+  protected readonly titleId = ConfirmDialog.TITLE_ID;
+
   protected readonly data = inject<ConfirmDialogData>(DIALOG_DATA);
   protected readonly dialogRef = inject<DialogRef<boolean>>(DialogRef);
 }

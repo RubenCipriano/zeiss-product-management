@@ -1,0 +1,87 @@
+<div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+  <header class="flex flex-wrap items-end justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-tight text-slate-900">Products</h1>
+      <p class="mt-1 text-sm text-slate-500">
+        Manage the catalogue and stock levels. Changes made elsewhere appear automatically.
+      </p>
+    </div>
+    <div class="flex gap-2">
+      <button
+        type="button"
+        class="btn btn-secondary"
+        (click)="store.reload()"
+        [disabled]="store.isLoading()"
+      >
+        <app-icon name="refresh" [class.animate-spin]="store.isLoading()" />
+        Refresh
+      </button>
+      @if (auth.can('products:write')) {
+        <button type="button" class="btn btn-primary" (click)="actions.create()">
+          <app-icon name="plus" />
+          New product
+        </button>
+      }
+    </div>
+  </header>
+
+  <app-inventory-summary
+    class="mt-6 block"
+    [summary]="store.summary()"
+    (selectFilter)="store.setFilter($event)"
+  />
+
+  <app-product-filters
+    class="mt-6 block"
+    [filter]="store.query().filter"
+    (filterChange)="store.setFilter($event)"
+  />
+
+  <section class="card mt-4 overflow-hidden" aria-label="Products">
+    <app-progress-bar [active]="store.isLoading()" label="Loading products" />
+
+    @if (store.error(); as error) {
+      <div class="flex flex-col items-center gap-3 px-6 py-16 text-center" role="alert">
+        <span class="flex size-12 items-center justify-center rounded-full bg-red-50 text-red-600">
+          <app-icon name="alert" class="size-6" />
+        </span>
+        <p class="text-sm text-slate-700">{{ error.message }}</p>
+        <button type="button" class="btn btn-secondary" (click)="store.reload()">
+          <app-icon name="refresh" />
+          Try again
+        </button>
+      </div>
+    } @else {
+      <!-- While another page or filter loads, the current rows stay (dimmed) so nothing jumps. The dimming starts
+           after 150 ms, so fast answers (most come from a cache) never flash. `relative` makes this the containing
+           block of the table's absolutely positioned screen-reader text, so it is clipped here instead of widening
+           the whole page on phones. -->
+      <div
+        class="relative overflow-x-auto transition-opacity duration-200"
+        [class.opacity-50]="store.isChangingPage()"
+        [class.delay-150]="store.isChangingPage()"
+        [attr.aria-busy]="store.isLoading()"
+      >
+        <app-product-table
+          [products]="store.products()"
+          [loading]="store.isLoading()"
+          [canChangeStock]="auth.can('stock:write')"
+          [canEditProducts]="auth.can('products:write')"
+          [pendingIds]="actions.pendingIds()"
+          (quickChange)="actions.quickChange($event.product, $event.operation, $event.quantity)"
+          (adjustStock)="actions.adjustStock($event)"
+          (showHistory)="actions.showHistory($event)"
+          (edit)="actions.edit($event)"
+          (remove)="actions.delete($event)"
+        />
+      </div>
+
+      <app-paginator
+        [page]="store.query().page"
+        [pageSize]="store.query().pageSize"
+        [totalCount]="store.totalCount()"
+        (pageChange)="onPage($event)"
+      />
+    }
+  </section>
+</div>

@@ -37,6 +37,10 @@ export class ProductsApi {
       case 'all':
         return this.http.get<PagedResponse<Product>>(this.baseUrl, { params, headers, context });
       case 'name':
+        // An empty search is no filter at all.
+        if (!filter.name.trim()) {
+          return this.http.get<PagedResponse<Product>>(this.baseUrl, { params, headers, context });
+        }
         params = params.set('name', filter.name);
         return this.http.get<PagedResponse<Product>>(`${this.baseUrl}/search`, {
           params,

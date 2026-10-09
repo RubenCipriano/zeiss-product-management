@@ -20,12 +20,9 @@
   --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 
   --color-brand-50: #eff6ff;
-  --color-brand-100: #dbeafe;
-  --color-brand-200: #bfdbfe;
   --color-brand-500: #3b82f6;
   --color-brand-600: #2563eb;
   --color-brand-700: #1d4ed8;
-  --color-brand-900: #1e3a8a;
 }
 
 @layer base {
@@ -66,10 +63,6 @@
     @apply bg-red-600 text-white shadow-sm hover:bg-red-700 focus-visible:outline-red-600;
   }
 
-  .btn-ghost {
-    @apply text-slate-600 hover:bg-slate-100 hover:text-slate-900;
-  }
-
   .btn-icon {
     @apply inline-flex size-8 items-center justify-center rounded-md text-slate-500 transition-colors
       hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-brand-600
@@ -87,6 +80,11 @@
 
   .label {
     @apply mb-1.5 block text-sm font-medium text-slate-700;
+  }
+
+  /* Small rounded shortcut button (filter presets). */
+  .preset {
+    @apply rounded-full px-3 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50;
   }
 
   .field-error {
@@ -110,8 +108,9 @@
       hover:bg-slate-100 focus:bg-slate-100 focus:outline-none;
   }
 
+  /* Never taller than the screen: on a phone the content scrolls inside the dialog, so its buttons stay reachable. */
   .dialog-panel {
-    @apply w-[min(36rem,calc(100vw-2rem))] rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200;
+    @apply max-h-[calc(100dvh-2rem)] w-[min(36rem,calc(100vw-2rem))] overflow-y-auto rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200;
   }
 }
 

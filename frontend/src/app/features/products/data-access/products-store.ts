@@ -1,7 +1,5 @@
 import {
   computed,
-  DestroyRef,
-  DOCUMENT,
   effect,
   inject,
   InjectionToken,
@@ -10,10 +8,11 @@ import {
   signal,
   untracked,
 } from '@angular/core';
-import { rxResource, takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { combineLatest, filter, interval, map, Observable, tap } from 'rxjs';
+import { rxResource } from '@angular/core/rxjs-interop';
+import { combineLatest, map, Observable, tap } from 'rxjs';
 import { ApiError } from '../../../core/http/api-error';
 import { emptyPage, PagedResponse } from '../../../shared/models/paged-response';
+import { autoRefresh } from '../../../shared/util';
 import {
   DEFAULT_PAGE_SIZE,
   InventorySummary,
@@ -44,7 +43,6 @@ export const PRODUCTS_AUTO_REFRESH_MS = new InjectionToken<number>('PRODUCTS_AUT
 @Service({ autoProvided: false })
 export class ProductsStore {
   private readonly api = inject(ProductsApi);
-  private readonly document = inject(DOCUMENT);
 
   readonly query = signal<ProductQuery>(
     { filter: { kind: 'all' }, page: 1, pageSize: DEFAULT_PAGE_SIZE },
@@ -129,16 +127,11 @@ export class ProductsStore {
   readonly error = computed(() => toApiError(this.productsResource.error()));
 
   constructor() {
-    const refreshMs = inject(PRODUCTS_AUTO_REFRESH_MS);
-    if (refreshMs > 0) {
-      interval(refreshMs)
-        .pipe(
-          filter(() => this.document.visibilityState === 'visible' && !this.isLoading()),
-          takeUntilDestroyed(inject(DestroyRef)),
-        )
-        // Background refreshes may be served by the gateway's microcache.
-        .subscribe(() => this.reload({ fresh: false }));
-    }
+    // Background refreshes may be served by the caches (browser, gateway): no `fresh`.
+    autoRefresh(() => this.reload({ fresh: false }), {
+      everyMs: inject(PRODUCTS_AUTO_REFRESH_MS),
+      when: () => !this.isLoading(),
+    });
 
     // Prefetch the next page once a page has loaded, so "next" is usually instant (served by the browser cache).
     effect(() => {
