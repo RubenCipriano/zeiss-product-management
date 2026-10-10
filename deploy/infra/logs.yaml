@@ -59,7 +59,7 @@ data:
 
     # Retention is applied by the compactor: every 10 minutes it marks chunks older than retention_period and deletes
     # them 2 hours later. 14 days covers "what happened last week" and keeps the disk bounded; production would keep
-    # 30 days or more in object storage (docs/guide/08-observability.md).
+    # 30 days or more in object storage.
     compactor:
       working_directory: /loki/compactor
       compaction_interval: 10m
@@ -227,9 +227,9 @@ data:
           foldersFromFilesStructure: false
 ---
 # The alert rules, where their notifications go (contact points) and how they are grouped (policies). All computed
-# from logs (LogQL over Loki), evaluated every minute. Each rule names its runbook (runbook_url, a chapter of the
-# project's guide) and is linked to the dashboard panel that shows the same signal. Rules provisioned from a file are
-# read-only in the UI: change them here and run scripts/infra.sh up logs (restarts Grafana).
+# from logs (LogQL over Loki), evaluated every minute. Each rule names its runbook (runbook_url, the alerts table in
+# this repository's README) and is linked to the dashboard panel that shows the same signal. Rules provisioned from a
+# file are read-only in the UI: change them here and run scripts/infra.sh up logs (restarts Grafana).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -286,7 +286,7 @@ data:
             annotations:
               summary: 'More than 2% of requests fail with a 5xx status at the gateway'
               description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} of {{ with $values.B }}{{ humanize .Value }}{{ end }} requests in the last 5 minutes were answered with a 5xx status (threshold 2%). Users are seeing errors.'
-              runbook_url: docs/guide/08-observability.md#gatewayhigherrorrate
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
           - uid: pm-gateway-high-latency
             title: GatewayHighLatency
@@ -326,7 +326,7 @@ data:
             annotations:
               summary: 'API p95 latency at the gateway above 500 ms'
               description: 'The 95th percentile of API request time at the gateway is {{ with $values.A }}{{ humanizeDuration .Value }}{{ end }} (threshold 500 ms), for 10 minutes.'
-              runbook_url: docs/guide/08-observability.md#gatewayhighlatency
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
           - uid: pm-gateway-no-traffic
             title: GatewayNoTraffic
@@ -360,7 +360,7 @@ data:
             annotations:
               summary: 'No request has reached the gateway for 15 minutes'
               description: 'Not a single gateway access-log line in 15 minutes: the gateway is down or unreachable, or its logs no longer reach Loki (Alloy in the cluster). Expected only when nobody uses the system.'
-              runbook_url: docs/guide/08-observability.md#gatewaynotraffic
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
           - uid: pm-rate-limit-surge
             title: RateLimitSurge
@@ -400,7 +400,7 @@ data:
             annotations:
               summary: 'More than 10% of requests are rate limited (429)'
               description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} requests answered 429 Too Many Requests in the last 5 minutes: a client is looping or misbehaving, or the limits are too low for the real traffic.'
-              runbook_url: docs/guide/08-observability.md#ratelimitsurge
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
       - orgId: 1
         name: Browser
@@ -439,7 +439,7 @@ data:
             annotations:
               summary: 'Browsers are reporting errors'
               description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} errors reported by users'' browsers in the last 5 minutes (threshold 10): the web app is failing for someone, most often right after a release.'
-              runbook_url: docs/guide/08-observability.md#browsererrors
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
       - orgId: 1
         name: API
@@ -478,7 +478,7 @@ data:
             annotations:
               summary: 'The API is logging errors'
               description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} API log lines at Error or Critical in the last 5 minutes (threshold 10).'
-              runbook_url: docs/guide/08-observability.md#apierrorlogs
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
           - uid: pm-database-unreachable
             title: DatabaseUnreachable
@@ -512,7 +512,7 @@ data:
             annotations:
               summary: 'The API cannot reach PostgreSQL'
               description: 'The API''s database health check is failing ({{ with $values.A }}{{ humanize .Value }}{{ end }} failures in 5 minutes, threshold 10): replicas are taken out of the load balancer and writes fail. A stopped database writes no logs itself, so this is how its absence shows up.'
-              runbook_url: docs/guide/08-observability.md#databaseunreachable
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
           - uid: pm-redis-unreachable
             title: RedisUnreachable
@@ -546,7 +546,7 @@ data:
             annotations:
               summary: 'The API cannot reach Redis and is falling back'
               description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} API warnings about Redis in 5 minutes: the API reads from PostgreSQL and applies rate limits per replica until Redis answers again.'
-              runbook_url: docs/guide/08-observability.md#redisunreachable
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
       - orgId: 1
         name: Database and cache
@@ -585,7 +585,7 @@ data:
             annotations:
               summary: 'PostgreSQL logged FATAL or PANIC lines'
               description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} FATAL/PANIC lines in the PostgreSQL log in the last 5 minutes: refused or dropped connections, a crash, or a full disk.'
-              runbook_url: docs/guide/08-observability.md#postgresfatal
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
           - uid: pm-postgres-slow-statements
             title: PostgresSlowStatements
@@ -619,7 +619,7 @@ data:
             annotations:
               summary: 'Many PostgreSQL statements slower than 250 ms'
               description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} statements slower than 250 ms in the last 10 minutes (threshold 100).'
-              runbook_url: docs/guide/08-observability.md#postgresslowstatements
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
           - uid: pm-postgres-lock-waits
             title: PostgresLockWaits
@@ -653,7 +653,7 @@ data:
             annotations:
               summary: 'PostgreSQL sessions waited more than 1 s for a lock, or deadlocked'
               description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} lock waits longer than deadlock_timeout (1 s) or deadlocks in the last 10 minutes.'
-              runbook_url: docs/guide/08-observability.md#postgreslockwaits
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
           - uid: pm-redis-log-errors
             title: RedisLogErrors
@@ -687,7 +687,7 @@ data:
             annotations:
               summary: 'Redis logged warnings or errors'
               description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} warning or error lines in the Redis log in the last 10 minutes.'
-              runbook_url: docs/guide/08-observability.md#redislogerrors
+              runbook_url: https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts
             isPaused: false
   contact-points.yaml: |
     # Where alert notifications go. REPLACE IN PRODUCTION: this is a placeholder so the configuration is complete and

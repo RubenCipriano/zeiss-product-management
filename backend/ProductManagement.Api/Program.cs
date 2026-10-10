@@ -23,7 +23,7 @@ var builder = WebApplication.CreateBuilder(args);
 // Registered API consumers can also come from a file, e.g. mounted from a Kubernetes Secret (the deploy repository).
 builder.Configuration.AddJsonFile("config/consumers.json", optional: true, reloadOnChange: false);
 
-// JSON logs with trace ids on stdout; traces and metrics over OTLP when configured.
+// JSON logs with trace ids on stdout, collected from there by the cluster's log agent.
 builder.AddApiLogging();
 
 // Development and the in-memory test host ("Testing") may run without Redis; a deployment with replicas may not.

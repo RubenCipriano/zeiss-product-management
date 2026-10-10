@@ -39,8 +39,7 @@ data:
   postgresql.conf: |
     # Sized for this server: 4 CPUs, 3 GiB of memory (the StatefulSet's limits below). On a dedicated node scale the
     # memory settings with its RAM (shared_buffers ~25 %, effective_cache_size ~65-75 %) and raise the limits.
-    # Measurements behind these values (20M-row ledger, 3.4 GB database): docs/load-test-results.md and
-    # docs/adr/0022-database-at-scale.md.
+    # Sized from measurements on a 3.4 GB database with a 20M-row stock ledger.
 
     listen_addresses = '*'
     # The API's pools are 10 connections per replica, 8 replicas at most (the autoscaler's ceiling): 80, plus the

@@ -1,7 +1,7 @@
 {
   "uid": "product-management",
   "title": "Product Management: production overview",
-  "description": "Traffic, errors, latency and microcache from the gateway's access log; API, PostgreSQL and Redis logs; one request by trace_id. Logs only (Loki). See docs/guide/08-observability.md.",
+  "description": "Traffic, errors, latency and microcache from the gateway's access log; API, PostgreSQL and Redis logs; one request by trace_id. Logs only (Loki). See the deploy repository's README (Dashboards and alerts).",
   "tags": [
     "product-management",
     "logs"
@@ -119,7 +119,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Production overview**, computed from logs only (Loki). Traffic, errors, latency and the microcache come from the gateway's access log (one JSON line per request); errors from the API's JSON logs; the database and cache from their own logs. The **URIs** variable chooses API calls only (default) or every request (web app files included). To follow one request, paste its `trace_id` in the **trace_id** box and open the last row. Runbooks for every alert: `docs/guide/08-observability.md`."
+        "content": "**Production overview**, computed from logs only (Loki). Traffic, errors, latency and the microcache come from the gateway's access log (one JSON line per request); errors from the API's JSON logs; the database and cache from their own logs. The **URIs** variable chooses API calls only (default) or every request (web app files included). To follow one request, paste its `trace_id` in the **trace_id** box and open the last row. Every alert: [deploy README](https://gitlab.com/zeiss/deploy/-/blob/main/README.md#dashboards-and-alerts)."
       }
     },
     {
