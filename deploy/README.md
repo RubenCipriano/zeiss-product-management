@@ -128,6 +128,43 @@ kubectl -n product-management port-forward deployment/api 5080:8080   # Swagger 
 kubectl -n infra port-forward svc/grafana 3000:3000                   # Grafana → http://localhost:3000
 ```
 
+## Clean deploy
+
+### Start over locally
+
+Removes everything a previous deploy left, **including every row in the database and every log line**, and deploys
+from nothing. An empty database gets the sample catalogue (24 products) from the migrations.
+
+```bash
+kubectl config use-context docker-desktop
+kubectl delete namespace product-management --ignore-not-found   # the API, web app, gateway and their Secrets
+scripts/infra.sh down --delete-data                               # PostgreSQL, Redis, logs, with their volumes and passwords
+rm -rf environments/local/generated                               # the local signing key, demo accounts and image tags
+
+scripts/infra.sh up                                               # fresh infrastructure and random passwords
+scripts/deploy.sh local                                           # database + users, keys, images, migrations, apply
+scripts/smoke.sh http://localhost:8080                            # 4 checks through the gateway
+```
+
+To keep the data and only rebuild the application, skip the first four commands.
+
+### A new environment (staging or production), the first time
+
+1. **Cluster:** k3s (or any Kubernetes) with an Ingress controller and cert-manager; machines for the database or
+   the cache join it with `scripts/add-node.sh <user@host> database|cache|apps`.
+2. **GitLab:** the group deploy token `gitlab-deploy-token` (`read_registry`); in this project `KUBE_CONTEXT` or
+   `KUBECONFIG`, `API_SIGNING_KEY` and `API_CONSUMERS` for the environment; in backend and frontend
+   `DEPLOY_REPO_TOKEN`; the real hosts in `environments/<environment>/ingress.yaml` and `STAGING_URL` /
+   `PRODUCTION_URL`.
+3. **Infrastructure:** run the manual job `infra:<environment>` (or `scripts/infra.sh up` with kubectl pointing at the
+   cluster), then `scripts/create-database.sh product-management product_management pm_app pm_migrator`.
+4. **Switch the environment on:** `STAGING_ENABLED=true` (later `PRODUCTION_ENABLED=true`) in the three projects.
+5. **Release:** a pipeline on backend's `main` migrates and commits the API tag; one on frontend's `main` commits the
+   web and gateway tags. Until both have released, this project's `deploy:staging` refuses the `unreleased` tags; the
+   second release commit deploys everything and `smoke:staging` checks it.
+6. **Production:** start `migrate:production` in backend and `release:production` in frontend; each opens a merge
+   request here. Merging them and starting `deploy:production` deploys production.
+
 ## `scripts/deploy.sh`
 
 ```bash

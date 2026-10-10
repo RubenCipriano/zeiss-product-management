@@ -47,8 +47,18 @@ generated="$work/environments/local/generated"
 mkdir -p "$generated/build"
 [[ -f "$generated/signing-key.pem" ]] || echo placeholder > "$generated/signing-key.pem"
 [[ -f "$generated/consumers.json" ]] || echo '{"Authentication":{"Consumers":[]}}' > "$generated/consumers.json"
-[[ -f "$generated/build/kustomization.yaml" ]] \
-  || printf 'apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n' > "$generated/build/kustomization.yaml"
+# The same shape scripts/deploy.sh writes (Kustomize rejects a component with nothing in it as "empty").
+[[ -f "$generated/build/kustomization.yaml" ]] || cat > "$generated/build/kustomization.yaml" <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+images:
+  - name: product-management/api
+    newTag: validate
+  - name: product-management/web
+    newTag: validate
+  - name: product-management/gateway
+    newTag: validate
+EOF
 
 for environment in local staging production; do
   echo "==> environments/$environment"
