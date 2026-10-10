@@ -1,11 +1,15 @@
 using Microsoft.EntityFrameworkCore;
-using ProductManagement.Application.Categories.Abstractions;
-using ProductManagement.Application.Categories.Contracts;
+using ProductManagement.Core.Categories.Abstractions;
+using ProductManagement.Core.Categories.Contracts;
 using ProductManagement.Infrastructure.Persistence;
 
 namespace ProductManagement.Infrastructure.Categories;
 
-internal sealed class CategoryQueries(ProductManagementDbContext context) : ICategoryQueries
+/// <summary>
+/// Reads categories from PostgreSQL for the category use cases (EF Core queries; <c>AsNoTracking</c> = read-only,
+/// EF Core keeps no copy to watch for changes).
+/// </summary>
+internal class CategoryQueries(ProductManagementDbContext context) : ICategoryQueries
 {
     public Task<bool> ExistsAsync(int id, CancellationToken cancellationToken) =>
         context.Categories.AnyAsync(category => category.Id == id, cancellationToken);

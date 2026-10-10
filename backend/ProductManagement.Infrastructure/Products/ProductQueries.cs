@@ -1,18 +1,18 @@
 using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
-using ProductManagement.Application.Common.Paging;
-using ProductManagement.Application.Products.Abstractions;
-using ProductManagement.Application.Products.Contracts;
-using ProductManagement.Domain.Products;
+using ProductManagement.Core.Common.Paging;
+using ProductManagement.Core.Products;
+using ProductManagement.Core.Products.Abstractions;
+using ProductManagement.Core.Products.Contracts;
 using ProductManagement.Infrastructure.Persistence;
 
 namespace ProductManagement.Infrastructure.Products;
 
 /// <summary>
-/// The product read queries, uncached. <see cref="Caching.CachingProductQueries"/>, the registered
-/// <see cref="IProductQueries"/>, composes them with the cache (which, without Redis, is a pass-through).
+/// The product read queries against PostgreSQL, without any caching. <see cref="Caching.CachingProductQueries"/> (the
+/// <see cref="IProductQueries"/> the app actually uses) calls these when the cache does not have the answer.
 /// </summary>
-internal sealed class ProductQueries(ProductManagementDbContext context)
+internal class ProductQueries(ProductManagementDbContext context)
 {
     private const string LikeEscapeCharacter = "\\";
 
@@ -40,7 +40,9 @@ internal sealed class ProductQueries(ProductManagementDbContext context)
             .Select(ToResponse)
             .SingleOrDefaultAsync(cancellationToken);
 
-    public async Task<ProductResponse?> FindCreatedByRequestAsync(string requestKey, CancellationToken cancellationToken)
+    public async Task<ProductResponse?> FindCreatedByRequestAsync(
+        string requestKey,
+        CancellationToken cancellationToken)
     {
         var productId = await context.StockMovements
             .Where(movement => movement.RequestKey == requestKey && movement.Reason == StockMovementReason.InitialStock)
@@ -50,11 +52,10 @@ internal sealed class ProductQueries(ProductManagementDbContext context)
     }
 
     /// <summary>
-    /// One page of a listing, found in two narrow queries (count, then ids) and then read by primary key. This is a late
-    /// row lookup: skipping rows for a deep page walks the (name, id) index without touching the table, so page 40,000
-    /// of 850,000 products takes ~0.5 s instead of ~1.3 s. It also lets the cache keep the expensive part (count and
-    /// ids) across stock changes, which only affect the rows (see <see cref="Caching.CachingProductQueries"/>). Offset
-    /// paging stays linear in the page number; keyset paging would make it constant.
+    /// One page of a listing, in three steps: count the matches, find the page's ids, then read just those rows by id
+    /// (a "late row lookup"). Finding the ids only walks an index, never the table, so deep pages stay fast; and the
+    /// cache can keep the expensive part (count and ids) across stock changes, which only affect the rows (see
+    /// <see cref="Caching.CachingProductQueries"/>). Measured in docs/adr/0022-database-at-scale.md.
     /// </summary>
     /// <param name="count">The total number of matching products (by default <see cref="CountAsync"/>).</param>
     /// <param name="pageIds">The page's ids, in order (by default <see cref="PageIdsAsync"/>).</param>
@@ -117,11 +118,26 @@ internal sealed class ProductQueries(ProductManagementDbContext context)
             .Where(movement => movement.ProductId == productId);
 
         var totalCount = await history.CountAsync(cancellationToken);
-        var items = await history
+        if (totalCount <= page.Skip)
+        {
+            return new PagedResponse<StockMovementResponse>([], page.Page, page.PageSize, totalCount);
+        }
+
+        // Late row lookup, as for the product lists: find the page's ids in the (product_id, occurred_at, id) index,
+        // then read only those rows. A plain OFFSET would read every skipped movement from the table too, and a busy
+        // product's movements are scattered over the whole ledger. Measured in docs/adr/0022-database-at-scale.md.
+        var pageIds = history
             .OrderByDescending(movement => movement.OccurredAt)
             .ThenByDescending(movement => movement.Id)
             .Skip(page.Skip)
             .Take(page.PageSize)
+            .Select(movement => movement.Id);
+
+        var items = await context.StockMovements
+            .AsNoTracking()
+            .Where(movement => pageIds.Contains(movement.Id))
+            .OrderByDescending(movement => movement.OccurredAt)
+            .ThenByDescending(movement => movement.Id)
             .Select(movement => new StockMovementResponse(
                 movement.Id,
                 movement.QuantityChange,
@@ -167,7 +183,10 @@ internal sealed class ProductQueries(ProductManagementDbContext context)
 
     private static IOrderedQueryable<Product> Order(ProductListing listing, IQueryable<Product> products) =>
         listing is ProductListing.StockBetween
-            ? products.OrderBy(product => product.StockQuantity).ThenBy(product => product.Name).ThenBy(product => product.Id)
+            ? products
+                .OrderBy(product => product.StockQuantity)
+                .ThenBy(product => product.Name)
+                .ThenBy(product => product.Id)
             : products.OrderBy(product => product.Name).ThenBy(product => product.Id);
 
     private static string EscapeLikePattern(string value) =>

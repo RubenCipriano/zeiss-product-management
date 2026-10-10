@@ -1,12 +1,18 @@
+using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using ProductManagement.Api.Idempotency;
-using ProductManagement.Application.Common.Requests;
-using ProductManagement.Application.Common.Security;
+using ProductManagement.Core.Common.Requests;
+using ProductManagement.Core.Common.Security;
 
 namespace ProductManagement.Api.Security;
 
+/// <summary>
+/// Registers sign-in and access control at startup (<c>AddApiSecurity</c> in <c>Program.cs</c>): token issuing, how
+/// incoming bearer tokens are verified (authentication), and which roles may call what (authorization,
+/// <see cref="Policies"/>).
+/// </summary>
 internal static class SecurityServiceCollectionExtensions
 {
     public static IServiceCollection AddApiSecurity(this IServiceCollection services)
@@ -21,6 +27,7 @@ internal static class SecurityServiceCollectionExtensions
             TokenSigningKey.FromPem(provider.GetRequiredService<IOptions<AuthenticationOptions>>().Value.SigningKey));
         services.AddSingleton<AccessTokenIssuer>();
         services.AddSingleton<TokenService>();
+        services.AddSingleton<IValidator<TokenRequest>, TokenRequestValidator>();
         services.AddHttpContextAccessor();
         services.AddScoped<ICurrentActor, HttpContextCurrentActor>();
         services.AddScoped<IRequestContext, HttpRequestContext>();

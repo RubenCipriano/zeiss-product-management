@@ -3,9 +3,9 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
-using ProductManagement.Application.Categories.Abstractions;
-using ProductManagement.Application.Common.Persistence;
-using ProductManagement.Application.Products.Abstractions;
+using ProductManagement.Core.Categories.Abstractions;
+using ProductManagement.Core.Common.Persistence;
+using ProductManagement.Core.Products.Abstractions;
 using ProductManagement.Infrastructure.Caching;
 using ProductManagement.Infrastructure.Categories;
 using ProductManagement.Infrastructure.Edge;
@@ -19,9 +19,17 @@ using StackExchange.Redis;
 
 namespace ProductManagement.Infrastructure;
 
+/// <summary>
+/// Registers everything Infrastructure provides (PostgreSQL access, the cache, the Redis-backed stores) in the
+/// dependency-injection container. Called once at startup from <c>Program.cs</c> (<c>AddInfrastructure</c>). This is
+/// also where each feature picks its Redis or its in-memory version, depending on whether Redis is configured.
+/// </summary>
 public static class InfrastructureServiceCollectionExtensions
 {
     public const string ReadinessHealthCheckTag = "ready";
+
+    /// <summary>The Redis password, when it is not in the connection string (environment variable Redis__Password).</summary>
+    private const string RedisPasswordKey = "Redis:Password";
 
     /// <param name="requireRedis">
     /// Refuse to start without the <c>Redis</c> connection string. Without Redis the cache is off and idempotency keys,
@@ -39,6 +47,31 @@ public static class InfrastructureServiceCollectionExtensions
                 $"Connection string '{DatabaseOptions.ConnectionStringName}' is not configured.");
         }
 
+        AddDatabase(services, connectionString);
+
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddScoped<ProductQueries>();
+        services.AddScoped<IProductIdGenerator, PostgresProductIdGenerator>();
+        services.AddScoped<ICategoryQueries, CategoryQueries>();
+
+        services.AddSingleton(new DatabaseHealthCheck(connectionString));
+        var healthChecks = services.AddHealthChecks()
+            .AddCheck<DatabaseHealthCheck>(
+                "database",
+                tags: [ReadinessHealthCheckTag],
+                timeout: DatabaseHealthCheck.Timeout);
+
+        var redisConfigured = AddRedis(services, configuration, healthChecks, requireRedis);
+        AddCatalogCache(services, redisConfigured);
+        AddIdempotencyStore(services, redisConfigured);
+        AddSecurityStores(services, redisConfigured);
+
+        return services;
+    }
+
+    /// <summary>The EF Core database context for PostgreSQL, and the optional sample data.</summary>
+    private static void AddDatabase(IServiceCollection services, string connectionString)
+    {
         services.AddOptions<DatabaseOptions>()
             .BindConfiguration(DatabaseOptions.SectionName)
             .ValidateDataAnnotations()
@@ -47,37 +80,22 @@ public static class InfrastructureServiceCollectionExtensions
         // Pooling reuses DbContext instances across requests, which lowers allocation cost under load.
         services.AddDbContextPool<ProductManagementDbContext>((provider, options) =>
         {
+            // No EnableRetryOnFailure: the stock endpoints are not idempotent. If a connection dropped after the
+            // UPDATE committed, an automatic retry would apply it twice. See docs/adr/0003.
             options
                 .UseNpgsql(
                     connectionString,
                     npgsql => npgsql.MigrationsHistoryTable("__ef_migrations_history"))
                 .UseSnakeCaseNamingConvention();
 
-            // No EnableRetryOnFailure: the stock endpoints are not idempotent. If a connection dropped after the
-            // UPDATE committed, an automatic retry would apply it twice. See docs/adr/0003.
             if (provider.GetRequiredService<IOptions<DatabaseOptions>>().Value.SeedSampleData)
             {
+                var seeder = new SampleDataSeeder(provider.GetRequiredService<TimeProvider>());
                 options
-                    .UseSeeding((context, _) => SampleDataSeeder.Seed(context))
-                    .UseAsyncSeeding((context, _, cancellationToken) =>
-                        SampleDataSeeder.SeedAsync(context, cancellationToken));
+                    .UseSeeding((context, _) => seeder.Seed(context))
+                    .UseAsyncSeeding((context, _, cancellationToken) => seeder.SeedAsync(context, cancellationToken));
             }
         });
-
-        services.TryAddSingleton(TimeProvider.System);
-        services.AddScoped<ProductQueries>();
-        services.AddScoped<IProductIdGenerator, PostgresProductIdGenerator>();
-        services.AddScoped<ICategoryQueries, CategoryQueries>();
-
-        var healthChecks = services.AddHealthChecks()
-            .AddDbContextCheck<ProductManagementDbContext>("database", tags: [ReadinessHealthCheckTag]);
-
-        var redisConfigured = AddRedis(services, configuration, healthChecks, requireRedis);
-        AddCatalogCache(services, redisConfigured);
-        AddIdempotencyStore(services, redisConfigured);
-        AddSecurityStores(services, redisConfigured);
-
-        return services;
     }
 
     /// <summary>The shared connection, when Redis is configured. Returns whether it is.</summary>
@@ -97,23 +115,26 @@ public static class InfrastructureServiceCollectionExtensions
         {
             return requireRedis
                 ? throw new InvalidOperationException(
-                    $"Connection string '{RedisOptions.ConnectionStringName}' is not configured. Outside development the " +
-                    "API needs Redis: without it, idempotency keys, rate limits and failed sign-ins are per replica.")
+                    $"Connection string '{RedisOptions.ConnectionStringName}' is not configured. " +
+                    "Outside development the API needs Redis: without it, idempotency keys, rate limits and " +
+                    "failed sign-ins are per replica.")
                 : false;
         }
 
         // Parsed here so a malformed connection string fails at startup.
-        var redisConfiguration = ConfigurationOptions.Parse(connectionString);
+        var redisConfiguration = ParseRedisConfiguration(connectionString, configuration[RedisPasswordKey]);
         services.AddSingleton<IConnectionMultiplexer>(provider =>
         {
             var options = provider.GetRequiredService<IOptions<RedisOptions>>().Value;
+            var connectTimeout = Milliseconds(options.ConnectTimeout);
+            var operationTimeout = Milliseconds(options.OperationTimeout);
 
             // Start even if Redis is down and keep reconnecting in the background; fail fast per call so a slow or
             // missing Redis costs milliseconds, not seconds (every user of it then degrades).
             redisConfiguration.AbortOnConnectFail = false;
-            redisConfiguration.ConnectTimeout = Math.Min(redisConfiguration.ConnectTimeout, Milliseconds(options.ConnectTimeout));
-            redisConfiguration.SyncTimeout = Math.Min(redisConfiguration.SyncTimeout, Milliseconds(options.OperationTimeout));
-            redisConfiguration.AsyncTimeout = Math.Min(redisConfiguration.AsyncTimeout, Milliseconds(options.OperationTimeout));
+            redisConfiguration.ConnectTimeout = Math.Min(redisConfiguration.ConnectTimeout, connectTimeout);
+            redisConfiguration.SyncTimeout = Math.Min(redisConfiguration.SyncTimeout, operationTimeout);
+            redisConfiguration.AsyncTimeout = Math.Min(redisConfiguration.AsyncTimeout, operationTimeout);
             return ConnectionMultiplexer.Connect(redisConfiguration);
         });
         healthChecks.AddCheck<RedisHealthCheck>("cache", tags: [ReadinessHealthCheckTag]);
@@ -121,9 +142,27 @@ public static class InfrastructureServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Caching is entirely decorators: reads go through <see cref="CachingProductQueries"/>, and writes invalidate
-    /// through <see cref="CacheInvalidatingUnitOfWork"/> and <see cref="CacheInvalidatingProductRepository"/>. Without
-    /// Redis the cache is a no-op and the decorators pass straight through.
+    /// Reads the Redis connection string. The password can also be configured on its own (<c>Redis:Password</c>, e.g.
+    /// the environment variable <c>Redis__Password</c> from a Kubernetes Secret), so the connection string holds no
+    /// secret and can sit in plain configuration. When it is set it wins over a password inside the connection string;
+    /// when it is not, the connection string is used as it is.
+    /// </summary>
+    internal static ConfigurationOptions ParseRedisConfiguration(string connectionString, string? password)
+    {
+        var redisConfiguration = ConfigurationOptions.Parse(connectionString);
+        if (!string.IsNullOrEmpty(password))
+        {
+            redisConfiguration.Password = password;
+        }
+
+        return redisConfiguration;
+    }
+
+    /// <summary>
+    /// Caching is added purely with decorators (wrappers that implement the same interface): reads go through
+    /// <see cref="CachingProductQueries"/>, and writes invalidate through <see cref="CacheInvalidatingUnitOfWork"/> and
+    /// <see cref="CacheInvalidatingProductRepository"/>. Without Redis the cache is a no-op and the decorators pass
+    /// straight through.
     /// </summary>
     private static void AddCatalogCache(IServiceCollection services, bool redisConfigured)
     {

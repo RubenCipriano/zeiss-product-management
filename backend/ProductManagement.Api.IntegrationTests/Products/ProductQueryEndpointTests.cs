@@ -5,7 +5,7 @@ using static ProductManagement.Testing.ProductApiClient;
 
 namespace ProductManagement.Api.IntegrationTests.Products;
 
-public sealed class ProductQueryEndpointTests(ApiFixture fixture) : ApiTestBase(fixture)
+public class ProductQueryEndpointTests(ApiFixture fixture) : ApiTestBase(fixture)
 {
     [Fact]
     public async Task Search_MatchesPartOfTheNameIgnoringCase()
@@ -57,6 +57,15 @@ public sealed class ProductQueryEndpointTests(ApiFixture fixture) : ApiTestBase(
     }
 
     [Fact]
+    public async Task Search_WithANameLongerThan200_ReturnsBadRequest()
+    {
+        using var response = await Api.SearchAsync(new string('a', 201));
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        (await ReadProblemAsync(response)).Errors!.ShouldContainKey("name");
+    }
+
+    [Fact]
     public async Task StockLevel_ReturnsProductsWithinTheInclusiveRangeOrderedByStock()
     {
         await CreateProductsAsync(("Zero", 0), ("Two", 2), ("Five", 5), ("Six", 6), ("Fifty", 50));
@@ -88,6 +97,17 @@ public sealed class ProductQueryEndpointTests(ApiFixture fixture) : ApiTestBase(
         using var response = await Api.ByStockLevelAsync(min, max);
 
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+    }
+
+    [Theory]
+    [InlineData("min=abc")]
+    [InlineData("max=1.5")]
+    public async Task StockLevel_WithNonNumericBound_ReturnsBadRequest(string bound)
+    {
+        using var response = await Api.Http.GetAsync(new Uri($"api/products/stock-level?{bound}", UriKind.Relative), CancellationToken);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        (await ReadProblemAsync(response)).Errors!.ShouldContainKey(bound.Split('=')[0]);
     }
 
     [Fact]

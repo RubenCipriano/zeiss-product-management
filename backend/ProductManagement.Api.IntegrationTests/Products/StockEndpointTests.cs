@@ -1,13 +1,13 @@
 using System.Net;
 using ProductManagement.Api.IntegrationTests.Infrastructure;
-using ProductManagement.Application.Products.Contracts;
-using ProductManagement.Domain.Products;
+using ProductManagement.Core.Products;
+using ProductManagement.Core.Products.Contracts;
 using ProductManagement.Testing;
 using static ProductManagement.Testing.ProductApiClient;
 
 namespace ProductManagement.Api.IntegrationTests.Products;
 
-public sealed class StockEndpointTests(ApiFixture fixture) : ApiTestBase(fixture)
+public class StockEndpointTests(ApiFixture fixture) : ApiTestBase(fixture)
 {
     [Fact]
     public async Task DecrementStock_ReturnsOkWithTheUpdatedProduct()
@@ -97,6 +97,23 @@ public sealed class StockEndpointTests(ApiFixture fixture) : ApiTestBase(fixture
             CancellationToken);
 
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+    }
+
+    [Theory]
+    [InlineData("decrement-stock")]
+    [InlineData("add-to-stock")]
+    public async Task StockEndpoints_WithAQuantityThatOverflowsInt_ReturnBadRequest(string operation)
+    {
+        var product = await Api.CreateProductAsync(TestProducts.CreateRequest());
+
+        using var response = await Api.Http.PostAsync(
+            new Uri($"api/products/{product.Id}/{operation}/99999999999", UriKind.Relative),
+            content: null,
+            CancellationToken);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        (await ReadProblemAsync(response)).Errors!.ShouldContainKey("quantity");
+        (await Api.GetProductAsync(product.Id)).StockQuantity.ShouldBe(product.StockQuantity);
     }
 
     [Fact]

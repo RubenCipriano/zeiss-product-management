@@ -5,12 +5,14 @@ using Microsoft.IdentityModel.Tokens;
 
 namespace ProductManagement.Api.Security;
 
-public sealed record IssuedToken(string AccessToken, int ExpiresInSeconds);
+/// <summary>A freshly signed access token and how many seconds it stays valid.</summary>
+public record IssuedToken(string AccessToken, int ExpiresInSeconds);
 
 /// <summary>
-/// Checks a consumer's credentials and issues a signed JWT carrying its roles. Singleton.
+/// Checks a consumer's credentials and issues a signed access token (a JWT) carrying its roles. One instance for the
+/// whole app (singleton).
 /// </summary>
-public sealed class AccessTokenIssuer(
+public class AccessTokenIssuer(
     IOptions<AuthenticationOptions> options,
     TokenSigningKey signingKey,
     TimeProvider timeProvider)

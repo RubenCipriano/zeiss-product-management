@@ -35,3 +35,13 @@ Feature: Stock management
     When 30 customers each order 1 unit at the same time
     Then 10 orders succeed and 20 are rejected
     And the product has 0 units in stock
+
+  Scenario Outline: Changing the stock of an unknown product is reported as not found
+    When I <change> the stock of product 999999
+    Then the request is rejected because the product does not exist
+    And the product has 10 units in stock
+
+    Examples:
+      | change             |
+      | remove 1 unit from |
+      | add 1 unit to      |

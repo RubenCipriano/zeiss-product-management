@@ -8,10 +8,11 @@ using StackExchange.Redis;
 namespace ProductManagement.Infrastructure.Idempotency;
 
 /// <summary>
-/// Idempotency keys in Redis. The claim is <c>SET key value NX</c>: atomic, so when the same request reaches two replicas
-/// at once exactly one of them gets to process it.
+/// The idempotency store (<see cref="IIdempotencyStore"/>) in Redis. A claim is <c>SET key value NX</c> ("set only if
+/// the key does not exist yet"), which Redis does in one step: when the same request reaches two replicas at once,
+/// exactly one of them gets to process it.
 /// </summary>
-internal sealed partial class RedisIdempotencyStore(
+internal partial class RedisIdempotencyStore(
     IConnectionMultiplexer redis,
     IOptions<IdempotencyOptions> options,
     IOptions<RedisOptions> redisOptions,
@@ -21,7 +22,10 @@ internal sealed partial class RedisIdempotencyStore(
 
     private readonly IdempotencyOptions _options = options.Value;
 
-    public async Task<IdempotencyClaim> TryBeginAsync(string key, string fingerprint, CancellationToken cancellationToken)
+    public async Task<IdempotencyClaim> TryBeginAsync(
+        string key,
+        string fingerprint,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -90,7 +94,7 @@ internal sealed partial class RedisIdempotencyStore(
 
     private RedisKey RedisKey(string key) => $"{redisOptions.Value.KeyPrefix}:idempotency:{key}";
 
-    private sealed record Entry(string Fingerprint, StoredResponse? Response);
+    private record Entry(string Fingerprint, StoredResponse? Response);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Idempotency store (Redis) unavailable")]
     private partial void LogUnavailable(Exception exception);

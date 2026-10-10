@@ -1,7 +1,10 @@
 namespace ProductManagement.Infrastructure.Caching;
 
-/// <summary>Used when no Redis is configured: every read goes to the database.</summary>
-internal sealed class NullCatalogCache : ICatalogCache
+/// <summary>
+/// The "no cache" stand-in, used when Redis is not configured: it never finds anything and stores nothing, so every
+/// read goes to the database and no other class needs an "is caching on?" check.
+/// </summary>
+internal class NullCatalogCache : ICatalogCache
 {
     public Task<string?> GetVersionAsync(CacheScope scope, int productId = 0) => Task.FromResult<string?>(null);
 

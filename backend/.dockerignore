@@ -8,3 +8,6 @@
 *Tests/
 ProductManagement.Testing/
 deploy/
+load-tests/
+scripts/
+.nuget/

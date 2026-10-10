@@ -7,10 +7,11 @@ using StackExchange.Redis;
 namespace ProductManagement.Infrastructure.Security;
 
 /// <summary>
-/// Token bucket in Redis, updated by one Lua script: read, refill, take and write happen atomically, and the time
-/// comes from Redis itself, so every replica sees the same bucket and the same clock.
+/// Token-bucket rate limiting stored in Redis (see <see cref="IDistributedRateLimiter"/>). A small Lua script, which
+/// Redis runs as one indivisible step, refills the bucket for the time that passed, takes a token if there is one and
+/// saves the bucket. The time comes from Redis itself, so every replica sees the same bucket and the same clock.
 /// </summary>
-internal sealed partial class RedisDistributedRateLimiter(
+internal partial class RedisDistributedRateLimiter(
     IConnectionMultiplexer redis,
     IOptions<RedisOptions> options,
     ILogger<RedisDistributedRateLimiter> logger) : IDistributedRateLimiter
@@ -68,7 +69,7 @@ internal sealed partial class RedisDistributedRateLimiter(
 }
 
 /// <summary>Without Redis there is nothing to share: per-replica limits apply.</summary>
-internal sealed class LocalOnlyRateLimiter : IDistributedRateLimiter
+internal class LocalOnlyRateLimiter : IDistributedRateLimiter
 {
     public Task<RateLimitDecision?> TryTakeAsync(
         string bucket,

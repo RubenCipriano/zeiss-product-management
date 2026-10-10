@@ -1,12 +1,14 @@
 using System.Net;
+using Npgsql;
 using ProductManagement.Api.IntegrationTests.Infrastructure;
-using ProductManagement.Application.Products.Contracts;
+using ProductManagement.Core.Products;
+using ProductManagement.Core.Products.Contracts;
 using ProductManagement.Testing;
 using static ProductManagement.Testing.ProductApiClient;
 
 namespace ProductManagement.Api.IntegrationTests.Products;
 
-public sealed class ProductCrudTests(ApiFixture fixture) : ApiTestBase(fixture)
+public class ProductCrudTests(ApiFixture fixture) : ApiTestBase(fixture)
 {
     [Fact]
     public async Task Create_ReturnsCreatedWithLocationETagAndTheStoredRepresentation()
@@ -49,6 +51,17 @@ public sealed class ProductCrudTests(ApiFixture fixture) : ApiTestBase(fixture)
     }
 
     [Fact]
+    public async Task Create_WithInvalidFields_ExplainsEachProblemInReadableWords()
+    {
+        using var response = await Api.CreateAsync(new { name = "", price = 10.999m, stockQuantity = -1, categoryId = 1 });
+
+        var errors = (await ReadProblemAsync(response)).Errors!;
+        errors["name"].ShouldBe(["'Name' must not be empty."]);
+        errors["price"].ShouldBe(["'Price' must not have more than 2 decimal places."]);
+        errors["stockQuantity"].ShouldBe(["'Stock Quantity' must be between 0 and 1000000. You entered -1."]);
+    }
+
+    [Fact]
     public async Task Create_WithMissingFields_ReportsThemInsteadOfDefaultingToZero()
     {
         using var response = await Api.CreateAsync(new { name = "Frame", categoryId = 1 });
@@ -64,6 +77,27 @@ public sealed class ProductCrudTests(ApiFixture fixture) : ApiTestBase(fixture)
 
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
         (await ReadProblemAsync(response)).Errors!.ShouldContainKey("categoryId");
+    }
+
+    [Fact]
+    public async Task Create_WhenEveryIdentifierHasBeenAssigned_ReturnsServiceUnavailableAndCreatesNothing()
+    {
+        var sequence = await ReadProductIdSequenceAsync();
+        await SetProductIdSequenceAsync(ProductRules.MaxId, isCalled: true);
+        try
+        {
+            using var response = await Api.CreateAsync(TestProducts.CreateRequest());
+
+            response.StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
+            response.ContentType()!.MediaType.ShouldBe("application/problem+json");
+            (await ReadProblemAsync(response)).ErrorCode.ShouldBe("product.ids_exhausted");
+            using var list = await Api.ListAsync();
+            (await ReadPageAsync(list)).TotalCount.ShouldBe(0);
+        }
+        finally
+        {
+            await SetProductIdSequenceAsync(sequence.LastValue, sequence.IsCalled);
+        }
     }
 
     [Fact]
@@ -87,6 +121,24 @@ public sealed class ProductCrudTests(ApiFixture fixture) : ApiTestBase(fixture)
         response.StatusCode.ShouldBe(HttpStatusCode.OK);
         (await ReadAsync<ProductResponse>(response)).ShouldBe(created);
         response.ETag().ShouldBe($"\"{created.Version}\"");
+    }
+
+    [Fact]
+    public async Task GetById_WithTheCurrentETagInIfNoneMatch_ReturnsNotModifiedUntilTheProductChanges()
+    {
+        var created = await Api.CreateProductAsync(TestProducts.CreateRequest(stockQuantity: 10));
+        var etag = $"\"{created.Version}\"";
+
+        using var unchanged = await GetIfNoneMatchAsync(created.Id, etag);
+        (await Api.DecrementStockAsync(created.Id, 1)).Dispose();
+        using var changed = await GetIfNoneMatchAsync(created.Id, etag);
+
+        unchanged.StatusCode.ShouldBe(HttpStatusCode.NotModified);
+        unchanged.ETag().ShouldBe(etag);
+        (await unchanged.Content.ReadAsByteArrayAsync(CancellationToken)).ShouldBeEmpty();
+        changed.StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await ReadAsync<ProductResponse>(changed)).StockQuantity.ShouldBe(9);
+        changed.ETag().ShouldNotBe(etag);
     }
 
     [Fact]
@@ -114,6 +166,23 @@ public sealed class ProductCrudTests(ApiFixture fixture) : ApiTestBase(fixture)
         page2.Items.Select(product => product.Name).ShouldBe(["Charlie"]);
         page1.TotalCount.ShouldBe(3);
         page1.TotalPages.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task List_WithoutPaging_UsesDefaultPageSize20()
+    {
+        for (var i = 0; i < 21; i++)
+        {
+            await Api.CreateProductAsync(TestProducts.CreateRequest(name: $"Product {i:D2}"));
+        }
+
+        using var response = await Api.Http.GetAsync(new Uri("api/products", UriKind.Relative), CancellationToken);
+
+        var page = await ReadPageAsync(response);
+        page.Page.ShouldBe(1);
+        page.PageSize.ShouldBe(20);
+        page.Items.Count.ShouldBe(20);
+        page.TotalCount.ShouldBe(21);
     }
 
     [Fact]
@@ -166,6 +235,43 @@ public sealed class ProductCrudTests(ApiFixture fixture) : ApiTestBase(fixture)
         response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
     }
 
+    [Fact]
+    public async Task Update_WithInvalidFields_ReturnsProblemDetailsListingEveryInvalidField()
+    {
+        var created = await Api.CreateProductAsync(TestProducts.CreateRequest(name: "Unchanged"));
+
+        using var response = await Api.UpdateAsync(created.Id, new { name = " ", price = 0m, stockQuantity = ProductRules.MaxStockQuantity + 1, categoryId = 1 });
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        response.ContentType()!.MediaType.ShouldBe("application/problem+json");
+        var problem = await ReadProblemAsync(response);
+        problem.ErrorCode.ShouldBe("validation_failed");
+        problem.Errors!.Keys.ShouldBe(["name", "price", "stockQuantity"], ignoreOrder: true);
+        (await Api.GetProductAsync(created.Id)).ShouldBe(created);
+    }
+
+    [Fact]
+    public async Task Update_WithMissingFields_ReportsThem()
+    {
+        var created = await Api.CreateProductAsync(TestProducts.CreateRequest());
+
+        using var response = await Api.UpdateAsync(created.Id, new { name = "Frame" });
+
+        (await ReadProblemAsync(response)).Errors!.Keys.ShouldBe(["price", "stockQuantity", "categoryId"], ignoreOrder: true);
+    }
+
+    [Fact]
+    public async Task Update_ToUnknownCategory_ReturnsValidationError()
+    {
+        var created = await Api.CreateProductAsync(TestProducts.CreateRequest());
+
+        using var response = await Api.UpdateAsync(created.Id, TestProducts.UpdateRequest(created, categoryId: 999));
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        (await ReadProblemAsync(response)).Errors!.ShouldContainKey("categoryId");
+        (await Api.GetProductAsync(created.Id)).CategoryId.ShouldBe(created.CategoryId);
+    }
+
     [Theory]
     [InlineData("abc")]
     [InlineData("W/\"1\"")]
@@ -194,6 +300,17 @@ public sealed class ProductCrudTests(ApiFixture fixture) : ApiTestBase(fixture)
     }
 
     [Fact]
+    public async Task Delete_ThenCreate_NeverReusesTheId()
+    {
+        var deleted = await Api.CreateProductAsync(TestProducts.CreateRequest(name: "Deleted"));
+        (await Api.DeleteAsync(deleted.Id)).Dispose();
+
+        var created = await Api.CreateProductAsync(TestProducts.CreateRequest(name: "Created after"));
+
+        created.Id.ShouldBeGreaterThan(deleted.Id);
+    }
+
+    [Fact]
     public async Task Delete_WithStaleIfMatch_IsRejectedAndKeepsTheProduct()
     {
         var created = await Api.CreateProductAsync(TestProducts.CreateRequest(stockQuantity: 5));
@@ -203,5 +320,33 @@ public sealed class ProductCrudTests(ApiFixture fixture) : ApiTestBase(fixture)
 
         response.StatusCode.ShouldBe(HttpStatusCode.PreconditionFailed);
         (await Api.GetAsync(created.Id)).StatusCode.ShouldBe(HttpStatusCode.OK);
+    }
+
+    private Task<HttpResponseMessage> GetIfNoneMatchAsync(int id, string ifNoneMatch)
+    {
+        var message = new HttpRequestMessage(HttpMethod.Get, new Uri($"api/products/{id}", UriKind.Relative));
+        message.Headers.TryAddWithoutValidation("If-None-Match", ifNoneMatch);
+        return Api.Http.SendAsync(message, CancellationToken);
+    }
+
+    // The sequence is not part of the data reset between tests, so a test that moves it puts it back.
+    private async Task<(long LastValue, bool IsCalled)> ReadProductIdSequenceAsync()
+    {
+        await using var connection = new NpgsqlConnection(Environment.DatabaseConnectionString);
+        await connection.OpenAsync(CancellationToken);
+        await using var command = new NpgsqlCommand("SELECT last_value, is_called FROM product_id_seq", connection);
+        await using var reader = await command.ExecuteReaderAsync(CancellationToken);
+        await reader.ReadAsync(CancellationToken);
+        return (reader.GetInt64(0), reader.GetBoolean(1));
+    }
+
+    private async Task SetProductIdSequenceAsync(long value, bool isCalled)
+    {
+        await using var connection = new NpgsqlConnection(Environment.DatabaseConnectionString);
+        await connection.OpenAsync(CancellationToken);
+        await using var command = new NpgsqlCommand("SELECT setval('product_id_seq', @value, @isCalled)", connection);
+        command.Parameters.AddWithValue("value", value);
+        command.Parameters.AddWithValue("isCalled", isCalled);
+        await command.ExecuteScalarAsync(CancellationToken);
     }
 }

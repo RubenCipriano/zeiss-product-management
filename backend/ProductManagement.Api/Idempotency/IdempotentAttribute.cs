@@ -7,4 +7,4 @@ namespace ProductManagement.Api.Idempotency;
 /// most once per key and consumer; repeats get the original response. See <see cref="IdempotencyFilter"/>.
 /// </summary>
 [AttributeUsage(AttributeTargets.Method)]
-public sealed class IdempotentAttribute() : TypeFilterAttribute(typeof(IdempotencyFilter));
+public class IdempotentAttribute() : TypeFilterAttribute(typeof(IdempotencyFilter));

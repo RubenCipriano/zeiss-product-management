@@ -1,5 +1,5 @@
 using Microsoft.EntityFrameworkCore;
-using ProductManagement.Domain.Products;
+using ProductManagement.Core.Products;
 using ProductManagement.Infrastructure.Products;
 
 namespace ProductManagement.Infrastructure.Persistence.Seeding;
@@ -12,7 +12,7 @@ namespace ProductManagement.Infrastructure.Persistence.Seeding;
 /// at startup and via <c>dotnet ef database update</c>. It is idempotent: if any product exists, it does nothing.
 /// Identifiers come from the same sequence as API-created products, so seeded rows can never collide with them.
 /// </remarks>
-internal static class SampleDataSeeder
+internal class SampleDataSeeder(TimeProvider timeProvider)
 {
     private static readonly SampleProduct[] SampleProducts =
     [
@@ -42,7 +42,7 @@ internal static class SampleDataSeeder
         new("Anti-Fog Treatment Gel", "Long-lasting anti-fog gel for lenses.", 11.90m, 0, 6),
     ];
 
-    public static async Task SeedAsync(DbContext context, CancellationToken cancellationToken)
+    public async Task SeedAsync(DbContext context, CancellationToken cancellationToken)
     {
         var products = context.Set<Product>();
         if (await products.AnyAsync(cancellationToken))
@@ -51,7 +51,7 @@ internal static class SampleDataSeeder
         }
 
         var idGenerator = new PostgresProductIdGenerator((ProductManagementDbContext)context);
-        var now = DateTimeOffset.UtcNow;
+        var now = timeProvider.GetUtcNow();
 
         foreach (var sample in SampleProducts)
         {
@@ -63,11 +63,13 @@ internal static class SampleDataSeeder
         await context.SaveChangesAsync(cancellationToken);
     }
 
-    /// <summary>Synchronous variant, used by the synchronous <c>Migrate()</c> that <c>dotnet ef database update</c> calls.</summary>
-    public static void Seed(DbContext context) =>
+    /// <summary>
+    /// Synchronous variant, used by the synchronous <c>Migrate()</c> that <c>dotnet ef database update</c> calls.
+    /// </summary>
+    public void Seed(DbContext context) =>
         SeedAsync(context, CancellationToken.None).GetAwaiter().GetResult();
 
-    private sealed record SampleProduct(
+    private record SampleProduct(
         string Name,
         string Description,
         decimal Price,

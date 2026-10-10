@@ -1,10 +1,14 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
-using ProductManagement.Domain.Categories;
+using ProductManagement.Core.Categories;
 
 namespace ProductManagement.Infrastructure.Persistence.Configurations;
 
-internal sealed class CategoryConfiguration : IEntityTypeConfiguration<Category>
+/// <summary>
+/// How <see cref="Category"/> maps to the <c>categories</c> table, plus the six fixed categories. EF Core reads this
+/// configuration at startup, and migrations are generated from it.
+/// </summary>
+internal class CategoryConfiguration : IEntityTypeConfiguration<Category>
 {
     public void Configure(EntityTypeBuilder<Category> builder)
     {

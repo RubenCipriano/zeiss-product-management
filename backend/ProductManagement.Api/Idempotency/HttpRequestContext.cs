@@ -1,9 +1,9 @@
-using ProductManagement.Application.Common.Requests;
+using ProductManagement.Core.Common.Requests;
 
 namespace ProductManagement.Api.Idempotency;
 
 /// <summary>Exposes the current request's idempotency key, as accepted by <see cref="IdempotencyFilter"/>.</summary>
-internal sealed class HttpRequestContext(IHttpContextAccessor httpContextAccessor) : IRequestContext
+internal class HttpRequestContext(IHttpContextAccessor httpContextAccessor) : IRequestContext
 {
     private const string IdempotencyKeyItem = "IdempotencyRequestKey";
 

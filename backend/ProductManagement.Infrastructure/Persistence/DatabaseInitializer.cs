@@ -6,11 +6,21 @@ using ProductManagement.Infrastructure.Caching;
 
 namespace ProductManagement.Infrastructure.Persistence;
 
+/// <summary>
+/// Brings the database schema up to date by applying EF Core migrations (the versioned schema changes in
+/// <c>Migrations/</c>): at API startup in local development, or once per deployment via the API image's
+/// <c>migrate</c> command.
+/// </summary>
 public static partial class DatabaseInitializer
 {
+    private const int MaxConnectAttempts = 30;
+
+    private static readonly TimeSpan ConnectRetryDelay = TimeSpan.FromSeconds(2);
+
     /// <summary>
     /// Applies pending migrations at startup when <see cref="DatabaseOptions.ApplyMigrationsOnStartup"/> is enabled
-    /// (local development). In Kubernetes migrations run once, in a Job, via <see cref="MigrateDatabaseAsync"/>.
+    /// (local development). Deployments instead run <see cref="MigrateDatabaseAsync"/> once, through the
+    /// <c>migrate</c> command, before the rollout.
     /// </summary>
     public static async Task InitializeDatabaseAsync(
         this IServiceProvider services,
@@ -49,27 +59,30 @@ public static partial class DatabaseInitializer
     }
 
     /// <summary>
-    /// In Kubernetes the migration Job can start before PostgreSQL accepts connections; wait for it instead of failing.
+    /// The <c>migrate</c> command can start while the database server is still starting or restarting; wait for it
+    /// instead of failing.
     /// </summary>
     private static async Task WaitForDatabaseAsync(
         ProductManagementDbContext context,
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        const int maxAttempts = 30;
         for (var attempt = 1; !await context.Database.CanConnectAsync(cancellationToken); attempt++)
         {
-            if (attempt == maxAttempts)
+            if (attempt == MaxConnectAttempts)
             {
-                throw new InvalidOperationException($"The database is still unreachable after {maxAttempts} attempts.");
+                throw new InvalidOperationException(
+                    $"The database is still unreachable after {MaxConnectAttempts} attempts.");
             }
 
-            LogWaitingForDatabase(logger, attempt, maxAttempts);
-            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+            LogWaitingForDatabase(logger, attempt, MaxConnectAttempts);
+            await Task.Delay(ConnectRetryDelay, cancellationToken);
         }
     }
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Waiting for the database (attempt {Attempt} of {MaxAttempts})")]
+    [LoggerMessage(
+        Level = LogLevel.Information,
+        Message = "Waiting for the database (attempt {Attempt} of {MaxAttempts})")]
     private static partial void LogWaitingForDatabase(ILogger logger, int attempt, int maxAttempts);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Applying database migrations")]

@@ -9,20 +9,20 @@ public abstract record TokenOutcome
     {
     }
 
-    public sealed record Issued(IssuedToken Token) : TokenOutcome;
+    public record Issued(IssuedToken Token) : TokenOutcome;
 
     /// <summary>Unknown client or wrong secret; deliberately not told apart.</summary>
-    public sealed record InvalidCredentials : TokenOutcome;
+    public record InvalidCredentials : TokenOutcome;
 
     /// <summary>The caller failed too often recently and may not try again for <paramref name="RetryAfter"/>.</summary>
-    public sealed record Blocked(TimeSpan RetryAfter) : TokenOutcome;
+    public record Blocked(TimeSpan RetryAfter) : TokenOutcome;
 }
 
 /// <summary>
 /// The client-credentials sign-in: refuses callers that failed too often (cluster-wide, per <c>callerKey</c>), checks
 /// the credentials, and counts the failures. The token endpoint only maps the outcome to HTTP.
 /// </summary>
-public sealed class TokenService(AccessTokenIssuer issuer, IFailedAttemptThrottle failedAttempts)
+public class TokenService(AccessTokenIssuer issuer, IFailedAttemptThrottle failedAttempts)
 {
     public async Task<TokenOutcome> IssueAsync(
         string clientId,

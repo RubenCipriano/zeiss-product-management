@@ -50,6 +50,13 @@ dotnet_diagnostic.CA1062.severity = none
 dotnet_diagnostic.CA1848.severity = suggestion
 # IDE0005 unnecessary usings: keep files clean.
 dotnet_diagnostic.IDE0005.severity = warning
+# CA1852 "seal internal types": classes are left open, as in most C# codebases; sealing is not a convention here.
+dotnet_diagnostic.CA1852.severity = none
+
+# Tests and test helpers: CA1816 (call GC.SuppressFinalize in Dispose) guards against subclasses adding a finalizer,
+# which test classes never do.
+[{ProductManagement.UnitTests,ProductManagement.Api.IntegrationTests,ProductManagement.Api.AcceptanceTests,ProductManagement.Testing}/**.cs]
+dotnet_diagnostic.CA1816.severity = none
 
 [**/Migrations/*.cs]
 generated_code = true

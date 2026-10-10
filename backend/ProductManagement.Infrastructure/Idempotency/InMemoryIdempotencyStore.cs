@@ -9,7 +9,7 @@ namespace ProductManagement.Infrastructure.Idempotency;
 /// after <see cref="IdempotencyOptions.InProgressTimeout"/>, a stored response after
 /// <see cref="IdempotencyOptions.KeyLifetime"/>. Expired keys are purged on access.
 /// </summary>
-internal sealed class InMemoryIdempotencyStore(IOptions<IdempotencyOptions> options, TimeProvider timeProvider)
+internal class InMemoryIdempotencyStore(IOptions<IdempotencyOptions> options, TimeProvider timeProvider)
     : IIdempotencyStore
 {
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
@@ -37,7 +37,11 @@ internal sealed class InMemoryIdempotencyStore(IOptions<IdempotencyOptions> opti
             : new IdempotencyClaim(IdempotencyClaimStatus.Completed, entry.Response));
     }
 
-    public Task CompleteAsync(string key, string fingerprint, StoredResponse response, CancellationToken cancellationToken)
+    public Task CompleteAsync(
+        string key,
+        string fingerprint,
+        StoredResponse response,
+        CancellationToken cancellationToken)
     {
         _entries[key] = new Entry(fingerprint, response, timeProvider.GetUtcNow() + _options.KeyLifetime);
         return Task.CompletedTask;
@@ -61,5 +65,5 @@ internal sealed class InMemoryIdempotencyStore(IOptions<IdempotencyOptions> opti
         }
     }
 
-    private sealed record Entry(string Fingerprint, StoredResponse? Response, DateTimeOffset ExpiresAt);
+    private record Entry(string Fingerprint, StoredResponse? Response, DateTimeOffset ExpiresAt);
 }

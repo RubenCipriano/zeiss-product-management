@@ -28,7 +28,7 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                 .HasMin(100000L)
                 .HasMax(999999L);
 
-            modelBuilder.Entity("ProductManagement.Domain.Categories.Category", b =>
+            modelBuilder.Entity("ProductManagement.Core.Categories.Category", b =>
                 {
                     b.Property<int>("Id")
                         .HasColumnType("integer")
@@ -82,7 +82,7 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                         });
                 });
 
-            modelBuilder.Entity("ProductManagement.Domain.Products.Product", b =>
+            modelBuilder.Entity("ProductManagement.Core.Products.Product", b =>
                 {
                     b.Property<int>("Id")
                         .HasColumnType("integer")
@@ -152,9 +152,14 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("ck_products_stock_quantity_range", "stock_quantity BETWEEN 0 AND 1000000");
                         });
+
+                    b
+                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_analyze_scale_factor", "0.02")
+                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_scale_factor", "0.005")
+                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_threshold", 1000);
                 });
 
-            modelBuilder.Entity("ProductManagement.Domain.Products.StockMovement", b =>
+            modelBuilder.Entity("ProductManagement.Core.Products.StockMovement", b =>
                 {
                     b.Property<long>("Id")
                         .ValueGeneratedOnAdd()
@@ -212,11 +217,15 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                         {
                             t.HasCheckConstraint("ck_stock_movements_stock_after_non_negative", "stock_after >= 0");
                         });
+
+                    b
+                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_insert_scale_factor", 0)
+                        .HasAnnotation("Npgsql:StorageParameter:autovacuum_vacuum_insert_threshold", 100000);
                 });
 
-            modelBuilder.Entity("ProductManagement.Domain.Products.Product", b =>
+            modelBuilder.Entity("ProductManagement.Core.Products.Product", b =>
                 {
-                    b.HasOne("ProductManagement.Domain.Categories.Category", "Category")
+                    b.HasOne("ProductManagement.Core.Categories.Category", "Category")
                         .WithMany()
                         .HasForeignKey("CategoryId")
                         .OnDelete(DeleteBehavior.Restrict)
@@ -226,9 +235,9 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                     b.Navigation("Category");
                 });
 
-            modelBuilder.Entity("ProductManagement.Domain.Products.StockMovement", b =>
+            modelBuilder.Entity("ProductManagement.Core.Products.StockMovement", b =>
                 {
-                    b.HasOne("ProductManagement.Domain.Products.Product", null)
+                    b.HasOne("ProductManagement.Core.Products.Product", null)
                         .WithMany()
                         .HasForeignKey("ProductId")
                         .OnDelete(DeleteBehavior.Cascade)

@@ -1,5 +1,6 @@
 using System.Globalization;
-using ProductManagement.Application.Common.Errors;
+using ProductManagement.Core.Common.Errors;
+using ProductManagement.Core.Common.Requests;
 
 namespace ProductManagement.Api.Http;
 
@@ -15,7 +16,7 @@ internal static class ApiErrorCodes
 
     public const string IdempotencyKeyInProgress = "idempotency_key_in_progress";
 
-    public const string IdempotencyKeyReused = "idempotency_key_reused";
+    public const string IdempotencyKeyReused = RequestErrors.IdempotencyKeyReusedCode;
 
     public const string IdempotencyUnavailable = "idempotency_unavailable";
 
@@ -27,6 +28,8 @@ internal static class ApiErrorCodes
 
     public const string InternalError = "internal_error";
 
-    /// <summary>The generic code of a framework-generated problem (unknown route, 405, 415, ...): <c>http_&lt;status&gt;</c>.</summary>
+    /// <summary>
+    /// The generic code of a framework-generated problem (unknown route, 405, 415, ...): <c>http_&lt;status&gt;</c>.
+    /// </summary>
     public static string ForStatus(int status) => string.Create(CultureInfo.InvariantCulture, $"http_{status}");
 }

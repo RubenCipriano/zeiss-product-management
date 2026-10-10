@@ -2,7 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using Npgsql;
 using ProductManagement.Api.IntegrationTests.Infrastructure;
-using ProductManagement.Application.Products.Contracts;
+using ProductManagement.Core.Products.Contracts;
 using ProductManagement.Testing;
 using static ProductManagement.Testing.ProductApiClient;
 
@@ -11,7 +11,7 @@ namespace ProductManagement.Api.IntegrationTests.Products;
 /// <summary>
 /// "Sending the same request again must never duplicate anything", whichever replica receives it.
 /// </summary>
-public sealed class IdempotencyTests(ApiFixture fixture) : ApiTestBase(fixture)
+public class IdempotencyTests(ApiFixture fixture) : ApiTestBase(fixture)
 {
     [Fact]
     public async Task RetryingACreate_ReturnsTheOriginalProduct_AndCreatesOnlyOne()
@@ -76,6 +76,60 @@ public sealed class IdempotencyTests(ApiFixture fixture) : ApiTestBase(fixture)
 
         (await ReadAsync<ProductResponse>(retry)).Id.ShouldBe((await ReadAsync<ProductResponse>(first)).Id);
         (await CountAsync("SELECT count(*) FROM products WHERE name = 'Created once'")).ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData("api/products/{other}/decrement-stock/3")] // another product
+    [InlineData("api/products/{first}/decrement-stock/2")] // another quantity
+    [InlineData("api/products/{first}/add-to-stock/3")] // another operation
+    public async Task AKeyReusedForAnotherStockChangeAfterRedisForgotIt_IsRejectedAndNothingIsApplied(string reuse)
+    {
+        // Redis keeps a key for a limited time; the database keeps it forever. Its ledger entry must tell a retry of the
+        // same change (answered with success) from a different change under the same key (refused).
+        var first = await Api.CreateProductAsync(TestProducts.CreateRequest(name: "First", stockQuantity: 10));
+        var other = await Api.CreateProductAsync(TestProducts.CreateRequest(name: "Other", stockQuantity: 10));
+        using var original = await SendAsync(Api, HttpMethod.Post, $"api/products/{first.Id}/decrement-stock/3", "order-reused");
+        await Environment.FlushCacheAsync();
+
+        var url = reuse.Replace("{first}", $"{first.Id}", StringComparison.Ordinal)
+            .Replace("{other}", $"{other.Id}", StringComparison.Ordinal);
+        using var reused = await SendAsync(Api, HttpMethod.Post, url, "order-reused");
+
+        original.StatusCode.ShouldBe(HttpStatusCode.OK);
+        reused.StatusCode.ShouldBe(HttpStatusCode.UnprocessableEntity);
+        reused.Headers.Contains("Idempotent-Replayed").ShouldBeFalse(); // not from Redis: the database refused it
+        (await ReadProblemAsync(reused)).ErrorCode.ShouldBe("idempotency_key_reused");
+        (await Api.GetProductAsync(first.Id)).StockQuantity.ShouldBe(7);
+        (await Api.GetProductAsync(other.Id)).StockQuantity.ShouldBe(10);
+        (await CountAsync("SELECT count(*) FROM stock_movements WHERE reason <> 'InitialStock'")).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task AStockChangeKeyReusedForACreateAfterRedisForgotIt_IsRejectedAndCreatesNothing()
+    {
+        var product = await Api.CreateProductAsync(TestProducts.CreateRequest(stockQuantity: 10));
+        using var stockChange = await SendAsync(Api, HttpMethod.Post, $"api/products/{product.Id}/decrement-stock/3", "order-then-create");
+        await Environment.FlushCacheAsync();
+
+        using var create = await SendAsync(Api, HttpMethod.Post, "api/products", "order-then-create", TestProducts.CreateRequest(name: "Never created"));
+
+        create.StatusCode.ShouldBe(HttpStatusCode.UnprocessableEntity);
+        (await ReadProblemAsync(create)).ErrorCode.ShouldBe("idempotency_key_reused");
+        (await CountAsync("SELECT count(*) FROM products WHERE name = 'Never created'")).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task ACreateKeyReusedForAStockChangeAfterRedisForgotIt_IsRejectedAndChangesNothing()
+    {
+        using var create = await SendAsync(Api, HttpMethod.Post, "api/products", "create-then-order", TestProducts.CreateRequest(stockQuantity: 10));
+        var product = await ReadAsync<ProductResponse>(create);
+        await Environment.FlushCacheAsync();
+
+        using var stockChange = await SendAsync(Api, HttpMethod.Post, $"api/products/{product.Id}/add-to-stock/10", "create-then-order");
+
+        stockChange.StatusCode.ShouldBe(HttpStatusCode.UnprocessableEntity);
+        (await ReadProblemAsync(stockChange)).ErrorCode.ShouldBe("idempotency_key_reused");
+        (await Api.GetProductAsync(product.Id)).StockQuantity.ShouldBe(10);
     }
 
     [Fact]

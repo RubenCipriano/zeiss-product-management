@@ -7,7 +7,7 @@ namespace ProductManagement.Testing;
 /// Everything an API-level test needs: PostgreSQL and Redis containers, the API hosted in memory with migrations
 /// applied, and a fast way to reset data between tests. Start it once per test run; it is expensive (Docker).
 /// </summary>
-public sealed class ApiTestEnvironment : IAsyncDisposable
+public class ApiTestEnvironment : IAsyncDisposable
 {
     private readonly TestInfrastructure _infrastructure;
     private readonly List<ProductManagementApiFactory> _additionalInstances = [];
@@ -23,6 +23,8 @@ public sealed class ApiTestEnvironment : IAsyncDisposable
 
     /// <summary>For tests that must change data behind the API's back (e.g. to prove a read came from the cache).</summary>
     public string DatabaseConnectionString => _infrastructure.DatabaseConnectionString;
+
+    public string RedisConnectionString => _infrastructure.RedisConnectionString;
 
     public static async Task<ApiTestEnvironment> StartAsync()
     {

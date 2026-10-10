@@ -1,9 +1,12 @@
 using System.Globalization;
+using Microsoft.Net.Http.Headers;
 
 namespace ProductManagement.Api.Http;
 
 /// <summary>
-/// Converts between a resource version and an HTTP entity tag (<c>ETag</c> / <c>If-Match</c>, RFC 9110 §8.8.3).
+/// Reads and writes entity tags: the product's version in quotes (e.g. <c>"123"</c>), sent as the <c>ETag</c> header.
+/// The client sends it back in <c>If-Match</c> ("only change it if it is still this version") or
+/// <c>If-None-Match</c> ("only send it if it changed"). RFC 9110 §8.8.3.
 /// </summary>
 internal static class EntityTag
 {
@@ -13,7 +16,9 @@ internal static class EntityTag
     /// Parses an <c>If-Match</c> header value.
     /// </summary>
     /// <param name="headerValue">The raw header value; <c>null</c> when the header was not sent.</param>
-    /// <param name="version">The expected version, or <c>null</c> when no precondition applies (absent or <c>*</c>).</param>
+    /// <param name="version">
+    /// The expected version, or <c>null</c> when no precondition applies (absent or <c>*</c>).
+    /// </param>
     /// <returns><c>false</c> when the header is present but is not a single strong entity tag.</returns>
     public static bool TryParseIfMatch(string? headerValue, out uint? version)
     {
@@ -31,12 +36,31 @@ internal static class EntityTag
             return false;
         }
 
-        if (!uint.TryParse(value.AsSpan(1, value.Length - 2), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed))
+        var quoted = value.AsSpan(1, value.Length - 2);
+        if (!uint.TryParse(quoted, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed))
         {
             return false;
         }
 
         version = parsed;
         return true;
+    }
+
+    /// <summary>
+    /// Whether an <c>If-None-Match</c> header value names the current version, i.e. the client's copy is current and a
+    /// <c>304 Not Modified</c> can replace the body (RFC 9110 §13.1.2): <c>*</c>, or any tag of the list under weak
+    /// comparison. An absent or malformed header matches nothing, so the full response is sent.
+    /// </summary>
+    public static bool MatchesIfNoneMatch(string? headerValue, uint version)
+    {
+        if (string.IsNullOrWhiteSpace(headerValue)
+            || !EntityTagHeaderValue.TryParseList([headerValue], out var tags))
+        {
+            return false;
+        }
+
+        var current = new EntityTagHeaderValue(Format(version));
+        return tags.Any(tag =>
+            tag.Equals(EntityTagHeaderValue.Any) || tag.Compare(current, useStrongComparison: false));
     }
 }

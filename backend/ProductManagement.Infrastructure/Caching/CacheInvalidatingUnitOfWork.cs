@@ -1,14 +1,15 @@
 using Microsoft.EntityFrameworkCore;
-using ProductManagement.Application.Common.Persistence;
-using ProductManagement.Domain.Products;
+using ProductManagement.Core.Common.Persistence;
+using ProductManagement.Core.Products;
 using ProductManagement.Infrastructure.Persistence;
 
 namespace ProductManagement.Infrastructure.Caching;
 
 /// <summary>
-/// Invalidates the read cache for the products a unit of work created, edited or deleted, once it has committed.
+/// Wraps the real unit of work (a decorator): after a save has committed, it tells the cache which products were
+/// created, edited or deleted, so their old cached copies are no longer served.
 /// </summary>
-internal sealed class CacheInvalidatingUnitOfWork(
+internal class CacheInvalidatingUnitOfWork(
     IUnitOfWork inner,
     ProductManagementDbContext context,
     ICatalogCache cache) : IUnitOfWork

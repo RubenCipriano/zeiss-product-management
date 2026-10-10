@@ -3,7 +3,7 @@ using ProductManagement.Infrastructure.Persistence.Configurations;
 
 namespace ProductManagement.Infrastructure.Persistence;
 
-/// <summary>Recognises the PostgreSQL errors that mean something to the application.</summary>
+/// <summary>Recognises the PostgreSQL errors the code reacts to, instead of treating them as unexpected.</summary>
 internal static class PostgresErrors
 {
     /// <summary>

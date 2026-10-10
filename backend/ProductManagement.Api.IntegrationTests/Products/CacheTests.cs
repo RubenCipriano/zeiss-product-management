@@ -10,7 +10,7 @@ namespace ProductManagement.Api.IntegrationTests.Products;
 /// replicas, and an unavailable cache never breaks the API. (Every other test in this assembly also runs with the cache on,
 /// so read-after-write correctness is covered across the whole suite.)
 /// </summary>
-public sealed class CacheTests(ApiFixture fixture) : ApiTestBase(fixture)
+public class CacheTests(ApiFixture fixture) : ApiTestBase(fixture)
 {
     [Fact]
     public async Task Reads_AreServedFromTheCache_UntilAWriteThroughTheApiInvalidatesIt()

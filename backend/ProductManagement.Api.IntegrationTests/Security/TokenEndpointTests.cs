@@ -6,12 +6,13 @@ using Microsoft.IdentityModel.JsonWebTokens;
 using ProductManagement.Api.IntegrationTests.Infrastructure;
 using ProductManagement.Api.Security;
 using ProductManagement.Testing;
+using StackExchange.Redis;
 using static ProductManagement.Testing.ProductApiClient;
 
 namespace ProductManagement.Api.IntegrationTests.Security;
 
 /// <summary>The API's own token endpoint: registered consumers exchange credentials for a signed JWT.</summary>
-public sealed class TokenEndpointTests(ApiFixture fixture) : ApiTestBase(fixture)
+public class TokenEndpointTests(ApiFixture fixture) : ApiTestBase(fixture)
 {
     [Fact]
     public async Task ValidCredentials_ReturnABearerTokenThatTheApiAccepts()
@@ -124,6 +125,25 @@ public sealed class TokenEndpointTests(ApiFixture fixture) : ApiTestBase(fixture
         blocked.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
         blocked.Headers.RetryAfter.ShouldNotBeNull();
         (await ReadProblemAsync(blocked)).ErrorCode.ShouldBe("too_many_failed_attempts");
+    }
+
+    [Fact]
+    public async Task AFailureCounterThatLostItsExpiry_GetsItBackOnTheNextFailure()
+    {
+        // A counter without expiry would block its IP for good. Each failure (re)starts a missing window.
+        using var anonymous = Environment.CreateClient(role: null);
+        (await RequestTokenAsync(anonymous, TestTokens.ConsumerId, "guess-1")).Dispose();
+        await using var redis = await ConnectionMultiplexer.ConnectAsync(Environment.RedisConnectionString);
+        var server = redis.GetServers().Single();
+        var counter = server.Keys(pattern: "*signin-failures*").Single();
+        await redis.GetDatabase().KeyPersistAsync(counter);
+
+        (await RequestTokenAsync(anonymous, TestTokens.ConsumerId, "guess-2")).Dispose();
+
+        var expiry = await redis.GetDatabase().KeyTimeToLiveAsync(counter);
+        expiry.ShouldNotBeNull();
+        expiry.Value.ShouldBeGreaterThan(TimeSpan.Zero);
+        ((long)await redis.GetDatabase().StringGetAsync(counter)).ShouldBe(2);
     }
 
     private static Task<HttpResponseMessage> RequestTokenAsync(ProductApiClient client, string clientId, string secret) =>

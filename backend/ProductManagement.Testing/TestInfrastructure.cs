@@ -8,10 +8,13 @@ namespace ProductManagement.Testing;
 /// run against the real engines because the behaviour under test (sequences, xmin, row locking, ILIKE, cache
 /// invalidation across instances) is engine-specific and in-memory fakes would hide it.
 /// </summary>
-public sealed class TestInfrastructure : IAsyncDisposable
+public class TestInfrastructure : IAsyncDisposable
 {
+    // Every in-memory API instance of a test run shares one Npgsql pool of up to 100 connections, and some tests add
+    // pools of their own; PostgreSQL's default of 100 connections (97 for the application) leaves no headroom.
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:18-alpine")
         .WithDatabase("product_management_tests")
+        .WithCommand("-c", "max_connections=200")
         .Build();
 
     private readonly RedisContainer _redis = new RedisBuilder("redis:8-alpine").Build();

@@ -9,17 +9,24 @@ using ProductManagement.Infrastructure.Edge;
 namespace ProductManagement.Api.Idempotency;
 
 /// <summary>
-/// Implements <c>Idempotency-Key</c> for the endpoints marked <see cref="IdempotentAttribute"/>:
+/// Makes retries safe on the endpoints marked <see cref="IdempotentAttribute"/>: a client may attach an
+/// <c>Idempotency-Key</c> header (an id it chooses), and the same request sent twice with that key is applied once.
+/// Runs around the controller action (an MVC filter).
+/// </summary>
+/// <remarks>
 /// <list type="bullet">
 ///   <item>first request with a key: processed, and its response stored (24 h) in the shared store;</item>
-///   <item>same key again (any replica): the stored response is returned with <c>Idempotent-Replayed: true</c>, nothing runs;</item>
+///   <item>
+///     same key again (any replica): the stored response is returned with <c>Idempotent-Replayed: true</c>, nothing
+///     runs;
+///   </item>
 ///   <item>same key while the first is still running: <c>409</c>; same key with a different body: <c>422</c>;</item>
 ///   <item>store unavailable: <c>503</c>, because exactly-once can no longer be guaranteed.</item>
 /// </list>
 /// Keys are scoped to the caller (<c>sub</c>), so consumers can never see or block each other's keys. The header is
-/// optional: requests without it behave as before.
-/// </summary>
-internal sealed class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsFactory problemDetailsFactory)
+/// optional: requests without it behave as before. See docs/adr/0017-idempotency-keys.md.
+/// </remarks>
+internal class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsFactory problemDetailsFactory)
     : IAsyncResourceFilter
 {
     public const string ReplayedHeaderName = "Idempotent-Replayed";
@@ -38,7 +45,11 @@ internal sealed class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsF
 
         if (!IdempotencyKey.TryParse(values.ToString(), http.GetSubject() ?? "anonymous", out var scopedKey))
         {
-            context.Result = Reject(http, StatusCodes.Status400BadRequest, ApiErrorCodes.IdempotencyKeyInvalid, IdempotencyKey.Rule);
+            context.Result = Reject(
+                http,
+                StatusCodes.Status400BadRequest,
+                ApiErrorCodes.IdempotencyKeyInvalid,
+                IdempotencyKey.Rule);
             return;
         }
 
@@ -47,38 +58,57 @@ internal sealed class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsF
         var fingerprint = await RequestFingerprint.ComputeAsync(http.Request);
         var claim = await store.TryBeginAsync(scopedKey, fingerprint, http.RequestAborted);
 
-        switch (claim.Status)
+        if (AnswerWithoutRunning(http, claim) is { } answer)
         {
-            case IdempotencyClaimStatus.Completed:
-                context.Result = Replay(http, claim.Response!);
-                return;
-            case IdempotencyClaimStatus.InProgress:
-                http.Response.Headers.RetryAfter = "1";
-                context.Result = Reject(
-                    http,
-                    StatusCodes.Status409Conflict,
-                    ApiErrorCodes.IdempotencyKeyInProgress,
-                    "A request with this Idempotency-Key is still being processed. Retry shortly.");
-                return;
-            case IdempotencyClaimStatus.FingerprintMismatch:
-                context.Result = Reject(
-                    http,
-                    StatusCodes.Status422UnprocessableEntity,
-                    ApiErrorCodes.IdempotencyKeyReused,
-                    "This Idempotency-Key was already used for a different request.");
-                return;
-            case IdempotencyClaimStatus.Unavailable:
-                context.Result = Reject(
-                    http,
-                    StatusCodes.Status503ServiceUnavailable,
-                    ApiErrorCodes.IdempotencyUnavailable,
-                    "The request cannot be guaranteed to run only once right now. Retry later with the same key.");
-                return;
+            context.Result = answer;
+            return;
         }
 
         await ExecuteAndRememberAsync(http, next, scopedKey, fingerprint);
     }
 
+    /// <summary>
+    /// The response for a key the store already knows (replay, or a 409/422/503 refusal); <c>null</c> when this
+    /// request claimed the key and must run.
+    /// </summary>
+    private IActionResult? AnswerWithoutRunning(HttpContext http, IdempotencyClaim claim)
+    {
+        switch (claim.Status)
+        {
+            case IdempotencyClaimStatus.Completed:
+                return Replay(http, claim.Response!);
+
+            case IdempotencyClaimStatus.InProgress:
+                http.Response.Headers.RetryAfter = "1";
+                return Reject(
+                    http,
+                    StatusCodes.Status409Conflict,
+                    ApiErrorCodes.IdempotencyKeyInProgress,
+                    "A request with this Idempotency-Key is still being processed. Retry shortly.");
+
+            case IdempotencyClaimStatus.FingerprintMismatch:
+                return Reject(
+                    http,
+                    StatusCodes.Status422UnprocessableEntity,
+                    ApiErrorCodes.IdempotencyKeyReused,
+                    "This Idempotency-Key was already used for a different request.");
+
+            case IdempotencyClaimStatus.Unavailable:
+                return Reject(
+                    http,
+                    StatusCodes.Status503ServiceUnavailable,
+                    ApiErrorCodes.IdempotencyUnavailable,
+                    "The request cannot be guaranteed to run only once right now. Retry later with the same key.");
+
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// Runs the action with the response body captured in memory, sends it to the client, then stores it under the
+    /// key so a retry gets the same answer.
+    /// </summary>
     private async Task ExecuteAndRememberAsync(
         HttpContext http,
         ResourceExecutionDelegate next,

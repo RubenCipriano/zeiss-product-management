@@ -1,39 +1,42 @@
 using System.Globalization;
 using Microsoft.Extensions.Options;
-using ProductManagement.Application.Common.Paging;
-using ProductManagement.Application.Products.Abstractions;
-using ProductManagement.Application.Products.Contracts;
+using ProductManagement.Core.Common.Paging;
+using ProductManagement.Core.Products.Abstractions;
+using ProductManagement.Core.Products.Contracts;
 using ProductManagement.Infrastructure.Products;
 
 namespace ProductManagement.Infrastructure.Caching;
 
 /// <summary>
-/// Cache-aside implementation of <see cref="IProductQueries"/> over <see cref="ProductQueries"/>. The application layer
-/// is unaware of caching: it depends on <see cref="IProductQueries"/>, and this class is wired in by dependency injection.
-/// Without Redis the cache is a pass-through (<see cref="NullCatalogCache"/>) and every read goes to the database.
+/// Puts a cache in front of the product read queries: a decorator around <see cref="ProductQueries"/>. Core asks for
+/// <see cref="IProductQueries"/> and gets this class, without knowing a cache exists. Without Redis the cache is a
+/// pass-through (<see cref="NullCatalogCache"/>) and every read goes to the database.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Each entry is versioned by what it depends on (<see cref="CacheScope"/>), so a write invalidates only what it
-/// affects. A stock change invalidates that product's details and history and the stock-level lists; the full
-/// list and searches stay cached.
+/// Cache-aside: look in the cache; on a miss, read the database and store the answer. Each key includes a version
+/// made of the generations it depends on (<see cref="CacheScope"/>, explained in <see cref="ICatalogCache"/>), so a
+/// write only invalidates what it affects: a stock change invalidates that product's details and history and the
+/// stock-level lists, while the full list and searches stay cached.
 /// </para>
 /// <para>
-/// Lists and searches are cached in three parts: the total count (once per list, whatever the page), the page's ids
-/// (per page) and the rows, read from the database every time by primary key (cheap: ~1 ms for a page). The stock
-/// shown is therefore always current, even though the expensive part (a count and an index walk over up to
-/// hundreds of thousands of rows) is cached across stock changes.
+/// Lists and searches cache only the expensive part: the total count (once per list, whatever the page) and the
+/// page's ids. The rows themselves are re-read from the database by id every time, which is cheap, so the stock shown
+/// is always current. Measured in docs/adr/0008-redis-cache.md.
 /// </para>
 /// <para>
-/// Concurrent misses for the same entry are collapsed into one query per replica (<see cref="SingleFlight"/>).
+/// Simultaneous misses for the same entry share one database query per replica (<see cref="SingleFlight"/>).
 /// </para>
 /// </remarks>
-internal sealed class CachingProductQueries(
+internal class CachingProductQueries(
     ProductQueries inner,
     ICatalogCache cache,
     SingleFlight singleFlight,
     IOptions<CacheOptions> options) : IProductQueries
 {
+    /// <summary>For entries that do not belong to one product (lists, searches).</summary>
+    private const int NoProduct = 0;
+
     private readonly CacheOptions _options = options.Value;
 
     public Task<ProductResponse?> GetByIdAsync(int id, CancellationToken cancellationToken) =>
@@ -61,7 +64,8 @@ internal sealed class CachingProductQueries(
             page,
             cancellationToken);
 
-    // Which products match depends on their stock here, so the whole page follows the data generation.
+    // Which products match depends on their stock here, so the whole page is cached under the data generation, which
+    // every write (stock changes included) increments.
     public async Task<PagedResponse<ProductResponse>> ListByStockLevelAsync(
         int? min,
         int? max,
@@ -69,8 +73,8 @@ internal sealed class CachingProductQueries(
         CancellationToken cancellationToken) =>
         (await GetOrLoadAsync(
             CacheScope.Data,
-            0,
-            Invariant($"products:stock:{min?.ToString(CultureInfo.InvariantCulture) ?? "*"}:{max?.ToString(CultureInfo.InvariantCulture) ?? "*"}:{PageKey(page)}"),
+            NoProduct,
+            StockLevelKey(min, max, page),
             _options.ListTtl,
             async () => await inner.PageAsync(new ProductListing.StockBetween(min, max), page, cancellationToken)))!;
 
@@ -85,7 +89,9 @@ internal sealed class CachingProductQueries(
             _options.ListTtl,
             () => inner.ListStockMovementsAsync(productId, page, cancellationToken));
 
-    /// <summary>A list or search page: the count and the page's ids from the cache, the rows from the database.</summary>
+    /// <summary>
+    /// A list or search page: the count and the page's ids from the cache, the rows from the database.
+    /// </summary>
     private Task<PagedResponse<ProductResponse>> ListingPageAsync(
         ProductListing listing,
         string listKey,
@@ -93,19 +99,38 @@ internal sealed class CachingProductQueries(
         CancellationToken cancellationToken) =>
         inner.PageAsync(
             page,
-            async () => (await GetOrLoadAsync(
-                CacheScope.Listing,
-                0,
-                $"{listKey}:count",
-                _options.ListingTtl,
-                async () => new CachedCount(await inner.CountAsync(listing, cancellationToken))))!.Value,
-            async () => (await GetOrLoadAsync(
-                CacheScope.Listing,
-                0,
-                $"{listKey}:ids:{PageKey(page)}",
-                _options.ListingTtl,
-                async () => await inner.PageIdsAsync(listing, page, cancellationToken)))!,
+            () => CachedCountAsync(listing, listKey, cancellationToken),
+            () => CachedPageIdsAsync(listing, listKey, page, cancellationToken),
             cancellationToken);
+
+    private async Task<int> CachedCountAsync(
+        ProductListing listing,
+        string listKey,
+        CancellationToken cancellationToken)
+    {
+        var count = await GetOrLoadAsync(
+            CacheScope.Listing,
+            NoProduct,
+            $"{listKey}:count",
+            _options.ListingTtl,
+            async () => new CachedCount(await inner.CountAsync(listing, cancellationToken)));
+        return count!.Value;
+    }
+
+    private async Task<int[]> CachedPageIdsAsync(
+        ProductListing listing,
+        string listKey,
+        PageQuery page,
+        CancellationToken cancellationToken)
+    {
+        var ids = await GetOrLoadAsync(
+            CacheScope.Listing,
+            NoProduct,
+            $"{listKey}:ids:{PageKey(page)}",
+            _options.ListingTtl,
+            async () => await inner.PageIdsAsync(listing, page, cancellationToken));
+        return ids!;
+    }
 
     /// <remarks>
     /// The version is read <em>before</em> the database. If a write commits in between, our (possibly older) result is
@@ -140,10 +165,20 @@ internal sealed class CachingProductQueries(
             });
     }
 
+    /// <summary>
+    /// <c>products:stock:{min}:{max}:{page}</c>, with <c>*</c> for an open bound.
+    /// </summary>
+    private static string StockLevelKey(int? min, int? max, PageQuery page)
+    {
+        var lower = min?.ToString(CultureInfo.InvariantCulture) ?? "*";
+        var upper = max?.ToString(CultureInfo.InvariantCulture) ?? "*";
+        return Invariant($"products:stock:{lower}:{upper}:{PageKey(page)}");
+    }
+
     private static string PageKey(PageQuery page) => Invariant($"p{page.Page}:s{page.PageSize}");
 
     private static string Invariant(FormattableString value) => value.ToString(CultureInfo.InvariantCulture);
 }
 
-/// <summary>A count, boxed so it can be cached like any other entry.</summary>
-internal sealed record CachedCount(int Value);
+/// <summary>A count, wrapped in an object so it can be cached like any other entry.</summary>
+internal record CachedCount(int Value);

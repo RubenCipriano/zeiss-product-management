@@ -1,11 +1,15 @@
 using Microsoft.EntityFrameworkCore;
-using ProductManagement.Domain.Categories;
-using ProductManagement.Domain.Products;
+using ProductManagement.Core.Categories;
+using ProductManagement.Core.Products;
 using ProductManagement.Infrastructure.Products;
 
 namespace ProductManagement.Infrastructure.Persistence;
 
-public sealed class ProductManagementDbContext(DbContextOptions<ProductManagementDbContext> options)
+/// <summary>
+/// EF Core's entry point to the database: one property per table, plus the mapping configuration (in
+/// <c>Configurations/</c>) applied when the model is built. One instance per request, reused from a pool.
+/// </summary>
+public class ProductManagementDbContext(DbContextOptions<ProductManagementDbContext> options)
     : DbContext(options)
 {
     public DbSet<Product> Products => Set<Product>();

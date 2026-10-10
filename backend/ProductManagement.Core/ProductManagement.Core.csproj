@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The core of the application, organised by feature: the domain model (entities, invariants, business rules) and the
+    use cases with the ports they need (repositories, queries, unit of work). No EF Core, no ASP.NET Core: those live in
+    Infrastructure and Api, which depend on this project and never the other way round.
+  -->
+
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" />
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ProductManagement.UnitTests" />
+  </ItemGroup>
+
+</Project>

@@ -6,7 +6,7 @@
 @productId = 100000
 @token = {{signIn.response.body.$.accessToken}}
 
-### Get an access token (local demo consumer "manager" from appsettings.Development.json)
+### Get an access token (local demo consumer "manager"; its hash is in the user-secrets from deploy/local-secrets.sh)
 # @name signIn
 POST {{baseUrl}}/api/auth/token
 Content-Type: application/json

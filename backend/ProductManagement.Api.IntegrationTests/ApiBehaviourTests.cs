@@ -1,11 +1,13 @@
+using System.Diagnostics;
 using System.Net;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using ProductManagement.Api.IntegrationTests.Infrastructure;
 using ProductManagement.Testing;
 
 namespace ProductManagement.Api.IntegrationTests;
 
-public sealed class ApiBehaviourTests(ApiFixture fixture) : ApiTestBase(fixture)
+public class ApiBehaviourTests(ApiFixture fixture) : ApiTestBase(fixture)
 {
     [Theory]
     [InlineData("health/live")]
@@ -16,6 +18,38 @@ public sealed class ApiBehaviourTests(ApiFixture fixture) : ApiTestBase(fixture)
 
         response.StatusCode.ShouldBe(HttpStatusCode.OK);
         (await response.Content.ReadAsStringAsync(CancellationToken)).ShouldBe("Healthy");
+    }
+
+    [Fact]
+    public async Task Readiness_StaysHealthy_WhileEveryRequestConnectionIsBusy()
+    {
+        // A busy replica is not a broken one: readiness must not wait for the request pool, or every replica leaves the
+        // load balancer exactly when the load is highest.
+        using var instance = Environment.CreateClientForInstanceWith(new Dictionary<string, string>
+        {
+            ["ConnectionStrings:ProductManagement"] = Environment.DatabaseConnectionString + ";Maximum Pool Size=1;Timeout=10",
+        });
+        var product = await Api.CreateProductAsync(TestProducts.CreateRequest(stockQuantity: 10));
+        await using var blocker = new NpgsqlConnection(Environment.DatabaseConnectionString);
+        await blocker.OpenAsync(CancellationToken);
+        await using var transaction = await blocker.BeginTransactionAsync(CancellationToken);
+        await using (var lockRow = new NpgsqlCommand($"SELECT 1 FROM products WHERE id = {product.Id} FOR UPDATE", blocker, transaction))
+        {
+            await lockRow.ExecuteScalarAsync(CancellationToken);
+        }
+
+        // Waits for the row lock, holding the instance's only request connection.
+        var blocked = instance.DecrementStockAsync(product.Id, 1);
+        await WaitUntilAsync(async () => await CountWaitingLocksAsync() > 0);
+        var stopwatch = Stopwatch.StartNew();
+        using var ready = await instance.Http.GetAsync(new Uri("health/ready", UriKind.Relative), CancellationToken);
+        stopwatch.Stop();
+        await transaction.CommitAsync(CancellationToken);
+
+        ready.StatusCode.ShouldBe(HttpStatusCode.OK);
+        stopwatch.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(1));
+        using var decremented = await blocked;
+        decremented.StatusCode.ShouldBe(HttpStatusCode.OK);
     }
 
     [Fact]
@@ -50,5 +84,22 @@ public sealed class ApiBehaviourTests(ApiFixture fixture) : ApiTestBase(fixture)
             Environment.CreateClientForInstanceWith(new Dictionary<string, string> { [key] = value }));
 
         exception.Message.ShouldContain(key.Split(':')[1]);
+    }
+
+    private async Task<long> CountWaitingLocksAsync()
+    {
+        await using var connection = new NpgsqlConnection(Environment.DatabaseConnectionString);
+        await connection.OpenAsync(CancellationToken);
+        await using var command = new NpgsqlCommand("SELECT count(*) FROM pg_locks WHERE NOT granted", connection);
+        return (long)(await command.ExecuteScalarAsync(CancellationToken))!;
+    }
+
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition)
+    {
+        for (var attempt = 0; !await condition(); attempt++)
+        {
+            attempt.ShouldBeLessThan(100, "The condition did not become true within 5 s.");
+            await Task.Delay(TimeSpan.FromMilliseconds(50), CancellationToken);
+        }
     }
 }

@@ -5,7 +5,7 @@ using static ProductManagement.Testing.ProductApiClient;
 
 namespace ProductManagement.Api.IntegrationTests.Security;
 
-public sealed class RateLimitingTests(ApiFixture fixture) : ApiTestBase(fixture)
+public class RateLimitingTests(ApiFixture fixture) : ApiTestBase(fixture)
 {
     private static readonly Dictionary<string, string> LowLimits = new()
     {

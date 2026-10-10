@@ -9,8 +9,15 @@ using ProductManagement.Infrastructure.Edge;
 
 namespace ProductManagement.Api.RateLimiting;
 
+/// <summary>
+/// Registers the rate limits at startup (<c>AddApiRateLimiting</c> in <c>Program.cs</c>): a global per-caller limit,
+/// a stricter one for writes, and a per-IP one for the token endpoint. Over the limit, the answer is 429 with
+/// <c>Retry-After</c>.
+/// </summary>
 internal static class RateLimitingServiceCollectionExtensions
 {
+    private const string NoLimitPartition = "unlimited";
+
     /// <remarks>
     /// Per-user limits are shared by all replicas (token buckets in Redis), so a user's allowance does not grow as the
     /// autoscaler adds pods. If Redis is unavailable each replica falls back to its own in-memory bucket. The token
@@ -33,13 +40,13 @@ internal static class RateLimitingServiceCollectionExtensions
 
             options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
                 !settings.Enabled || context.Request.Path.StartsWithSegments("/health")
-                    ? RateLimitPartition.GetNoLimiter("unlimited")
+                    ? RateLimitPartition.GetNoLimiter(NoLimitPartition)
                     : TokenBucket(context, "requests", settings.RequestsPerSecond, settings.RequestBurst));
 
             options.AddPolicy(RateLimitPolicies.Writes, context =>
                 settings.Enabled
                     ? TokenBucket(context, "writes", settings.WritesPerSecond, settings.WriteBurst)
-                    : RateLimitPartition.GetNoLimiter("unlimited"));
+                    : RateLimitPartition.GetNoLimiter(NoLimitPartition));
 
             options.AddPolicy(RateLimitPolicies.Authentication, context =>
                 settings.Enabled
@@ -50,7 +57,7 @@ internal static class RateLimitingServiceCollectionExtensions
                             Window = TimeSpan.FromMinutes(1),
                             QueueLimit = 0,
                         })
-                    : RateLimitPartition.GetNoLimiter("unlimited"));
+                    : RateLimitPartition.GetNoLimiter(NoLimitPartition));
         });
 
         return services;

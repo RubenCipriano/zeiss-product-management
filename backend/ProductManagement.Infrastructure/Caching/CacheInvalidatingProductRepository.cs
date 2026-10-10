@@ -1,13 +1,18 @@
-using ProductManagement.Application.Products.Abstractions;
-using ProductManagement.Domain.Products;
+using ProductManagement.Core.Products;
+using ProductManagement.Core.Products.Abstractions;
 
 namespace ProductManagement.Infrastructure.Caching;
 
 /// <summary>
-/// Invalidates the read cache after an atomic stock change. That change runs right away, outside the unit of work, so
-/// <see cref="CacheInvalidatingUnitOfWork"/> never sees it.
+/// Wraps the real product repository (a decorator: same interface, adds one behaviour) to clear the affected cache
+/// entries after a stock change.
 /// </summary>
-internal sealed class CacheInvalidatingProductRepository(IProductRepository inner, ICatalogCache cache)
+/// <remarks>
+/// Stock changes run immediately in the database, not through the unit of work, so
+/// <see cref="CacheInvalidatingUnitOfWork"/> never sees them; this class covers them. Every other call is passed
+/// straight through.
+/// </remarks>
+internal class CacheInvalidatingProductRepository(IProductRepository inner, ICatalogCache cache)
     : IProductRepository
 {
     public Task<Product?> GetByIdAsync(int id, CancellationToken cancellationToken) =>

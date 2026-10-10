@@ -1,11 +1,15 @@
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
-using ProductManagement.Domain.Products;
+using ProductManagement.Core.Products;
 
 namespace ProductManagement.Infrastructure.Persistence.Configurations;
 
-internal sealed class ProductConfiguration : IEntityTypeConfiguration<Product>
+/// <summary>
+/// How <see cref="Product"/> maps to the <c>products</c> table: columns, check constraints, indexes and autovacuum
+/// settings. EF Core reads this configuration at startup, and migrations are generated from it.
+/// </summary>
+internal class ProductConfiguration : IEntityTypeConfiguration<Product>
 {
     public void Configure(EntityTypeBuilder<Product> builder)
     {
@@ -24,6 +28,15 @@ internal sealed class ProductConfiguration : IEntityTypeConfiguration<Product>
                 "ck_products_stock_quantity_range",
                 $"stock_quantity BETWEEN 0 AND {ProductRules.MaxStockQuantity}");
         });
+
+        // Autovacuum (PostgreSQL's background clean-up) runs much sooner than its default of 20% of the rows: after
+        // ~5,000 changed rows. Every stock change rewrites a product row, and until vacuum has run, the fast
+        // index-only reads behind counts and list pages must also visit the table. The table is small, so a vacuum
+        // costs seconds. Measured in docs/adr/0022-database-at-scale.md.
+        // Fractions as strings: the provider formats a double with the current culture ("0,005" in Portuguese).
+        builder.HasStorageParameter("autovacuum_vacuum_scale_factor", "0.005");
+        builder.HasStorageParameter("autovacuum_vacuum_threshold", 1000);
+        builder.HasStorageParameter("autovacuum_analyze_scale_factor", "0.02");
 
         builder.HasKey(product => product.Id);
 
@@ -58,14 +71,14 @@ internal sealed class ProductConfiguration : IEntityTypeConfiguration<Product>
             .HasForeignKey(product => product.CategoryId)
             .OnDelete(DeleteBehavior.Restrict);
 
-        // GIN trigram index: makes ILIKE '%fragment%' searches index-assisted instead of full scans.
+        // GIN trigram index (pg_trgm splits names into 3-letter pieces): lets the case-insensitive contains-search
+        // (ILIKE '%fragment%') use an index instead of reading every row.
         builder.HasIndex(product => product.Name)
             .HasMethod("gin")
             .HasOperators("gin_trgm_ops");
 
-        // stock-level?min=&max= filters on stock and orders by (stock, name, id): with all three in the index, a page
-        // is an ordered index-only scan. Measured on 850,000 products: 184 ms with an index on stock alone (rows read
-        // from the table, then sorted by name), well under 1 ms with this one.
+        // stock-level?min=&max= filters on stock and orders by (stock, name, id): with all three in one index, a page
+        // is read in order from the index alone, with no sort. Measured in docs/adr/0022-database-at-scale.md.
         builder.HasIndex(product => new { product.StockQuantity, product.Name, product.Id })
             .HasDatabaseName("ix_products_stock_quantity_name_id");
 

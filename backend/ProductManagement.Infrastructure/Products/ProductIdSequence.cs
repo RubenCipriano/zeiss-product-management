@@ -1,5 +1,5 @@
 using Microsoft.EntityFrameworkCore;
-using ProductManagement.Domain.Products;
+using ProductManagement.Core.Products;
 
 namespace ProductManagement.Infrastructure.Products;
 

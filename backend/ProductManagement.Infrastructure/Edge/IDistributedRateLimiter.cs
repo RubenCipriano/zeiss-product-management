@@ -1,9 +1,13 @@
 namespace ProductManagement.Infrastructure.Edge;
 
 /// <summary>
-/// Token buckets shared by every API replica, so a caller's limit is the same with 2 replicas or 8. Per-replica,
-/// in-memory limits would allow <c>limit × replicas</c> as the autoscaler adds pods.
+/// Rate-limit counters shared by every API replica (in Redis), so a caller's limit is the same with 2 replicas or 8.
+/// Per-replica, in-memory limits would allow <c>limit × replicas</c> as the autoscaler adds pods.
 /// </summary>
+/// <remarks>
+/// The counters are token buckets: each caller has a bucket that refills at a steady rate up to a maximum size; every
+/// request takes one token, and a request that finds the bucket empty is refused (429).
+/// </remarks>
 public interface IDistributedRateLimiter
 {
     /// <summary>
@@ -18,4 +22,5 @@ public interface IDistributedRateLimiter
         CancellationToken cancellationToken);
 }
 
+/// <summary>Whether the request may go ahead, and if not, how long until a token is available.</summary>
 public readonly record struct RateLimitDecision(bool Allowed, TimeSpan RetryAfter);

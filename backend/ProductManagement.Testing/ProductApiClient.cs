@@ -3,8 +3,8 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using ProductManagement.Application.Common.Paging;
-using ProductManagement.Application.Products.Contracts;
+using ProductManagement.Core.Common.Paging;
+using ProductManagement.Core.Products.Contracts;
 
 namespace ProductManagement.Testing;
 
@@ -12,7 +12,7 @@ namespace ProductManagement.Testing;
 /// A thin, typed wrapper over the HTTP API. It goes through real HTTP (routing, model binding, serialization,
 /// filters), so tests exercise exactly what a client would.
 /// </summary>
-public sealed class ProductApiClient(HttpClient httpClient) : IDisposable
+public class ProductApiClient(HttpClient httpClient) : IDisposable
 {
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {

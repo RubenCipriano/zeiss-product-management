@@ -10,7 +10,7 @@ namespace ProductManagement.Testing;
 /// Each instance is an independent "API replica" with its own DbContext pool and Redis connection, which lets
 /// tests simulate several replicas sharing one database and one cache.
 /// </summary>
-public sealed class ProductManagementApiFactory(
+public class ProductManagementApiFactory(
     string databaseConnectionString,
     string? redisConnectionString,
     bool applyMigrations,

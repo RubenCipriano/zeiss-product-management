@@ -1,14 +1,18 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
-using ProductManagement.Application.Common.Errors;
-using ProductManagement.Application.Common.Results;
+using ProductManagement.Core.Common.Errors;
+using ProductManagement.Core.Common.Results;
 
 namespace ProductManagement.Api.Http;
 
 /// <summary>
-/// Base class for API controllers: turns application <see cref="Result"/>s into HTTP responses so that every
-/// endpoint maps errors to status codes and RFC 9457 problem details in the same way.
+/// Base class for the API controllers: turns a use case's <see cref="Result"/> into an HTTP response, so every
+/// endpoint maps errors to status codes and to "problem details" error bodies (RFC 9457) in the same way.
 /// </summary>
+/// <remarks>
+/// <c>[ApiController]</c> switches on ASP.NET Core's API conventions: the JSON body is bound automatically, and an
+/// invalid request is answered with a 400 before the action runs.
+/// </remarks>
 [ApiController]
 public abstract class ApiControllerBase : ControllerBase
 {
@@ -17,6 +21,7 @@ public abstract class ApiControllerBase : ControllerBase
     protected ActionResult<T> ToActionResult<T>(Result<T> result) =>
         result.IsSuccess ? Ok(result.Value) : Problem(result.Error);
 
+    /// <summary>The error as an HTTP response: the status code comes from <see cref="Error.Type"/>.</summary>
     protected ObjectResult Problem(Error error)
     {
         if (error.Type == ErrorType.Validation)
@@ -29,6 +34,8 @@ public abstract class ApiControllerBase : ControllerBase
             ErrorType.NotFound => StatusCodes.Status404NotFound,
             ErrorType.Conflict => StatusCodes.Status409Conflict,
             ErrorType.PreconditionFailed => StatusCodes.Status412PreconditionFailed,
+            ErrorType.Unprocessable => StatusCodes.Status422UnprocessableEntity,
+            ErrorType.Unavailable => StatusCodes.Status503ServiceUnavailable,
             _ => StatusCodes.Status500InternalServerError,
         };
 
@@ -60,7 +67,11 @@ public abstract class ApiControllerBase : ControllerBase
         }
 
         return ProblemDetailsFactory
-            .CreateValidationProblemDetails(HttpContext, modelState, StatusCodes.Status400BadRequest, detail: error.Message)
+            .CreateValidationProblemDetails(
+                HttpContext,
+                modelState,
+                StatusCodes.Status400BadRequest,
+                detail: error.Message)
             .WithErrorCode(error.Code)
             .ToResult();
     }

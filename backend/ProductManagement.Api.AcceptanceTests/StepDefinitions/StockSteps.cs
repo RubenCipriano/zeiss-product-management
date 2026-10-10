@@ -6,7 +6,7 @@ using static ProductManagement.Testing.ProductApiClient;
 namespace ProductManagement.Api.AcceptanceTests.StepDefinitions;
 
 [Binding]
-public sealed class StockSteps(ScenarioState state)
+public class StockSteps(ScenarioState state)
 {
     [When("I remove {int} units from stock")]
     [When("someone else removes {int} unit(s) from stock")]
@@ -16,6 +16,12 @@ public sealed class StockSteps(ScenarioState state)
     [When("I add {int} units to stock")]
     public async Task WhenIAddUnitsToStock(int quantity) =>
         state.RecordResponse(await state.Api.AddToStockAsync(state.Product.Id, quantity));
+
+    [When(@"^I (remove|add) (\d+) units? (?:from|to) the stock of product (\d+)$")]
+    public async Task WhenIChangeTheStockOfProduct(string operation, int quantity, int productId) =>
+        state.RecordResponse(operation == "remove"
+            ? await state.Api.DecrementStockAsync(productId, quantity)
+            : await state.Api.AddToStockAsync(productId, quantity));
 
     [When("{int} customers each order {int} unit(s) at the same time")]
     public async Task WhenCustomersOrderAtTheSameTime(int customers, int quantity)
@@ -37,6 +43,13 @@ public sealed class StockSteps(ScenarioState state)
     {
         state.LastResponse!.StatusCode.ShouldBe(HttpStatusCode.Conflict);
         (await ReadProblemAsync(state.LastResponse)).ErrorCode.ShouldBe(errorCode);
+    }
+
+    [Then("the request is rejected because the product does not exist")]
+    public async Task ThenTheRequestIsRejectedBecauseTheProductDoesNotExist()
+    {
+        state.LastResponse!.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        (await ReadProblemAsync(state.LastResponse)).ErrorCode.ShouldBe("product.not_found");
     }
 
     [Then("{int} orders succeed and {int} are rejected")]

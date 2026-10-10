@@ -1,6 +1,7 @@
 namespace ProductManagement.Infrastructure.Persistence;
 
-internal sealed class DatabaseOptions
+/// <summary>Database settings (the <c>Database</c> section of the configuration).</summary>
+internal class DatabaseOptions
 {
     public const string SectionName = "Database";
 
@@ -8,7 +9,8 @@ internal sealed class DatabaseOptions
 
     /// <summary>
     /// Applies pending EF Core migrations when the API starts. Convenient for local development and the in-memory test
-    /// host. In Kubernetes migrations run once per deployment instead, in a Job (the <c>migrate</c> command).
+    /// host. Deployments instead run migrations once, before the rollout: the CI/CD pipeline (or deploy/deploy.sh
+    /// locally) runs the API image's <c>migrate</c> command with the migrator's database credentials.
     /// </summary>
     public bool ApplyMigrationsOnStartup { get; init; }
 

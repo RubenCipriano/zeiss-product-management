@@ -1,17 +1,19 @@
 using System.Globalization;
 using System.Net.Mime;
+using FluentValidation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using ProductManagement.Api.Http;
 using ProductManagement.Api.RateLimiting;
 using ProductManagement.Api.Security;
-using ProductManagement.Application.Common.Errors;
+using ProductManagement.Core.Common.Validation;
 
 namespace ProductManagement.Api.Controllers;
 
 /// <summary>
-/// Token endpoint: a registered consumer exchanges its client id and secret for a signed JWT.
+/// Sign-in: a registered client exchanges its client id and secret for a signed access token (a JWT, sent afterwards
+/// as <c>Authorization: Bearer ...</c>). Also publishes the public key that verifies those tokens.
 /// </summary>
 /// <remarks>
 /// Two layers against secret guessing: a per-replica rate limit on the endpoint, and a cluster-wide count of failed
@@ -19,7 +21,10 @@ namespace ProductManagement.Api.Controllers;
 /// </remarks>
 [Route("api/auth")]
 [AllowAnonymous]
-public sealed class AuthController(TokenService tokens, TokenSigningKey signingKey) : ApiControllerBase
+public class AuthController(
+    TokenService tokens,
+    TokenSigningKey signingKey,
+    IValidator<TokenRequest> validator) : ApiControllerBase
 {
     /// <summary>
     /// The public key(s) that verify access tokens (JWKS, RFC 7517). Lets the gateway and other services check tokens
@@ -45,14 +50,15 @@ public sealed class AuthController(TokenService tokens, TokenSigningKey signingK
         TokenRequest request,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(request.ClientId) || string.IsNullOrEmpty(request.ClientSecret))
+        var validation = await validator.ValidateAsync(request, cancellationToken);
+        if (!validation.IsValid)
         {
-            return Problem(Error.Validation("clientId", "'clientId' and 'clientSecret' are required."));
+            return Problem(validation.ToError());
         }
 
         var outcome = await tokens.IssueAsync(
-            request.ClientId,
-            request.ClientSecret,
+            request.ClientId!,
+            request.ClientSecret!,
             HttpContext.GetClientIpKey(),
             cancellationToken);
 
@@ -60,6 +66,7 @@ public sealed class AuthController(TokenService tokens, TokenSigningKey signingK
         {
             case TokenOutcome.Issued(var token):
                 return Ok(new TokenResponse(token.AccessToken, "Bearer", token.ExpiresInSeconds));
+
             case TokenOutcome.Blocked(var blockedFor):
                 var retryAfter = Math.Max(1, (int)Math.Ceiling(blockedFor.TotalSeconds));
                 Response.Headers.RetryAfter = retryAfter.ToString(CultureInfo.InvariantCulture);
@@ -67,9 +74,13 @@ public sealed class AuthController(TokenService tokens, TokenSigningKey signingK
                     StatusCodes.Status429TooManyRequests,
                     ApiErrorCodes.TooManyFailedAttempts,
                     $"Too many failed sign-in attempts. Try again in {retryAfter} second(s).");
+
             default:
                 // One message for unknown client and wrong secret: no hint about which client ids exist.
-                return Rejection(StatusCodes.Status401Unauthorized, ApiErrorCodes.InvalidClient, "Invalid client credentials.");
+                return Rejection(
+                    StatusCodes.Status401Unauthorized,
+                    ApiErrorCodes.InvalidClient,
+                    "Invalid client credentials.");
         }
     }
 }

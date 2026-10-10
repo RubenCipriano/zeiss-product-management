@@ -7,7 +7,7 @@ namespace ProductManagement.Infrastructure.Redis;
 /// Reports Redis as <see cref="HealthStatus.Degraded"/>, never Unhealthy, when it is unreachable: the API keeps
 /// serving from the database, so a cache outage must not take replicas out of the load balancer.
 /// </summary>
-internal sealed class RedisHealthCheck(IConnectionMultiplexer redis) : IHealthCheck
+internal class RedisHealthCheck(IConnectionMultiplexer redis) : IHealthCheck
 {
     public async Task<HealthCheckResult> CheckHealthAsync(
         HealthCheckContext context,

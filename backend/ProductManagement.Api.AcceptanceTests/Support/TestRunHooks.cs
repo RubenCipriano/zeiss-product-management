@@ -7,7 +7,7 @@ namespace ProductManagement.Api.AcceptanceTests.Support;
 /// Starts PostgreSQL and the API once for the whole run, and gives every scenario an empty product table.
 /// </summary>
 [Binding]
-public sealed class TestRunHooks
+public class TestRunHooks
 {
     private static ApiTestEnvironment? _environment;
 

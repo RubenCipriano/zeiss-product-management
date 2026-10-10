@@ -5,17 +5,18 @@ using ProductManagement.Api.Http;
 namespace ProductManagement.Api.ErrorHandling;
 
 /// <summary>
-/// Last line of defence for exceptions nothing else handled. Logs them and returns an RFC 9457 problem
-/// response that does not reveal internal details.
+/// Last line of defence for exceptions nothing else handled: logs them and returns an RFC 9457 "problem details"
+/// error response (the standard JSON shape for HTTP errors) that does not reveal internal details.
 /// </summary>
 /// <remarks>
-/// Expected failures (validation, not found, conflicts) never get here: the application layer returns them as
+/// Expected failures (validation, not found, conflicts) never get here: the use cases return them as
 /// results. Anything that reaches this handler is a bug or an infrastructure fault.
 /// </remarks>
-internal sealed partial class GlobalExceptionHandler(
+internal partial class GlobalExceptionHandler(
     IProblemDetailsService problemDetailsService,
     ILogger<GlobalExceptionHandler> logger) : IExceptionHandler
 {
+    /// <summary>Non-standard status (popularised by nginx) for "the client closed the connection first".</summary>
     private const int ClientClosedRequest = 499;
 
     public async ValueTask<bool> TryHandleAsync(
@@ -37,14 +38,10 @@ internal sealed partial class GlobalExceptionHandler(
             _ => (StatusCodes.Status500InternalServerError, "An unexpected error occurred."),
         };
 
-        if (statusCode >= StatusCodes.Status500InternalServerError)
-        {
-            LogUnhandledException(exception, httpContext.Request.Method, httpContext.Request.Path);
-        }
-
         var problem = new ProblemDetails { Status = statusCode, Title = title };
         if (statusCode >= StatusCodes.Status500InternalServerError)
         {
+            LogUnhandledException(exception, httpContext.Request.Method, httpContext.Request.Path);
             problem.WithErrorCode(ApiErrorCodes.InternalError);
         }
 

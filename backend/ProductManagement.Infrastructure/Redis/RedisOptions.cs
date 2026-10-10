@@ -10,7 +10,7 @@ namespace ProductManagement.Infrastructure.Redis;
 /// Bound to the <c>Cache</c> section, where <see cref="KeyPrefix"/> has always been configured (the cache was the first
 /// user of Redis), so existing configuration keeps working.
 /// </remarks>
-internal sealed class RedisOptions
+internal class RedisOptions
 {
     public const string SectionName = "Cache";
 

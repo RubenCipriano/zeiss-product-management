@@ -1,9 +1,9 @@
 namespace ProductManagement.Infrastructure.Caching;
 
 /// <summary>
-/// Cache for product read models, invalidated by <em>generation</em>: every key embeds the generations its value
-/// depends on, and a write increments them. Entries of older generations are never read again and expire on their
-/// own. See docs/adr/0008-redis-cache.md.
+/// The product cache. Instead of deleting entries when data changes, every key includes one or more "generations"
+/// (change counters), and a write increments them: entries saved under the old numbers are simply never asked for
+/// again, and expire on their own. See docs/adr/0008-redis-cache.md.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -19,7 +19,7 @@ namespace ProductManagement.Infrastructure.Caching;
 /// </para>
 /// <para>
 /// Implementations must <b>fail open</b>: if the cache is unreachable, reads fall back to the database and nothing
-/// throws. The cache is an optimisation, never a dependency for correctness.
+/// throws. The cache is a speed-up, never needed for correct answers.
 /// </para>
 /// </remarks>
 internal interface ICatalogCache
@@ -40,6 +40,7 @@ internal interface ICatalogCache
     Task InvalidateAsync(CatalogChange change, IReadOnlyCollection<int> productIds);
 }
 
+/// <summary>Which generations a cache entry depends on (and therefore which writes make it obsolete).</summary>
 internal enum CacheScope
 {
     /// <summary>Depends on everything, stock included: the data generation.</summary>
@@ -52,6 +53,7 @@ internal enum CacheScope
     Product,
 }
 
+/// <summary>What kind of write happened, so the cache knows which generations to increment.</summary>
 internal enum CatalogChange
 {
     /// <summary>Only stock quantities changed.</summary>

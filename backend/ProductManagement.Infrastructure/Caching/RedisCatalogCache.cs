@@ -7,10 +7,10 @@ using StackExchange.Redis;
 namespace ProductManagement.Infrastructure.Caching;
 
 /// <summary>
-/// Redis implementation of <see cref="ICatalogCache"/>. Shared by every API replica, so a write on one replica is
-/// visible to reads on all the others as soon as the generation is incremented.
+/// The product cache (<see cref="ICatalogCache"/>) stored in Redis. Every API replica shares it, so a write on one
+/// replica is seen by reads on all the others as soon as it increments the generation.
 /// </summary>
-internal sealed partial class RedisCatalogCache(
+internal partial class RedisCatalogCache(
     IConnectionMultiplexer redis,
     IOptions<RedisOptions> redisOptions,
     IOptions<CacheOptions> options,
@@ -21,9 +21,9 @@ internal sealed partial class RedisCatalogCache(
 
     private readonly string _prefix = redisOptions.Value.KeyPrefix;
 
-    private IDatabase Database => redis.GetDatabase();
-
     private readonly TimeSpan _productGenerationTtl = options.Value.ProductGenerationTtl;
+
+    private IDatabase Database => redis.GetDatabase();
 
     private RedisKey DataGeneration => $"{_prefix}:catalog:generation";
 
@@ -46,7 +46,7 @@ internal sealed partial class RedisCatalogCache(
             if (values.Any(value => !value.HasValue))
             {
                 // First use, or the counter expired or was lost. Start from the clock instead of 0, so a version is
-                // never reused for a different state. Only the first writer wins (NX).
+                // never reused for a different state. Only the first writer wins (NX: set only if not there yet).
                 await Task.WhenAll(keys.Select(StartAsync));
                 values = await Database.StringGetAsync(keys);
             }
@@ -126,9 +126,13 @@ internal sealed partial class RedisCatalogCache(
 
     private RedisKey Key(string key) => $"{_prefix}:{key}";
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Cache unavailable while trying to {Operation}; using the database")]
+    [LoggerMessage(
+        Level = LogLevel.Warning,
+        Message = "Cache unavailable while trying to {Operation}; using the database")]
     private partial void LogCacheUnavailable(Exception exception, string operation);
 
-    [LoggerMessage(Level = LogLevel.Error, Message = "Cache invalidation failed; cached reads may be stale until they expire")]
+    [LoggerMessage(
+        Level = LogLevel.Error,
+        Message = "Cache invalidation failed; cached reads may be stale until they expire")]
     private partial void LogInvalidationFailed(Exception exception);
 }

@@ -1,6 +1,10 @@
 namespace ProductManagement.Api.Configuration;
 
-internal sealed class CorsPolicyOptions
+/// <summary>
+/// CORS settings (the <c>Cors</c> section of the configuration): which other websites' pages a browser lets call this
+/// API.
+/// </summary>
+internal class CorsPolicyOptions
 {
     public const string SectionName = "Cors";
 

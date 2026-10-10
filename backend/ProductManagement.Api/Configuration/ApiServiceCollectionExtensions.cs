@@ -1,9 +1,11 @@
 using System.Net.Mime;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Cors.Infrastructure;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi;
@@ -12,12 +14,25 @@ using ProductManagement.Api.Http;
 
 namespace ProductManagement.Api.Configuration;
 
+/// <summary>
+/// Registers the HTTP side of the API at startup (<c>AddApiPresentation</c> in <c>Program.cs</c>): controllers and
+/// JSON, the shape of error responses, the OpenAPI document, CORS and the trusted proxy headers.
+/// </summary>
 internal static class ApiServiceCollectionExtensions
 {
     private const string BearerScheme = "Bearer";
 
     public static IServiceCollection AddApiPresentation(this IServiceCollection services)
     {
+        AddControllersWithJson(services);
+        AddProblemDetails(services);
+        AddOpenApiDocument(services);
+        AddCorsPolicy(services);
+        AddForwardedHeaders(services);
+        return services;
+    }
+
+    private static void AddControllersWithJson(IServiceCollection services) =>
         services
             .AddControllers()
             .AddJsonOptions(options =>
@@ -30,19 +45,29 @@ internal static class ApiServiceCollectionExtensions
                 options.AllowInputFormatterExceptionMessages = false;
             });
 
+    /// <summary>
+    /// Every error response is a "problem details" JSON object (RFC 9457, <c>application/problem+json</c>: the
+    /// standard shape for HTTP errors) with an extra machine-readable <c>errorCode</c>. See docs/adr/0005.
+    /// </summary>
+    private static void AddProblemDetails(IServiceCollection services)
+    {
         services.Configure<ApiBehaviorOptions>(options =>
         {
-            // Model-binding failures (malformed JSON, "page=abc") use the same problem shape as application
-            // validation errors, including the machine-readable errorCode.
+            // Model-binding failures (malformed JSON, "page=abc") use the same problem shape as use-case validation
+            // errors, including the machine-readable errorCode.
             options.InvalidModelStateResponseFactory = context =>
             {
                 RemoveRedundantBodyErrors(context);
 
                 var problemDetailsFactory = context.HttpContext.RequestServices
-                    .GetRequiredService<Microsoft.AspNetCore.Mvc.Infrastructure.ProblemDetailsFactory>();
+                    .GetRequiredService<ProblemDetailsFactory>();
                 var problem = problemDetailsFactory
-                    .CreateValidationProblemDetails(context.HttpContext, context.ModelState, StatusCodes.Status400BadRequest)
+                    .CreateValidationProblemDetails(
+                        context.HttpContext,
+                        context.ModelState,
+                        StatusCodes.Status400BadRequest)
                     .WithErrorCode(ApiErrorCodes.ValidationFailed);
+                UseCamelCaseKeys(problem);
 
                 return new BadRequestObjectResult(problem)
                 {
@@ -58,7 +83,7 @@ internal static class ApiServiceCollectionExtensions
                     $"{context.HttpContext.Request.Method} {context.HttpContext.Request.Path}";
 
                 // Every problem carries an errorCode. Framework-generated ones (unknown route, 405, 415, ...)
-                // get a generic "http_<status>" code; application errors set their own, more specific code.
+                // get a generic "http_<status>" code; use-case errors set their own, more specific code.
                 context.ProblemDetails.Extensions.TryAdd(
                     ApiProblems.ErrorCodeKey,
                     ApiErrorCodes.ForStatus(context.ProblemDetails.Status ?? context.HttpContext.Response.StatusCode));
@@ -66,7 +91,10 @@ internal static class ApiServiceCollectionExtensions
                     .SetTag("problem.status", context.ProblemDetails.Status);
             });
         services.AddExceptionHandler<GlobalExceptionHandler>();
+    }
 
+    /// <summary>The OpenAPI (Swagger) description of the endpoints, including the bearer-token requirement.</summary>
+    private static void AddOpenApiDocument(IServiceCollection services) =>
         services.AddOpenApi(options =>
             options.AddDocumentTransformer((document, _, _) =>
             {
@@ -74,7 +102,8 @@ internal static class ApiServiceCollectionExtensions
                 document.Info.Description =
                     "Manage products and their stock. Errors follow RFC 9457 (application/problem+json) and carry a " +
                     "machine-readable `errorCode`. Conditional updates use ETag / If-Match. All endpoints require " +
-                    "a bearer token: POST your client id and secret to /api/auth/token (roles: viewer, stock-clerk, manager).";
+                    "a bearer token: POST your client id and secret to /api/auth/token " +
+                    "(roles: viewer, stock-clerk, manager).";
 
                 document.Components ??= new OpenApiComponents();
                 document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
@@ -87,11 +116,20 @@ internal static class ApiServiceCollectionExtensions
                 };
                 document.Security =
                 [
-                    new OpenApiSecurityRequirement { [new OpenApiSecuritySchemeReference(BearerScheme, document)] = [] },
+                    new OpenApiSecurityRequirement
+                    {
+                        [new OpenApiSecuritySchemeReference(BearerScheme, document)] = [],
+                    },
                 ];
                 return Task.CompletedTask;
             }));
 
+    /// <summary>
+    /// CORS: which other websites' pages a browser lets call this API. Off unless origins are configured, because the
+    /// web app is served from the same origin.
+    /// </summary>
+    private static void AddCorsPolicy(IServiceCollection services)
+    {
         services.AddOptions<CorsPolicyOptions>()
             .BindConfiguration(CorsPolicyOptions.SectionName)
             .ValidateDataAnnotations()
@@ -109,7 +147,9 @@ internal static class ApiServiceCollectionExtensions
                         .WithExposedHeaders("ETag", "Location");
                 }
             }));
+    }
 
+    private static void AddForwardedHeaders(IServiceCollection services) =>
         services.Configure<ForwardedHeadersOptions>(options =>
         {
             // The API is only reachable through the gateway (Kubernetes NetworkPolicy), so the client address it
@@ -118,9 +158,6 @@ internal static class ApiServiceCollectionExtensions
             options.KnownIPNetworks.Clear();
             options.KnownProxies.Clear();
         });
-
-        return services;
-    }
 
     /// <summary>
     /// When the JSON body is missing or cannot be deserialized, MVC reports the precise error ("$.field", or ""
@@ -142,6 +179,24 @@ internal static class ApiServiceCollectionExtensions
         foreach (var name in bodyParameterNames)
         {
             context.ModelState.Remove(name);
+        }
+    }
+
+    /// <summary>
+    /// Keys the errors the way the client spelled the field, like use-case validation errors do: a query object's
+    /// properties bind under their C# names ("Min"), but the client sent "min". JSON paths ("$.price") stay as they
+    /// are.
+    /// </summary>
+    private static void UseCamelCaseKeys(ValidationProblemDetails problem)
+    {
+        var errors = problem.Errors
+            .GroupBy(error => JsonNamingPolicy.CamelCase.ConvertName(error.Key))
+            .ToDictionary(group => group.Key, group => group.SelectMany(error => error.Value).ToArray());
+
+        problem.Errors.Clear();
+        foreach (var (field, messages) in errors)
+        {
+            problem.Errors[field] = messages;
         }
     }
 }

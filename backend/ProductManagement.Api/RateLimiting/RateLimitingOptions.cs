@@ -3,9 +3,10 @@ using System.ComponentModel.DataAnnotations;
 namespace ProductManagement.Api.RateLimiting;
 
 /// <summary>
-/// Token-bucket limits per caller (the signed-in user, or the client IP for anonymous requests).
+/// Rate limits per caller (the signed-in user, or the client IP for anonymous requests), as token buckets: a caller
+/// may send up to "burst" requests at once, then on average "per second" requests per second. Over the limit: 429.
 /// </summary>
-internal sealed class RateLimitingOptions
+internal class RateLimitingOptions
 {
     public const string SectionName = "RateLimiting";
 

@@ -2,7 +2,11 @@ using System.ComponentModel.DataAnnotations;
 
 namespace ProductManagement.Infrastructure.Security;
 
-internal sealed class FailedAttemptThrottleOptions
+/// <summary>
+/// Sign-in throttle settings (the <c>SignInThrottle</c> section of the configuration): how many failed sign-ins a
+/// caller may make within a time window before it is blocked for the rest of that window.
+/// </summary>
+internal class FailedAttemptThrottleOptions
 {
     public const string SectionName = "SignInThrottle";
 

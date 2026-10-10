@@ -6,7 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\ProductManagement.Application\ProductManagement.Application.csproj" />
+    <ProjectReference Include="..\ProductManagement.Core\ProductManagement.Core.csproj" />
     <ProjectReference Include="..\ProductManagement.Infrastructure\ProductManagement.Infrastructure.csproj" />
   </ItemGroup>
 
@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="ProductManagement.Api.UnitTests" />
+    <InternalsVisibleTo Include="ProductManagement.UnitTests" />
   </ItemGroup>
 
 </Project>

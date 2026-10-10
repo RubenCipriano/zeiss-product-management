@@ -31,7 +31,7 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                 .HasMin(100000L)
                 .HasMax(999999L);
 
-            modelBuilder.Entity("ProductManagement.Domain.Categories.Category", b =>
+            modelBuilder.Entity("ProductManagement.Core.Categories.Category", b =>
                 {
                     b.Property<int>("Id")
                         .HasColumnType("integer")
@@ -85,7 +85,7 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                         });
                 });
 
-            modelBuilder.Entity("ProductManagement.Domain.Products.Product", b =>
+            modelBuilder.Entity("ProductManagement.Core.Products.Product", b =>
                 {
                     b.Property<int>("Id")
                         .HasColumnType("integer")
@@ -157,7 +157,7 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                         });
                 });
 
-            modelBuilder.Entity("ProductManagement.Domain.Products.StockMovement", b =>
+            modelBuilder.Entity("ProductManagement.Core.Products.StockMovement", b =>
                 {
                     b.Property<long>("Id")
                         .ValueGeneratedOnAdd()
@@ -207,9 +207,9 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                         });
                 });
 
-            modelBuilder.Entity("ProductManagement.Domain.Products.Product", b =>
+            modelBuilder.Entity("ProductManagement.Core.Products.Product", b =>
                 {
-                    b.HasOne("ProductManagement.Domain.Categories.Category", "Category")
+                    b.HasOne("ProductManagement.Core.Categories.Category", "Category")
                         .WithMany()
                         .HasForeignKey("CategoryId")
                         .OnDelete(DeleteBehavior.Restrict)
@@ -219,9 +219,9 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
                     b.Navigation("Category");
                 });
 
-            modelBuilder.Entity("ProductManagement.Domain.Products.StockMovement", b =>
+            modelBuilder.Entity("ProductManagement.Core.Products.StockMovement", b =>
                 {
-                    b.HasOne("ProductManagement.Domain.Products.Product", null)
+                    b.HasOne("ProductManagement.Core.Products.Product", null)
                         .WithMany()
                         .HasForeignKey("ProductId")
                         .OnDelete(DeleteBehavior.Cascade)

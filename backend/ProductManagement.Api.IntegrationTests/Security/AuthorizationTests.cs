@@ -14,7 +14,7 @@ namespace ProductManagement.Api.IntegrationTests.Security;
 /// Role-based access control, enforced by the API. The UI hides actions a role cannot perform, but these tests are
 /// the actual guarantee.
 /// </summary>
-public sealed class AuthorizationTests(ApiFixture fixture) : ApiTestBase(fixture)
+public class AuthorizationTests(ApiFixture fixture) : ApiTestBase(fixture)
 {
     public enum Operation
     {

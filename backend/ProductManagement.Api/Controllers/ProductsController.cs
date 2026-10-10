@@ -6,22 +6,35 @@ using ProductManagement.Api.Http;
 using ProductManagement.Api.Idempotency;
 using ProductManagement.Api.RateLimiting;
 using ProductManagement.Api.Security;
-using ProductManagement.Application.Common.Paging;
-using ProductManagement.Application.Products;
-using ProductManagement.Application.Products.Contracts;
+using ProductManagement.Core.Common.Paging;
+using ProductManagement.Core.Products;
+using ProductManagement.Core.Products.Contracts;
 
 namespace ProductManagement.Api.Controllers;
 
 /// <summary>
-/// Products and their stock.
+/// The <c>/api/products</c> endpoints: list, search, get, create, edit and delete products, change their stock, and
+/// read their stock history.
 /// </summary>
 /// <remarks>
-/// Controllers only translate HTTP into use-case calls and results back into HTTP. Validation, business rules and
-/// persistence live in the application, domain and infrastructure layers.
+/// <para>
+/// Controllers only translate HTTP into use-case calls (Core) and the results back into HTTP. Validation, business
+/// rules and database access live in Core and Infrastructure.
+/// </para>
 /// <para>
 /// Every endpoint needs <see cref="Policies.ProductsRead"/>; mutating endpoints additionally need a write
 /// permission and use the stricter <see cref="RateLimitPolicies.Writes"/> rate limit. Create and the stock
-/// operations accept an optional <c>Idempotency-Key</c> header, so retries are never applied twice.
+/// operations accept an optional <c>Idempotency-Key</c> header (an id the client chooses, so the same request sent
+/// twice is applied once; see <see cref="IdempotentAttribute"/>).
+/// </para>
+/// <para>
+/// The <c>ETag</c> response header carries the product's version. Sending it back in <c>If-Match</c> on PUT/DELETE
+/// means "only if nobody changed it since I read it" (412 otherwise), so two people editing at once never silently
+/// overwrite each other.
+/// </para>
+/// <para>
+/// The <c>cancellationToken</c> each action receives is signalled when the client disconnects, so the work in progress
+/// (database queries) can stop early.
 /// </para>
 /// </remarks>
 [Route("api/products")]
@@ -29,12 +42,14 @@ namespace ProductManagement.Api.Controllers;
 [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized, ProblemJsonContentType)]
 [ProducesResponseType<ProblemDetails>(StatusCodes.Status403Forbidden, ProblemJsonContentType)]
 [ProducesResponseType<ProblemDetails>(StatusCodes.Status429TooManyRequests, ProblemJsonContentType)]
-public sealed class ProductsController(
+public class ProductsController(
     IProductQueryService productQueries,
     IProductCommandService productCommands,
     IStockCommandService stockCommands) : ApiControllerBase
 {
     private const string IfMatchHeader = "If-Match";
+
+    private const string IfNoneMatchHeader = "If-None-Match";
 
     /// <summary>Lists all products, ordered by name.</summary>
     [HttpGet]
@@ -45,14 +60,32 @@ public sealed class ProductsController(
         CancellationToken cancellationToken) =>
         ToActionResult(await productQueries.ListAsync(query, cancellationToken));
 
-    /// <summary>Gets a single product. The response carries an <c>ETag</c> header for conditional updates.</summary>
+    /// <summary>
+    /// Gets a single product. The response carries an <c>ETag</c> header for conditional updates; sent back in
+    /// <c>If-None-Match</c>, it turns the answer into 304 Not Modified (no body) while the product is unchanged.
+    /// </summary>
     [HttpGet("{id:int}")]
     [ProducesResponseType<ProductResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status304NotModified)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound, ProblemJsonContentType)]
-    public async Task<ActionResult<ProductResponse>> GetProduct(int id, CancellationToken cancellationToken)
+    public async Task<ActionResult<ProductResponse>> GetProduct(
+        int id,
+        [FromHeader(Name = IfNoneMatchHeader)] string? ifNoneMatch,
+        CancellationToken cancellationToken)
     {
         var result = await productQueries.GetByIdAsync(id, cancellationToken);
-        return result.IsSuccess ? OkWithEntityTag(result.Value) : Problem(result.Error);
+        if (result.IsFailure)
+        {
+            return Problem(result.Error);
+        }
+
+        if (EntityTag.MatchesIfNoneMatch(ifNoneMatch, result.Value.Version))
+        {
+            SetEntityTag(result.Value);
+            return StatusCode(StatusCodes.Status304NotModified);
+        }
+
+        return OkWithEntityTag(result.Value);
     }
 
     /// <summary>A product's stock history (every addition, removal and correction), newest first.</summary>
@@ -157,9 +190,8 @@ public sealed class ProductsController(
         return result.IsSuccess ? NoContent() : Problem(result.Error);
     }
 
-    // {quantity} has no route constraint on purpose: a non-numeric value is a malformed input (400), whereas
-    // a non-numeric {id} simply does not identify a product (404).
-
+    // In both stock routes {quantity} has no route constraint on purpose (unlike {id:int}): a non-numeric quantity is
+    // a malformed input (400), whereas a non-numeric id simply does not identify a product (404).
     /// <summary>
     /// Removes <paramref name="quantity"/> units from stock. Atomic: fails with 409 instead of going below zero.
     /// </summary>

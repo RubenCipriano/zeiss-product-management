@@ -9,7 +9,7 @@ namespace ProductManagement.Api.IntegrationTests.Products;
 /// The guarantees that only matter under concurrent load, verified with real parallel HTTP requests against a
 /// real PostgreSQL instance.
 /// </summary>
-public sealed class ConcurrencyTests(ApiFixture fixture) : ApiTestBase(fixture)
+public class ConcurrencyTests(ApiFixture fixture) : ApiTestBase(fixture)
 {
     [Fact]
     public async Task ConcurrentDecrements_NeverOversell()

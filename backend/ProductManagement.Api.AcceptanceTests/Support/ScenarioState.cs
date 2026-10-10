@@ -1,4 +1,4 @@
-using ProductManagement.Application.Products.Contracts;
+using ProductManagement.Core.Products.Contracts;
 using ProductManagement.Testing;
 
 namespace ProductManagement.Api.AcceptanceTests.Support;
@@ -6,7 +6,7 @@ namespace ProductManagement.Api.AcceptanceTests.Support;
 /// <summary>
 /// Per-scenario state shared between step classes (created and disposed by Reqnroll's context injection).
 /// </summary>
-public sealed class ScenarioState : IDisposable
+public class ScenarioState : IDisposable
 {
     public ProductApiClient Api { get; } = TestRunHooks.Environment.CreateClient();
 

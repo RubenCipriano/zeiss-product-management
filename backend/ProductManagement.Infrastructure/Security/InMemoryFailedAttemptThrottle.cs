@@ -8,21 +8,22 @@ namespace ProductManagement.Infrastructure.Security;
 /// Single-process fallback used when no Redis is configured (local development only). Windows that have ended are
 /// purged on access, so the table only holds keys that failed recently.
 /// </summary>
-internal sealed class InMemoryFailedAttemptThrottle(
+internal class InMemoryFailedAttemptThrottle(
     IOptions<FailedAttemptThrottleOptions> options,
     TimeProvider timeProvider) : IFailedAttemptThrottle
 {
-    private readonly ConcurrentDictionary<string, (int Failures, DateTimeOffset WindowEnds)> _attempts = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (int Failures, DateTimeOffset WindowEnds)> _attempts =
+        new(StringComparer.Ordinal);
     private readonly FailedAttemptThrottleOptions _options = options.Value;
 
     public Task<TimeSpan?> GetBlockedForAsync(string key, CancellationToken cancellationToken)
     {
         var now = timeProvider.GetUtcNow();
         PurgeExpired(now);
-        return Task.FromResult<TimeSpan?>(
-            _attempts.TryGetValue(key, out var entry) && entry.WindowEnds > now && entry.Failures >= _options.MaxFailures
-                ? entry.WindowEnds - now
-                : null);
+        var isBlocked = _attempts.TryGetValue(key, out var entry)
+            && entry.WindowEnds > now
+            && entry.Failures >= _options.MaxFailures;
+        return Task.FromResult<TimeSpan?>(isBlocked ? entry.WindowEnds - now : null);
     }
 
     public Task RecordFailureAsync(string key, CancellationToken cancellationToken)

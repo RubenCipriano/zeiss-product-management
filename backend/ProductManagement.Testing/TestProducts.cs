@@ -1,4 +1,4 @@
-using ProductManagement.Application.Products.Contracts;
+using ProductManagement.Core.Products.Contracts;
 
 namespace ProductManagement.Testing;
 

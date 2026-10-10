@@ -3,7 +3,9 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace ProductManagement.Api.Idempotency;
 
-/// <summary>The <c>Idempotency-Key</c> header: which values are accepted, and how a key is scoped to its caller.</summary>
+/// <summary>
+/// The <c>Idempotency-Key</c> header: which values are accepted, and how a key is scoped to its caller.
+/// </summary>
 internal static class IdempotencyKey
 {
     public const string HeaderName = "Idempotency-Key";

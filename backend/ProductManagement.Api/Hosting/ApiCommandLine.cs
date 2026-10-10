@@ -6,14 +6,18 @@ using ProductManagement.Infrastructure.Persistence;
 namespace ProductManagement.Api.Hosting;
 
 /// <summary>
-/// The commands the API image runs besides serving HTTP. Each builds only what it needs: <c>migrate</c> runs in the
-/// Kubernetes migration Job, which therefore gets the database credentials but not the token signing key.
+/// The command-line tools built into the API (<c>hash-secret</c>, <c>generate-signing-key</c>, <c>migrate</c>): they
+/// run and exit instead of serving HTTP. Each builds only what it needs: <c>migrate</c> runs as a step of the CI/CD
+/// pipeline (as the <c>pm_migrator</c> database user), which therefore gets the migrator's database credentials but
+/// not the token signing key.
 /// </summary>
 internal static partial class ApiCommandLine
 {
     private const string MigrateCommand = "migrate";
 
-    /// <summary>Runs the command in <paramref name="args"/>, if any, and returns its exit code; <c>null</c> to serve HTTP.</summary>
+    /// <summary>
+    /// Runs the command in <paramref name="args"/>, if any, and returns its exit code; <c>null</c> to serve HTTP.
+    /// </summary>
     public static async Task<int?> TryRunAsync(string[] args)
     {
         switch (args)
@@ -35,8 +39,9 @@ internal static partial class ApiCommandLine
                 return 0;
         }
 
-        // `dotnet ProductManagement.Api.dll migrate`: apply migrations and exit. Used by the Kubernetes migration Job,
-        // so schema changes run once per deployment instead of on every replica start.
+        // `dotnet ProductManagement.Api.dll migrate`: apply migrations and exit. Run by the CI/CD pipeline (or
+        // deploy/deploy.sh locally) before the rollout, so schema changes run once per deployment, with the schema
+        // owner's credentials, instead of on every replica start.
         if (args.Contains(MigrateCommand, StringComparer.OrdinalIgnoreCase))
         {
             return await MigrateAsync(args);
@@ -68,7 +73,7 @@ internal static partial class ApiCommandLine
         }
         catch (Exception exception)
         {
-            // Exit cleanly with a failure code so the Job controller retries it.
+            // Exit with a failure code: the pipeline stops before rolling out code that needs the new schema.
             LogMigrationFailed(logger, exception);
             return 1;
         }

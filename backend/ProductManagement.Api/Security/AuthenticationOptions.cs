@@ -7,7 +7,7 @@ namespace ProductManagement.Api.Security;
 /// exchange their credentials for a token at <c>POST /api/auth/token</c>. Validated at startup
 /// (<see cref="AuthenticationOptionsValidator"/>).
 /// </summary>
-public sealed class AuthenticationOptions
+public class AuthenticationOptions
 {
     public const string SectionName = "Authentication";
 
@@ -32,14 +32,18 @@ public sealed class AuthenticationOptions
     public List<ApiConsumer> Consumers { get; init; } = [];
 }
 
-/// <summary>A client allowed to call the API: the web app's users, the MCP server, load tests, other services.</summary>
-public sealed class ApiConsumer
+/// <summary>A client allowed to call the API: the web app's users, load tests, other services.</summary>
+public class ApiConsumer
 {
     public string ClientId { get; init; } = string.Empty;
 
-    /// <summary>PBKDF2 hash of the client secret (see <see cref="SecretHasher"/>); the secret itself is never stored.</summary>
+    /// <summary>
+    /// PBKDF2 hash of the client secret (see <see cref="SecretHasher"/>); the secret itself is never stored.
+    /// </summary>
     public string SecretHash { get; init; } = string.Empty;
 
-    /// <summary>Roles placed in the token (viewer, stock-clerk, manager); they map to permissions in <see cref="Policies"/>.</summary>
+    /// <summary>
+    /// Roles placed in the token (viewer, stock-clerk, manager); they map to permissions in <see cref="Policies"/>.
+    /// </summary>
     public List<string> Roles { get; init; } = [];
 }

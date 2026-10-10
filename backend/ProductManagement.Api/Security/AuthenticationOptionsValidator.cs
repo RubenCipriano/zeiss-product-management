@@ -6,7 +6,7 @@ namespace ProductManagement.Api.Security;
 /// Fail fast: an API that starts with a missing or bad signing key, or with broken consumers, is worse than one that
 /// does not start.
 /// </summary>
-internal sealed class AuthenticationOptionsValidator : IValidateOptions<AuthenticationOptions>
+internal class AuthenticationOptionsValidator : IValidateOptions<AuthenticationOptions>
 {
     public ValidateOptionsResult Validate(string? name, AuthenticationOptions options)
     {
@@ -21,9 +21,11 @@ internal sealed class AuthenticationOptionsValidator : IValidateOptions<Authenti
         }
 
         failures.AddRange(options.Consumers
-            .Where(consumer => string.IsNullOrWhiteSpace(consumer.ClientId) || !SecretHasher.IsWellFormed(consumer.SecretHash))
+            .Where(consumer =>
+                string.IsNullOrWhiteSpace(consumer.ClientId) || !SecretHasher.IsWellFormed(consumer.SecretHash))
             .Select(consumer =>
-                $"API consumer '{consumer.ClientId}' needs a client id and a secret hash (use the hash-secret command)."));
+                $"API consumer '{consumer.ClientId}' needs a client id and a secret hash " +
+                "(use the hash-secret command)."));
 
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
     }

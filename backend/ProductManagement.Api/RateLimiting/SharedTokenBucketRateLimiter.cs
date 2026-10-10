@@ -4,11 +4,11 @@ using ProductManagement.Infrastructure.Edge;
 namespace ProductManagement.Api.RateLimiting;
 
 /// <summary>
-/// A token-bucket <see cref="RateLimiter"/> whose bucket lives in the shared store (Redis), so the limit holds across
-/// all replicas. If the store is unavailable it falls back to an in-memory bucket for this replica: limits get looser
-/// (per replica), requests keep being served.
+/// Plugs the shared token bucket into ASP.NET Core's rate-limiting middleware: a <see cref="RateLimiter"/> whose bucket
+/// lives in the shared store (Redis), so the limit holds across all replicas. If the store is unavailable it falls
+/// back to an in-memory bucket for this replica: limits get looser (per replica), requests keep being served.
 /// </summary>
-internal sealed class SharedTokenBucketRateLimiter(
+internal class SharedTokenBucketRateLimiter(
     IDistributedRateLimiter store,
     string bucket,
     int tokensPerSecond,
@@ -55,7 +55,7 @@ internal sealed class SharedTokenBucketRateLimiter(
         base.Dispose(disposing);
     }
 
-    private sealed class Lease(bool isAcquired, TimeSpan? retryAfter) : RateLimitLease
+    private class Lease(bool isAcquired, TimeSpan? retryAfter) : RateLimitLease
     {
         public static readonly Lease Granted = new(true, null);
 

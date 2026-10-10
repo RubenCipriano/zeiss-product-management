@@ -12,7 +12,7 @@ namespace ProductManagement.Api.Security;
 /// <see cref="KeyId"/> is the RFC 7638 thumbprint of the public key, written into every token's header (<c>kid</c>).
 /// Rotating the key changes it, so verifiers know which key a token needs.
 /// </remarks>
-public sealed class TokenSigningKey : IDisposable
+public class TokenSigningKey : IDisposable
 {
     private readonly ECDsa _privateKey;
     private readonly ECDsa _publicKey;
@@ -51,7 +51,8 @@ public sealed class TokenSigningKey : IDisposable
         if (string.IsNullOrWhiteSpace(pem))
         {
             throw new InvalidOperationException(
-                $"'{AuthenticationOptions.SectionName}:SigningKey' is missing: a PEM-encoded ECDSA P-256 private key.");
+                $"'{AuthenticationOptions.SectionName}:SigningKey' is missing: a PEM-encoded ECDSA P-256 private key " +
+                "(for `dotnet run`, deploy/local-secrets.sh creates one in the user-secrets).");
         }
 
         var key = ECDsa.Create();
@@ -81,11 +82,14 @@ public sealed class TokenSigningKey : IDisposable
     {
         _privateKey.Dispose();
         _publicKey.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
 
-/// <summary>A public key in JWK form (RFC 7517), as published in the JWKS document. Never contains the private part.</summary>
-public sealed record PublicJsonWebKey(string Kty, string Crv, string X, string Y, string Kid, string Alg, string Use);
+/// <summary>
+/// A public key in JWK form (RFC 7517), as published in the JWKS document. Never contains the private part.
+/// </summary>
+public record PublicJsonWebKey(string Kty, string Crv, string X, string Y, string Kid, string Alg, string Use);
 
 /// <summary>The JWKS document (RFC 7517 §5).</summary>
-public sealed record JsonWebKeySet(IReadOnlyList<PublicJsonWebKey> Keys);
+public record JsonWebKeySet(IReadOnlyList<PublicJsonWebKey> Keys);

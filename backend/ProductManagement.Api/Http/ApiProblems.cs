@@ -6,10 +6,11 @@ using Microsoft.AspNetCore.WebUtilities;
 namespace ProductManagement.Api.Http;
 
 /// <summary>
-/// Builds the RFC 9457 problem responses every error of the API uses (docs/adr/0005): the standard members from
-/// ASP.NET Core's <see cref="ProblemDetailsFactory"/> or <see cref="IProblemDetailsService"/> (<c>type</c>,
-/// <c>title</c>, <c>status</c>, <c>detail</c>, <c>traceId</c>), plus a machine-readable <c>errorCode</c>
-/// (<see cref="ApiErrorCodes"/> at the HTTP edge, the error's own code for use-case results).
+/// Builds the error responses of the API. Every error is a "problem details" JSON object (RFC 9457, the standard
+/// shape for HTTP errors; docs/adr/0005): the standard members from ASP.NET Core's
+/// <see cref="ProblemDetailsFactory"/> or <see cref="IProblemDetailsService"/> (<c>type</c>, <c>title</c>,
+/// <c>status</c>, <c>detail</c>, <c>traceId</c>), plus a machine-readable <c>errorCode</c> (<see cref="ApiErrorCodes"/>
+/// at the HTTP edge, the error's own code for use-case results).
 /// </summary>
 internal static class ApiProblems
 {
