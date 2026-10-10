@@ -1,0 +1,24 @@
+# The API's Service. It is headless (clusterIP: None): there is no virtual IP, and the DNS name
+# api.product-management.svc.cluster.local returns the IP of every ready API pod.
+#
+# Why headless: the gateway (nginx) keeps its connections to the API open and reuses them. Behind a normal Service,
+# the balancing happens once per TCP connection, so those long-lived connections would stay pinned to the pods that
+# existed when they were opened, and pods added by the autoscaler would get no traffic until the connections closed.
+# With the pod IPs themselves, the gateway re-resolves the name every 5 s and picks the least busy pod for each
+# request. The gateway also downloads the API's public keys (JWKS) through this name.
+#
+# Swagger from a laptop (local and staging only):
+#   kubectl -n product-management port-forward deployment/api 5080:8080   →   http://localhost:5080/swagger
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: product-management
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

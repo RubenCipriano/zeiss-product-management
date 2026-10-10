@@ -1,0 +1,126 @@
+# CI/CD pipeline of the infra repository (the servers outside the cluster and the cluster's log collector) for
+# GitLab. Every change is validated; deploying is always a manual step, per environment and per component, because
+# these servers hold the data and are changed rarely and deliberately.
+#
+#   validate ──────────────────────────────► deploy (manual)
+#   compose files, logs/k8s manifests,       servers: ./infra.sh up <component> on a runner on that server
+#   Alloy configuration format               cluster: the log collector, through the GitLab agent for Kubernetes
+#
+# Setup: docs/guide/12-from-zero.md. Environment-scoped CI/CD variables (Settings → CI/CD → Variables):
+#   KUBE_CONTEXT              <agent configuration project path>:<agent name> (the cluster's log collector)
+#   CLUSTER_LOKI_URL          the Loki the cluster's collector pushes to, e.g.
+#                             http://pm-monitoring.example.internal:3100/loki/api/v1/push, or Grafana Cloud's push URL
+#   LOKI_USERNAME, LOKI_PASSWORD   only for a hosted Loki (masked)
+#   POSTGRES_PASSWORD, PM_MIGRATOR_PASSWORD, PM_APP_PASSWORD, REDIS_PASSWORD   masked, protected; the last three are
+#                             the same values the backend repository's pipeline uses (group-level variables)
+# Runners: one shell runner with Docker on each server, tagged pm-<environment>-<component>
+# (e.g. pm-staging-database), registered to this project only.
+
+workflow:
+  name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+stages: [validate, deploy]
+
+variables:
+  # Tool images, pinned (bump them with Renovate or by hand).
+  DOCKER_IMAGE: docker:29.8.2-cli                 # has the Compose plugin
+  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11            # bash, kubectl 1.34 (Kustomize), kubeconform
+  ALLOY_IMAGE: grafana/alloy:v1.10.2              # = the image in logs.yaml and logs/k8s/alloy.yaml
+
+default:
+  interruptible: true
+
+# ─── validate ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+# Every Compose file parses, with every profile (no Docker daemon needed).
+validate:compose:
+  stage: validate
+  image: $DOCKER_IMAGE
+  script:
+    - docker compose -f database.yaml config --quiet
+    - docker compose -f redis.yaml config --quiet
+    - docker compose -f logs.yaml --profile storage config --quiet
+
+# The cluster's log collector renders and is valid against the Kubernetes API schemas.
+validate:logs-k8s:
+  stage: validate
+  image: $KUBE_TOOLS_IMAGE
+  script:
+    - kubectl kustomize logs/k8s | kubeconform -strict -summary -kubernetes-version 1.34.0 -
+
+# Both Alloy configurations are formatted as `alloy fmt` writes them (it also fails on a syntax error).
+validate:alloy:
+  stage: validate
+  image:
+    name: $ALLOY_IMAGE
+    entrypoint: [""]
+  script:
+    - alloy fmt logs/server-agent.alloy | diff logs/server-agent.alloy -
+    - alloy fmt logs/k8s/config.alloy | diff logs/k8s/config.alloy -
+
+# ─── deploy (manual) ────────────────────────────────────────────────────────────────────────────────────────────────
+
+# One component on its own server: the runner on that machine runs the same command as a laptop. Data volumes are
+# never touched.
+.deploy-server:
+  stage: deploy
+  tags: [pm-$ENVIRONMENT-$COMPONENT]
+  interruptible: false
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  allow_failure: true
+  parallel:
+    matrix:
+      - COMPONENT: [database, redis, logs]
+  script:
+    - ./infra.sh up "$COMPONENT"
+
+servers:staging:
+  extends: .deploy-server
+  environment:
+    name: staging
+    action: prepare
+  variables:
+    ENVIRONMENT: staging
+
+servers:production:
+  extends: .deploy-server
+  environment:
+    name: production
+    action: prepare
+  variables:
+    ENVIRONMENT: production
+
+# The log collector inside the cluster (logs/k8s), pointed at the environment's Loki. The job's image has kubectl and
+# no Docker, so `infra.sh up logs` applies only the collector.
+.deploy-cluster-logs:
+  stage: deploy
+  image: $KUBE_TOOLS_IMAGE
+  interruptible: false
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  allow_failure: true
+  variables:
+    LOKI_URL: $CLUSTER_LOKI_URL
+  script:
+    - kubectl config use-context "$KUBE_CONTEXT"
+    - ./infra.sh up logs
+
+cluster-logs:staging:
+  extends: .deploy-cluster-logs
+  environment:
+    name: staging
+    action: prepare
+
+cluster-logs:production:
+  extends: .deploy-cluster-logs
+  environment:
+    name: production
+    action: prepare

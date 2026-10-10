@@ -1,0 +1,786 @@
+{
+  "uid": "logs",
+  "title": "Logs — where everything goes",
+  "description": "Every log line in one place, side by side: frontend (browser errors, web, gateway), backend (API) and servers (PostgreSQL, Redis, Loki, Grafana). Where each comes from, how it is labelled and how long it is kept. See docs/guide/08-observability.md.",
+  "tags": [
+    "product-management",
+    "logs"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "links": [
+    {
+      "title": "Production overview",
+      "type": "link",
+      "icon": "dashboard",
+      "targetBlank": false,
+      "url": "/d/product-management",
+      "keepTime": true,
+      "includeVars": true
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "search",
+        "label": "search",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "hide": 0
+      },
+      {
+        "name": "level",
+        "label": "API level",
+        "type": "custom",
+        "query": "Information,Warning,Error,Critical",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "hide": 0,
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "Information",
+            "value": "Information",
+            "selected": false
+          },
+          {
+            "text": "Warning",
+            "value": "Warning",
+            "selected": false
+          },
+          {
+            "text": "Error",
+            "value": "Error",
+            "selected": false
+          },
+          {
+            "text": "Critical",
+            "value": "Critical",
+            "selected": false
+          }
+        ]
+      },
+      {
+        "name": "trace_id",
+        "label": "trace_id",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 12
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Where every log goes.** The applications and servers only write to stdout; a collector reads those lines and pushes them to **Loki** on the monitoring server, and Grafana reads Loki. The browser is the exception: it cannot write anywhere we can read, so the web app reports its **errors** (only those) through the gateway.\n\n| Source | Collected by | Query it with |\n| --- | --- | --- |\n| **Browser** (the Angular app): uncaught errors, unhandled rejections, Angular's ErrorHandler, `console.error` | Grafana Faro SDK → gateway `POST /collect` → Alloy `faro.receiver` in the cluster | `{namespace=\"browser\"}`, level `error`; per line: `page` (no query string), `user`, `app_version`, `browser` |\n| **Pods**: gateway, web, API (and load tests, kube-system) | Alloy in the cluster (namespace `observability`), through the Kubernetes API | `{namespace=\"product-management\", app=\"gateway\"}` (or `\"web\"`, `\"api\"`); API label `level`; per line: `trace_id`, gateway `status`, `user`, API `category` |\n| **Servers**: PostgreSQL, Redis, the monitoring server's Loki and Grafana, the agent itself | server agent (container `pm-server-agent`, Alloy), reading the servers' containers | `{namespace=\"servers\", app=\"postgres\"}` (or `\"redis\"`, `\"loki\"`, `\"grafana\"`, `\"agent\"`) |\n\n**Stored:** Loki on the monitoring server: locally the container `pm-loki`, data on the volume `pm-loki-data` (infra: `logs/loki.yaml`), kept **14 days** and then deleted by Loki's compactor. **Variables:** *search* (any text, case-insensitive) and *trace_id* filter every panel; with a trace_id only the gateway and API lines of that request remain. *API level* filters the API panel. Guide: `docs/guide/08-observability.md`."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Log lines per source",
+      "description": "Every log line Loki received, per source (namespace / app), with the search and trace_id applied. A source that drops to zero has stopped logging, or its collector has stopped sending.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "interval": "1m",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 14,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (namespace, app) (count_over_time({namespace=~\"browser|product-management|servers\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` [$__auto]))",
+          "legendFormat": "{{namespace}} / {{app}}",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "range"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisSoftMin": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Browser errors",
+      "description": "Errors reported by browsers in the selected range (the BrowserErrors alert fires above 10 in 5 minutes).",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 12,
+        "w": 5,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"browser\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` [$__range])) or vector(0)",
+          "legendFormat": "",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "API errors",
+      "description": "API lines at Error or Critical in the selected range.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 19,
+        "y": 12,
+        "w": 5,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"product-management\", app=\"api\", level=~\"Error|Critical\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` [$__range])) or vector(0)",
+          "legendFormat": "",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      }
+    },
+    {
+      "id": 5,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 8,
+        "h": 2
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Frontend\nbrowser · web · gateway"
+      }
+    },
+    {
+      "id": 6,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "x": 8,
+        "y": 19,
+        "w": 8,
+        "h": 2
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Backend\nAPI"
+      }
+    },
+    {
+      "id": 7,
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "x": 16,
+        "y": 19,
+        "w": 8,
+        "h": 2
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Servers\nPostgreSQL · Redis · Loki · Grafana"
+      }
+    },
+    {
+      "id": 8,
+      "type": "logs",
+      "title": "Browser errors",
+      "description": "What failed in users' browsers: the error, the route (query string removed), the user id (token subject; empty on the sign-in page), the browser and the release. Expand a line for the stack trace (minified bundle, line and column).",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 8,
+        "h": 11
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{namespace=\"browser\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` | json type=\"type\", value=\"value\", browser_version=\"browser_version\" | line_format `{{.type}}: {{.value}}  ·  {{.page}}  ·  user={{.user}}  ·  {{.browser}} {{.browser_version}}  ·  {{.app_version}}`",
+          "legendFormat": "",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "showCommonLabels": false,
+        "showLabels": false
+      }
+    },
+    {
+      "id": 9,
+      "type": "logs",
+      "title": "Web (nginx serving the Angular files)",
+      "description": "The web pods' access log (one JSON line per file served, behind the gateway) and nginx's own error lines.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{namespace=\"product-management\", app=\"web\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` | json status=\"status\", method=\"method\", uri=\"uri\", duration=\"duration\" | line_format `{{ if .status }}{{.status}} {{.method}} {{.uri}}  {{.duration}}s{{ else }}{{ __line__ }}{{ end }}`",
+          "legendFormat": "",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "showCommonLabels": false,
+        "showLabels": false
+      }
+    },
+    {
+      "id": 10,
+      "type": "logs",
+      "title": "Gateway access log",
+      "description": "One line per request through the gateway: status, method, URI, total time, the verified user and the trace_id (expand a line: All logs of this request). nginx's own error lines are shown as they are.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 8,
+        "h": 11
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{namespace=\"product-management\", app=\"gateway\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` | json method=\"method\", uri=\"uri\", duration=\"duration\" | line_format `{{ if .method }}{{.status}} {{.method}} {{.uri}}  {{.duration}}s  user={{.user}}  trace_id={{.trace_id}}{{ else }}{{ __line__ }}{{ end }}`",
+          "legendFormat": "",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "showCommonLabels": false,
+        "showLabels": false
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "API lines by level",
+      "description": "API log lines per level (the API level variable applies).",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "interval": "1m",
+      "gridPos": {
+        "x": 8,
+        "y": 21,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (level) (count_over_time({namespace=\"product-management\", app=\"api\", level=~\"$level\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` [$__auto]))",
+          "legendFormat": "{{level}}",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "range"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisSoftMin": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "logs",
+      "title": "API logs",
+      "description": "The API's JSON log lines: level, logger category, message, exception, trace_id (expand a line: All logs of this request). Successful reads write nothing; writes, warnings and errors do.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 28,
+        "w": 8,
+        "h": 23
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{namespace=\"product-management\", app=\"api\", level=~\"$level\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` | json Message=\"Message\", Exception=\"Exception\" | line_format `{{.level}} {{.category}}: {{.Message}} {{.Exception}}  trace_id={{.trace_id}}`",
+          "legendFormat": "",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "showCommonLabels": false,
+        "showLabels": false
+      }
+    },
+    {
+      "id": 13,
+      "type": "logs",
+      "title": "PostgreSQL",
+      "description": "Statements slower than 250 ms, lock waits, checkpoints, errors (infra: postgres/postgresql.conf).",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 21,
+        "w": 8,
+        "h": 11
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{namespace=\"servers\", app=\"postgres\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}`",
+          "legendFormat": "",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "showCommonLabels": false,
+        "showLabels": false
+      }
+    },
+    {
+      "id": 14,
+      "type": "logs",
+      "title": "Redis",
+      "description": "Redis' own log: start-up, persistence, warnings.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 32,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{namespace=\"servers\", app=\"redis\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}`",
+          "legendFormat": "",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "showCommonLabels": false,
+        "showLabels": false
+      }
+    },
+    {
+      "id": 15,
+      "type": "logs",
+      "title": "Loki (warnings and errors)",
+      "description": "Loki's log above info (its info lines are one per query and per flush).",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 39,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{namespace=\"servers\", app=\"loki\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` | logfmt level | level!=\"info\"",
+          "legendFormat": "",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "showCommonLabels": false,
+        "showLabels": false
+      }
+    },
+    {
+      "id": 16,
+      "type": "logs",
+      "title": "Grafana (warnings and errors)",
+      "description": "Grafana's log above info: provisioning, data source and alert-notification errors.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 45,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{namespace=\"servers\", app=\"grafana\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` | logfmt level | level!=\"info\"",
+          "legendFormat": "",
+          "refId": "A",
+          "editorMode": "code",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "showCommonLabels": false,
+        "showLabels": false
+      }
+    }
+  ],
+  "version": 1
+}

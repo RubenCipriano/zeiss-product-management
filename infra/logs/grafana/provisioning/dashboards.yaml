@@ -1,0 +1,15 @@
+# Grafana dashboard provider (logs.yaml mounts it into
+# /etc/grafana/provisioning/dashboards). Every JSON file in logs/grafana/dashboards (mounted at
+# /var/lib/grafana/dashboards/product-management) is loaded into the "Product Management" folder and reloaded when it
+# changes. Edits in the UI are allowed for experimenting but are not saved back: change the JSON files.
+apiVersion: 1
+providers:
+  - name: Product Management
+    folder: Product Management
+    type: file
+    disableDeletion: true
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/product-management
+      foldersFromFilesStructure: false

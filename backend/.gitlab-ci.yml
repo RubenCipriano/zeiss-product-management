@@ -1,0 +1,315 @@
+# CI/CD pipeline of the backend repository (the API) for GitLab. Thin by design: every step is a script in this
+# repository that also runs on a laptop; this file only wires them together, with the images, variables and gates.
+#
+#   test ──► build ──► scan ──► staging ──────► verify ──────► production
+#   unit,     image,    Trivy    migrate,        requirements   migrate, deploy
+#   integration, migration (fail on deploy        check against  (manual, protected)
+#   manifests, SQL      critical) (automatic)    staging
+#   SAST
+#
+# Merge request pipelines run test, build and scan. Pipelines on the default branch also deploy to staging
+# (automatically), verify it, and offer production as a manual, protected step. Tag pipelines build and scan.
+# The web app and the gateway have their own repository and pipeline (frontend), and so do the servers (infra).
+#
+# Setup (runners, the GitLab agent for Kubernetes, environments, every CI/CD variable): docs/guide/12-from-zero.md.
+#
+# Environment-scoped CI/CD variables (Settings → CI/CD → Variables, one value per environment scope):
+#   KUBE_CONTEXT              <agent configuration project path>:<agent name>
+#   DB_SERVER, REDIS_SERVER   the servers' private DNS names (the migration job connects to them directly)
+#   PM_MIGRATOR_PASSWORD      masked, protected: schema owner, used only by the migrate jobs
+#   PM_APP_PASSWORD           masked, protected: the API's database user        → Secret api-secrets
+#   REDIS_PASSWORD            masked, protected                                  → Secret api-secrets
+#   API_SIGNING_KEY           File, protected: ES256 private key (PEM)           → Secret api-secrets
+#   API_CONSUMERS             File, protected: consumers.json                    → Secret api-secrets
+#   staging only (verify):    CHECK_CLIENT_ID, CHECK_CLIENT_SECRET (masked)
+# The three passwords are the same values the infra repository's pipeline sets on the servers: define them once as
+# group-level variables, or keep both projects in step.
+
+workflow:
+  name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # A branch with an open merge request gets the MR pipeline only, not a second branch pipeline.
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+  auto_cancel:
+    on_new_commit: interruptible
+
+stages: [test, build, scan, staging, verify, production]
+
+include:
+  # GitLab's own analysers (results in the security widget / vulnerability report where the tier has them).
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+
+variables:
+  # The release: one image, tagged with the commit. Enable tag immutability for this repository in the Container
+  # Registry settings so a tag can never be overwritten.
+  API_IMAGE: $CI_REGISTRY_IMAGE/api:$CI_COMMIT_SHORT_SHA
+  # Public URL of staging (the frontend repository's Ingress host); the requirements check goes through its gateway.
+  STAGING_URL: https://staging.products.example.com
+  # TLS to the servers on the private network, for the migration job (the API's own connection strings are in
+  # deploy/k8s/overlays/<environment>/api.yaml).
+  DB_SSL_MODE: Require
+  REDIS_OPTIONS: ""
+  # Runner tag of the self-hosted runner inside the private network: only it can reach the database servers.
+  PRIVATE_RUNNER_TAG: product-management-private
+  # Tool images, pinned (bump them with Renovate or by hand).
+  DOTNET_SDK_IMAGE: mcr.microsoft.com/dotnet/sdk:10.0.401        # = global.json
+  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11                            # bash, kubectl 1.34 (Kustomize), kubeconform, yq, jq
+  DOCKER_IMAGE: docker:29.8.2-cli
+  DIND_IMAGE: docker:29.8.2-dind
+  BUILDKIT_IMAGE: moby/buildkit:v0.33.1
+  TRIVY_IMAGE: aquasec/trivy:0.74.0
+  PYTHON_IMAGE: python:3.13.16-slim
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  NUGET_PACKAGES: $CI_PROJECT_DIR/.nuget/packages
+
+default:
+  interruptible: true
+  retry:
+    max: 1
+    when: [runner_system_failure, stuck_or_timeout_failure, scheduler_failure]
+
+# ─── Reusable pieces ────────────────────────────────────────────────────────────────────────────────────────────────
+
+# Docker-in-Docker for Testcontainers and image builds. The runner must allow privileged containers (gitlab.com's
+# Linux runners do). TLS is off: the daemon is reachable only from this job's own network.
+.dind:
+  services:
+    - name: $DIND_IMAGE
+      alias: docker
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+
+.nuget-cache:
+  cache:
+    key:
+      files: [Directory.Packages.props, global.json]
+      prefix: nuget
+    paths: [.nuget/packages]
+
+.default-branch:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ─── test ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+test:backend:
+  stage: test
+  extends: [.dind, .nuget-cache]
+  image: $DOTNET_SDK_IMAGE
+  needs: []
+  variables:
+    # The integration and acceptance tests start PostgreSQL 18 and Redis 8 with Testcontainers
+    # (ProductManagement.Testing/TestInfrastructure.cs) on the dind service; their ports are on its host.
+    TESTCONTAINERS_HOST_OVERRIDE: docker
+  script:
+    - dotnet restore ProductManagement.sln
+    - dotnet format ProductManagement.sln --verify-no-changes --no-restore
+    - dotnet build ProductManagement.sln --configuration Release --no-restore
+    - dotnet test --solution ProductManagement.sln --configuration Release --no-build
+      --report-xunit-junit --results-directory "$CI_PROJECT_DIR/TestResults"
+  artifacts:
+    when: always
+    reports:
+      junit: TestResults/*.junit.xml
+    expire_in: 30 days
+
+# The base and every overlay render and are valid; both connection strings are set; no Secret in staging/production.
+test:manifests:
+  stage: test
+  image: $KUBE_TOOLS_IMAGE
+  needs: []
+  script:
+    - deploy/ci/validate-manifests.sh
+
+# ─── build ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+# BuildKit through docker:dind: the same Dockerfile and `docker build` as deploy/deploy.sh, a layer cache kept in the
+# registry (fast rebuilds on fresh runners), and the privileged runner the integration tests need anyway. Kaniko is
+# archived upstream; Buildah (rootless) is the alternative where privileged runners are not allowed.
+build:api:
+  stage: build
+  extends: .dind
+  image: $DOCKER_IMAGE
+  needs: []
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker buildx create --use --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE"
+  script:
+    - repository="${API_IMAGE%:*}"
+    - docker buildx build --pull --push
+      --cache-from "type=registry,ref=$repository:buildcache"
+      --cache-to "type=registry,ref=$repository:buildcache,mode=max,image-manifest=true,oci-mediatypes=true"
+      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
+      --label "org.opencontainers.image.source=$CI_PROJECT_URL"
+      --tag "$API_IMAGE" ${CI_COMMIT_TAG:+--tag "$repository:$CI_COMMIT_TAG"}
+      .
+
+# The exact SQL the migrations will run, for review in the merge request before it reaches production. Idempotent:
+# each migration is guarded by the history table. Review artifact only: the pipeline applies migrations with the
+# API image's `migrate` command, which also runs the CREATE INDEX CONCURRENTLY statements outside a transaction (in
+# this script they sit in DO blocks, where PostgreSQL does not allow them).
+migrations:sql:
+  stage: build
+  extends: .nuget-cache
+  image: $DOTNET_SDK_IMAGE
+  needs: []
+  script:
+    - dotnet tool restore
+    - dotnet ef migrations script --idempotent
+      --project ProductManagement.Infrastructure --startup-project ProductManagement.Api
+      --output "$CI_PROJECT_DIR/migrations.sql"
+  artifacts:
+    name: migrations-$CI_COMMIT_SHORT_SHA
+    expose_as: Database migrations SQL
+    paths: [migrations.sql]
+    expire_in: 90 days
+
+# ─── scan ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+# Every vulnerability goes to the report; the job fails on CRITICAL ones that have a fix (upgrade the base image or
+# the package, or record an accepted risk in .trivyignore with a reason and an expiry).
+scan:api:
+  stage: scan
+  needs: [build:api]
+  image:
+    name: $TRIVY_IMAGE
+    entrypoint: [""]
+  variables:
+    TRIVY_USERNAME: $CI_REGISTRY_USER
+    TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
+    TRIVY_CACHE_DIR: .trivycache
+    TRIVY_NO_PROGRESS: "true"
+    TRIVY_SCANNERS: vuln
+  cache:
+    key: trivy
+    paths: [.trivycache]
+  script:
+    - trivy image --format template --template "@/contrib/gitlab.tpl" --output gl-container-scanning-report.json "$API_IMAGE"
+    - trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed "$API_IMAGE"
+  artifacts:
+    when: always
+    reports:
+      container_scanning: gl-container-scanning-report.json
+    expire_in: 30 days
+
+# ─── deployment jobs, shared by staging and production ──────────────────────────────────────────────────────────────
+
+# Applies the migrations with the API image itself (`dotnet ProductManagement.Api.dll migrate`), as the schema owner
+# pm_migrator, before the rollout. Runs on the private runner: the database is not reachable from the internet.
+# The migration must work with the version still running (expand/contract): the old pods keep serving while it runs,
+# and next to the new pods during the rollout. It also invalidates the cached lists in Redis.
+# The passwords are separate variables (PGPASSWORD, Redis__Password), never part of a connection string.
+.migrate:
+  image:
+    name: $API_IMAGE
+    entrypoint: [""]
+  tags: [$PRIVATE_RUNNER_TAG]
+  interruptible: false
+  variables:
+    GIT_STRATEGY: none
+    ASPNETCORE_ENVIRONMENT: Production
+    ConnectionStrings__ProductManagement: "Host=$DB_SERVER;Port=5432;Database=product_management;Username=pm_migrator;SSL Mode=$DB_SSL_MODE;GSS Encryption Mode=Disable"
+    PGPASSWORD: $PM_MIGRATOR_PASSWORD
+    ConnectionStrings__Redis: "$REDIS_SERVER:6379$REDIS_OPTIONS"
+    Redis__Password: $REDIS_PASSWORD
+  script:
+    - cd /app && dotnet ProductManagement.Api.dll migrate
+
+# Creates the Secret api-secrets from the environment's CI/CD variables and rolls out the API with this pipeline's
+# image (deploy/ci/deploy-environment.sh → deploy/deploy.sh). The cluster is reached through the GitLab agent for
+# Kubernetes (KUBE_CONTEXT), so the cluster's API is never exposed to the runners.
+.deploy:
+  image: $KUBE_TOOLS_IMAGE
+  interruptible: false
+  script:
+    - deploy/ci/deploy-environment.sh
+  artifacts:
+    when: always
+    paths: [deploy/k8s/.build/]
+    expire_in: 90 days
+
+# ─── staging ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+migrate:staging:
+  extends: [.migrate, .default-branch]
+  stage: staging
+  needs: [build:api, scan:api, test:backend]
+  environment:
+    name: staging
+    action: prepare
+  resource_group: staging
+  variables:
+    # Staging is a demo of the system: an empty database gets the sample catalogue (never in production).
+    Database__SeedSampleData: "true"
+
+deploy:staging:
+  extends: [.deploy, .default-branch]
+  stage: staging
+  needs: [migrate:staging, test:manifests]
+  environment:
+    name: staging
+    url: $STAGING_URL
+    deployment_tier: staging
+  resource_group: staging
+  variables:
+    ENVIRONMENT: staging
+
+# ─── verify (against staging) ───────────────────────────────────────────────────────────────────────────────────────
+
+# The assessment's requirements, one by one, against the deployed system through its gateway (creates and deletes its
+# own products).
+verify:requirements:
+  extends: .default-branch
+  stage: verify
+  image: $PYTHON_IMAGE
+  needs: [deploy:staging]
+  environment:
+    name: staging
+    action: verify
+  variables:
+    BASE_URL: $STAGING_URL
+  script:
+    - python3 scripts/check-requirements.py
+
+# ─── production (manual, protected) ─────────────────────────────────────────────────────────────────────────────────
+
+# The release decision: starting this job migrates production, and deploy:production follows. Only users allowed to
+# deploy to the protected `production` environment can start it. Because migrations are backward compatible, applying
+# one ahead of the rollout (or of a deployment approval) is safe by construction.
+migrate:production:
+  extends: .migrate
+  stage: production
+  needs: [build:api, verify:requirements]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  allow_failure: false
+  environment:
+    name: production
+    action: prepare
+  resource_group: production
+  variables:
+    Database__SeedSampleData: "false"
+
+# Rollback: Deployments → Environments → production → re-deploy an earlier successful deployment. That re-runs this
+# job from its own pipeline: its image, manifests and the current Secret. Schema changes are never rolled back
+# (expand/contract: the previous release still works on the newer schema); a bad migration is fixed forward.
+deploy:production:
+  extends: [.deploy, .default-branch]
+  stage: production
+  needs: [migrate:production]
+  environment:
+    name: production
+    url: https://products.example.com
+    deployment_tier: production
+  resource_group: production
+  variables:
+    ENVIRONMENT: production

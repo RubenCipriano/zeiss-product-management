@@ -1,0 +1,258 @@
+# CI/CD pipeline of the frontend repository (the web app and the gateway) for GitLab. Thin by design: every step is
+# a script in this repository that also runs on a laptop; this file only wires them together, with the images,
+# variables and gates.
+#
+#   test ──► build ──► scan ──► staging ──► verify ──► production
+#   lint,     web and   Trivy    deploy      Playwright  deploy
+#   unit,     gateway   (fail on (automatic) E2E against (manual, protected)
+#   build,    images    critical)            staging
+#   manifests
+#
+# Merge request pipelines run test, build and scan. Pipelines on the default branch also deploy to staging
+# (automatically), verify it in a real browser, and offer production as a manual, protected step. Tag pipelines build
+# and scan. The API has its own repository and pipeline (backend); the gateway reaches it in the same cluster.
+#
+# Setup (runners, the GitLab agent for Kubernetes, environments, CI/CD variables): docs/guide/12-from-zero.md.
+#
+# Environment-scoped CI/CD variables (Settings → CI/CD → Variables, one value per environment scope):
+#   KUBE_CONTEXT                <agent configuration project path>:<agent name>
+#   staging only (verify):      E2E_VIEWER_SECRET, E2E_CLERK_SECRET, E2E_MANAGER_SECRET (masked): the secrets of the
+#                               consumers viewer, clerk and manager registered in staging's API (backend: API_CONSUMERS)
+
+workflow:
+  name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # A branch with an open merge request gets the MR pipeline only, not a second branch pipeline.
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+  auto_cancel:
+    on_new_commit: interruptible
+
+stages: [test, build, scan, staging, verify, production]
+
+include:
+  # GitLab's own analysers (results in the security widget / vulnerability report where the tier has them).
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+
+variables:
+  # The release: two images, tagged with the commit. Enable tag immutability for this repository in the Container
+  # Registry settings so a tag can never be overwritten.
+  WEB_IMAGE: $CI_REGISTRY_IMAGE/web:$CI_COMMIT_SHORT_SHA
+  GATEWAY_IMAGE: $CI_REGISTRY_IMAGE/gateway:$CI_COMMIT_SHORT_SHA
+  # Public URLs (the Ingress hosts in deploy/k8s/overlays/<environment>/ingress.yaml); override in the project.
+  STAGING_URL: https://staging.products.example.com
+  PRODUCTION_URL: https://products.example.com
+  # Tool images, pinned (bump them with Renovate or by hand).
+  NODE_IMAGE: node:24.20.0-bookworm-slim                          # = .nvmrc (24)
+  PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.64.0-noble    # = @playwright/test in package-lock.json
+  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11                            # bash, kubectl 1.34 (Kustomize), kubeconform, yq, jq
+  DOCKER_IMAGE: docker:29.8.2-cli
+  DIND_IMAGE: docker:29.8.2-dind
+  BUILDKIT_IMAGE: moby/buildkit:v0.33.1
+  TRIVY_IMAGE: aquasec/trivy:0.74.0
+  npm_config_cache: $CI_PROJECT_DIR/.npm
+
+default:
+  interruptible: true
+  retry:
+    max: 1
+    when: [runner_system_failure, stuck_or_timeout_failure, scheduler_failure]
+
+# ─── Reusable pieces ────────────────────────────────────────────────────────────────────────────────────────────────
+
+.npm-cache:
+  cache:
+    key:
+      files: [package-lock.json]
+      prefix: npm
+    paths: [.npm]
+
+.default-branch:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ─── test ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+test:frontend:
+  stage: test
+  extends: .npm-cache
+  image: $NODE_IMAGE
+  needs: []
+  script:
+    - npm ci --no-audit --no-fund
+    - npm run lint
+    - npm run format:check
+    - npm run test:ci -- --reporters=junit --reporters=default --output-file=reports/junit.xml
+    - npm run build
+  artifacts:
+    when: always
+    reports:
+      junit: reports/junit.xml
+    expire_in: 30 days
+
+# The base and every overlay render and are valid; the gateway knows where the API and the collector are.
+test:manifests:
+  stage: test
+  image: $KUBE_TOOLS_IMAGE
+  needs: []
+  script:
+    - deploy/ci/validate-manifests.sh
+
+# ─── build ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+# BuildKit through docker:dind: the same Dockerfiles and `docker build` as deploy/deploy.sh, with a layer cache kept in
+# the registry (fast rebuilds on fresh runners). The runner must allow privileged containers (gitlab.com's Linux
+# runners do). APP_VERSION is the release the web app reports with its browser errors (the gateway ignores it).
+.build-image:
+  stage: build
+  image: $DOCKER_IMAGE
+  needs: []
+  services:
+    - name: $DIND_IMAGE
+      alias: docker
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker buildx create --use --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE"
+  script:
+    - repository="${IMAGE%:*}"
+    - docker buildx build --pull --push
+      --cache-from "type=registry,ref=$repository:buildcache"
+      --cache-to "type=registry,ref=$repository:buildcache,mode=max,image-manifest=true,oci-mediatypes=true"
+      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
+      --label "org.opencontainers.image.source=$CI_PROJECT_URL"
+      --build-arg "APP_VERSION=$CI_COMMIT_SHORT_SHA"
+      --tag "$IMAGE" ${CI_COMMIT_TAG:+--tag "$repository:$CI_COMMIT_TAG"}
+      "$CONTEXT"
+
+build:web:
+  extends: .build-image
+  variables:
+    IMAGE: $WEB_IMAGE
+    CONTEXT: .
+
+build:gateway:
+  extends: .build-image
+  variables:
+    IMAGE: $GATEWAY_IMAGE
+    CONTEXT: gateway
+
+# ─── scan ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+# Every vulnerability goes to the report; the job fails on CRITICAL ones that have a fix (upgrade the base image or
+# the package, or record an accepted risk in .trivyignore with a reason and an expiry).
+.scan-image:
+  stage: scan
+  image:
+    name: $TRIVY_IMAGE
+    entrypoint: [""]
+  variables:
+    TRIVY_USERNAME: $CI_REGISTRY_USER
+    TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
+    TRIVY_CACHE_DIR: .trivycache
+    TRIVY_NO_PROGRESS: "true"
+    TRIVY_SCANNERS: vuln
+  cache:
+    key: trivy
+    paths: [.trivycache]
+  script:
+    - trivy image --format template --template "@/contrib/gitlab.tpl" --output gl-container-scanning-report.json "$IMAGE"
+    - trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed "$IMAGE"
+  artifacts:
+    when: always
+    reports:
+      container_scanning: gl-container-scanning-report.json
+    expire_in: 30 days
+
+scan:web:
+  extends: .scan-image
+  needs: [build:web]
+  variables:
+    IMAGE: $WEB_IMAGE
+
+scan:gateway:
+  extends: .scan-image
+  needs: [build:gateway]
+  variables:
+    IMAGE: $GATEWAY_IMAGE
+
+# ─── deployment, shared by staging and production ───────────────────────────────────────────────────────────────────
+
+# Rolls out the web app and the gateway with this pipeline's images (deploy/deploy.sh). The cluster is reached through
+# the GitLab agent for Kubernetes (KUBE_CONTEXT), so the cluster's API is never exposed to the runners.
+.deploy:
+  image: $KUBE_TOOLS_IMAGE
+  interruptible: false
+  script:
+    - kubectl config use-context "$KUBE_CONTEXT"
+    - deploy/deploy.sh
+  artifacts:
+    when: always
+    paths: [deploy/k8s/.build/]
+    expire_in: 90 days
+
+# ─── staging ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+deploy:staging:
+  extends: [.deploy, .default-branch]
+  stage: staging
+  needs: [build:web, build:gateway, scan:web, scan:gateway, test:frontend, test:manifests]
+  environment:
+    name: staging
+    url: $STAGING_URL
+    deployment_tier: staging
+  resource_group: staging
+  variables:
+    ENVIRONMENT: staging
+
+# ─── verify (against staging) ───────────────────────────────────────────────────────────────────────────────────────
+
+# The user journeys in a real browser, desktop and phone, against staging (gateway, API, Redis, PostgreSQL). Needs the
+# consumers viewer, clerk and manager registered in staging's API, with their secrets in E2E_<ROLE>_SECRET, and the
+# sample catalogue (paging needs more than 3 pages). The browser-errors test is skipped: it reads a local Loki.
+verify:e2e:
+  extends: [.npm-cache, .default-branch]
+  stage: verify
+  image: $PLAYWRIGHT_IMAGE
+  needs: [deploy:staging]
+  environment:
+    name: staging
+    action: verify
+  variables:
+    BASE_URL: $STAGING_URL
+    PLAYWRIGHT_CHANNEL: chromium
+  script:
+    - npm ci --no-audit --no-fund
+    - npm run e2e
+  artifacts:
+    when: on_failure
+    paths: [e2e/reports/playwright, test-results]
+    expire_in: 14 days
+
+# ─── production (manual, protected) ─────────────────────────────────────────────────────────────────────────────────
+
+# The release decision: only users allowed to deploy to the protected `production` environment can start it.
+# Rollback: Deployments → Environments → production → re-deploy an earlier successful deployment (its images and
+# manifests).
+deploy:production:
+  extends: .deploy
+  stage: production
+  needs: [build:web, build:gateway, scan:web, scan:gateway, verify:e2e]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  allow_failure: false
+  environment:
+    name: production
+    url: $PRODUCTION_URL
+    deployment_tier: production
+  resource_group: production
+  variables:
+    ENVIRONMENT: production

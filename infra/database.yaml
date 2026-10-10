@@ -1,0 +1,73 @@
+# The database server: PostgreSQL 18 on port 5432, with its configuration (postgres/postgresql.conf) and its
+# least-privilege users pm_migrator and pm_app (postgres/roles.sql).
+#   ./infra.sh up database               (or: docker compose -f database.yaml up -d)
+#
+# Passwords: local development defaults; set the variables to use others. The backend's deploy/local-secrets.sh uses
+# the same defaults for the API's Secret. On a real server: values from a secret manager, TLS, and a firewall that
+# admits only the cluster's nodes and the CI runners (docs/guide/12-from-zero.md).
+#   POSTGRES_PASSWORD      the server's administrator (product_management): for this file and for people only
+#   PM_MIGRATOR_PASSWORD   pm_migrator, the schema owner: used by the migrations
+#   PM_APP_PASSWORD        pm_app, the API: reads and writes rows, cannot change the schema
+name: pm-database
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: pm-postgres
+    restart: unless-stopped
+    command: ["-c", "config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_DB: product_management
+      POSTGRES_USER: product_management
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-product_management}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pm-postgres-data:/var/lib/postgresql
+      - ./postgres:/etc/postgresql:ro
+    # Sized together with postgresql.conf (shared_buffers, work_mem); shared memory for parallel queries.
+    cpus: 4
+    mem_limit: 3g
+    shm_size: 1g
+    # The log agent (logs.yaml) ships the logs of every container labelled as a server.
+    labels:
+      com.product-management.role: server
+      com.product-management.app: postgres
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "product_management", "-d", "product_management"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Runs once on every `up`, after the database is healthy, then exits: the query statistics extension, then the
+  # users and their rights (postgres/roles.sql; idempotent, so it also applies a changed password).
+  roles:
+    image: postgres:18-alpine
+    container_name: pm-postgres-roles
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGDATABASE: product_management
+      PGUSER: product_management
+      PGPASSWORD: ${POSTGRES_PASSWORD:-product_management}
+      PGOPTIONS: "-c client_min_messages=warning"
+      PM_MIGRATOR_PASSWORD: ${PM_MIGRATOR_PASSWORD:-local-migrator-password}
+      PM_APP_PASSWORD: ${PM_APP_PASSWORD:-local-app-password}
+    volumes:
+      - ./postgres:/etc/postgresql:ro
+    command:
+      - sh
+      - -c
+      - >-
+        psql -X -q -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" &&
+        psql -X -q -v db=product_management -v migrator_password="$$PM_MIGRATOR_PASSWORD"
+        -v app_password="$$PM_APP_PASSWORD" -f /etc/postgresql/roles.sql &&
+        echo "Database users pm_migrator and pm_app are up to date"
+
+volumes:
+  # Created by infra.sh (`docker volume create`), never by Compose: `docker compose down -v` cannot delete the data.
+  pm-postgres-data:
+    external: true

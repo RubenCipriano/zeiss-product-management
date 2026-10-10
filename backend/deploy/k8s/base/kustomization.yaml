@@ -1,0 +1,16 @@
+# The product-management API, the same in every environment: Deployment (with its configuration as env keys),
+# headless Service, autoscaler, disruption budget and network policy. What differs per environment (the database
+# and Redis addresses, a few settings, the secrets) is in deploy/k8s/overlays/<environment>.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - includeTemplates: true
+    pairs:
+      app.kubernetes.io/part-of: product-management
+resources:
+  - namespace.yaml
+  - deployment.yaml
+  - service.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - network-policy.yaml

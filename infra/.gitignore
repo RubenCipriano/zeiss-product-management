@@ -1,0 +1,16 @@
+# Rendered by infra.sh (logs/k8s with this machine's LOKI_URL)
+.build/
+
+# Local environment overrides (passwords, LOKI_URL)
+.env
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# Local tools: editor settings, AI assistants and their MCP servers (never committed)
+.vscode/
+.claude/
+.mcp.json

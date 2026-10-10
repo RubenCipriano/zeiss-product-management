@@ -1,0 +1,7 @@
+# The namespace of the cluster's log collector.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app.kubernetes.io/part-of: observability

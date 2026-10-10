@@ -1,0 +1,128 @@
+# Grafana Alloy: reads every pod's logs through the Kubernetes API and sends them to Loki (config.alloy). The
+# applications do nothing for it: they write JSON lines to stdout. It also receives the browser's error reports,
+# forwarded by the gateway's /collect (Service alloy-faro below).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  namespace: observability
+---
+# Read-only: list pods and read their logs, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: observability-alloy
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, namespaces, nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: observability-alloy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: observability-alloy
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: observability
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: alloy
+spec:
+  # One collector reading through the Kubernetes API is enough here. On a large cluster: a DaemonSet reading
+  # /var/log/pods on each node.
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alloy
+    spec:
+      serviceAccountName: alloy
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 473
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.10.2
+          args: ["run", "/etc/alloy/config.alloy", "--storage.path=/tmp/alloy", "--server.http.listen-addr=0.0.0.0:12345"]
+          env:
+            # Where the logs go: Loki's push URL. Default: the local Loki (logs.yaml) on this machine, through
+            # host.docker.internal. `LOKI_URL=... infra.sh up logs` replaces it, e.g. with Grafana Cloud's push URL.
+            - name: LOKI_URL
+              value: http://host.docker.internal:3100/loki/api/v1/push
+            # Credentials for a hosted Loki (Secret loki-credentials, created by infra.sh from LOKI_USERNAME and
+            # LOKI_PASSWORD); without the Secret they are empty and the local Loki ignores them.
+            - name: LOKI_USERNAME
+              valueFrom: { secretKeyRef: { name: loki-credentials, key: username, optional: true } }
+            - name: LOKI_PASSWORD
+              valueFrom: { secretKeyRef: { name: loki-credentials, key: password, optional: true } }
+          ports:
+            - { name: http, containerPort: 12345 }
+            - { name: faro, containerPort: 12347 }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/alloy }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap:
+            name: alloy-config
+        - name: tmp
+          emptyDir: {}
+---
+# The browser's error reports (faro.receiver in config.alloy). The gateway's /collect forwards to
+# alloy-faro.observability.svc.cluster.local:12347.
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy-faro
+  namespace: observability
+spec:
+  selector:
+    app.kubernetes.io/name: alloy
+  ports:
+    - name: faro
+      port: 12347
+      targetPort: faro
+---
+# Only the gateway may post error reports, so its per-IP limit cannot be bypassed from inside the cluster. Nothing
+# else connects to Alloy (it pushes to Loki; the kubelet's probes are not subject to NetworkPolicies).
+# Enforced only where the network plugin supports NetworkPolicies (Calico, Cilium, k3s' default; not Docker Desktop).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alloy-ingress
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: product-management } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+      ports:
+        - port: 12347

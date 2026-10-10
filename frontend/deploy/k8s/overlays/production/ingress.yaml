@@ -1,0 +1,27 @@
+# HTTPS entry point: the Ingress controller (Traefik, built into k3s) terminates TLS with a certificate issued and
+# renewed by cert-manager (Let's Encrypt), then forwards to the gateway. Requires cert-manager and the ClusterIssuer
+# `letsencrypt` (docs/guide/12-from-zero.md).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gateway
+  namespace: product-management
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [products.example.com]
+      secretName: gateway-tls
+  rules:
+    - host: products.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  name: http

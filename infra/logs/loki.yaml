@@ -1,0 +1,51 @@
+# Loki on the monitoring server: a single process with its data on the local filesystem under /loki (the volume
+# pm-loki-data locally). The image's default configuration (/etc/loki/local-config.yaml in grafana/loki:3.5.5), plus an
+# explicit retention: logs are deleted after 14 days. Without it Loki keeps everything until the disk is full.
+# logs.yaml mounts this file; change it, then `docker restart pm-loki`.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# Retention is applied by the compactor: every 10 minutes it marks chunks older than retention_period and deletes
+# them 2 hours later. 14 days covers "what happened last week" and keeps the disk bounded; production would keep
+# 30 days or more in object storage (docs/guide/08-observability.md).
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  delete_request_store: filesystem
+
+limits_config:
+  retention_period: 336h
+
+# Alerting is done by Grafana (logs/grafana/provisioning/alerting), not by Loki's ruler.
+ruler:
+  alertmanager_url: http://localhost:9093
+
+# No usage statistics sent to Grafana Labs from the monitoring server.
+analytics:
+  reporting_enabled: false

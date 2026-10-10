@@ -1,0 +1,24 @@
+# Grafana's only data source: the Loki next to it (the `loki` service of logs.yaml). To show another Loki, change
+# the url. Grafana expands environment variables in this file, so a literal '$' is written '$$'.
+#
+# Derived field: the trace_id that the API and the gateway attach to their log lines (structured metadata) becomes a
+# link in the log details that opens every log line of the same request, gateway and API together.
+apiVersion: 1
+datasources:
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    editable: false
+    jsonData:
+      maxLines: 1000
+      timeout: 60
+      derivedFields:
+        - name: trace_id
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: loki
+          url: '{namespace="product-management"} | trace_id="$${__value.raw}"'
+          urlDisplayLabel: All logs of this request

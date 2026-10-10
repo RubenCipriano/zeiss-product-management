@@ -1,0 +1,18 @@
+# Where alert notifications go. REPLACE IN PRODUCTION: this is a placeholder so the configuration is complete and
+# Grafana starts; it points at a local address where nothing listens (notifications fail and are logged by Grafana).
+# In production: the on-call pager (PagerDuty, Opsgenie, Grafana OnCall) for severity=critical and a team chat
+# channel (Slack, Microsoft Teams) for severity=warning, with their keys and URLs from the secret store, e.g.
+#   - uid: pm-oncall
+#     type: pagerduty
+#     settings: { integrationKey: $PAGERDUTY_INTEGRATION_KEY }
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: product-management-ops
+    receivers:
+      - uid: pm-ops-placeholder
+        type: webhook
+        settings:
+          url: http://127.0.0.1:9/replace-in-production
+          httpMethod: POST
+        disableResolveMessage: false

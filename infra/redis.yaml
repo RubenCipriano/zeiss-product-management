@@ -1,0 +1,31 @@
+# The cache server: Redis 8 on port 6379, password protected, with its configuration (redis/redis.conf). A pure cache:
+# nothing is persisted, so it has no volume.
+#   ./infra.sh up redis                  (or: docker compose -f redis.yaml up -d)
+#
+# Password: REDIS_PASSWORD, a local development default otherwise (the backend's deploy/local-secrets.sh uses the
+# same default). It is passed on the command line, never written in redis.conf.
+name: pm-redis
+
+services:
+  redis:
+    image: redis:8-alpine
+    container_name: pm-redis
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "${REDIS_PASSWORD:-local-redis-password}"]
+    environment:
+      # redis-cli (the healthcheck) reads the password from here.
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-local-redis-password}
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    cpus: 1
+    mem_limit: 384m
+    labels:
+      com.product-management.role: server
+      com.product-management.app: redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

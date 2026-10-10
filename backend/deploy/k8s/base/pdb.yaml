@@ -1,0 +1,11 @@
+# A node drain or cluster upgrade never takes the last API replica.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+  namespace: product-management
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api

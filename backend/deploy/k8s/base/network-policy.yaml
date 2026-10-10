@@ -1,0 +1,17 @@
+# Only the gateway reaches the API, which is why the API may trust its X-Forwarded-For.
+# Enforced only where the network plugin supports NetworkPolicies (Calico, Cilium, k3s' default; not Docker Desktop).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-ingress
+  namespace: product-management
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+      ports:
+        - port: 8080

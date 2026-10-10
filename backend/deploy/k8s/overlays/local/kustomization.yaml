@@ -1,0 +1,23 @@
+# Local environment: Docker Desktop's Kubernetes (or MicroK8s) on this machine.
+#   deploy/deploy.sh        # creates the local secrets if missing, builds the image, migrates, applies this overlay
+#
+# The database and Redis run on this machine (the infra repository: `infra.sh up database redis`) and the pods reach
+# them through host.docker.internal (api.yaml). The secrets come from generated/, created on this machine by
+# deploy/local-secrets.sh and never committed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - path: api.yaml
+# The one Secret the API reads. Kustomize adds a hash of the content to its name (api-secrets-<hash>) and to the
+# Deployment's references, so a new key or password rolls the API pods on the next deploy.
+secretGenerator:
+  - name: api-secrets
+    namespace: product-management
+    files:
+      - signing-key=generated/signing-key.pem
+      - consumers.json=generated/consumers.json
+    # database-password and redis-password: the local development passwords (deploy/local-secrets.sh).
+    envs:
+      - generated/passwords.env

@@ -1,0 +1,31 @@
+# The gateway's local settings: only what differs from deploy/k8s/base/gateway.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: product-management
+spec:
+  type: LoadBalancer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: product-management
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            # The API in this cluster (the backend repository): its headless Service, port 8080. To use an API
+            # elsewhere, put its host:port here and its public keys' URL in JWKS_URL.
+            - name: API_UPSTREAM
+              value: api.product-management.svc.cluster.local:8080
+            - name: JWKS_URL
+              value: http://api.product-management.svc.cluster.local:8080/.well-known/jwks.json
+            # The browser's error reports go to the log collector in the cluster (the infra repository:
+            # `infra.sh up logs`). Without it, deploy with `LOGS=off deploy/deploy.sh`: this becomes "" and the
+            # gateway answers /collect with 204, dropping the reports.
+            - name: COLLECTOR_UPSTREAM
+              value: alloy-faro.observability.svc.cluster.local:12347

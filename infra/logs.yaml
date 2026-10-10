@@ -1,0 +1,79 @@
+# The logs of the servers outside the cluster, and where every log is kept and shown.
+#   ./infra.sh up logs                   (also applies the cluster's log collector, logs/k8s)
+#
+#   loki      stores the logs, 14 days (logs/loki.yaml), on port 3100           profile "storage"
+#   grafana   shows them: dashboards and alert rules (logs/grafana), on 3000     profile "storage"
+#   agent     ships the servers' logs (database, Redis, Loki, Grafana) to Loki (logs/server-agent.alloy)
+#
+# With another Loki (e.g. Grafana Cloud), set LOKI_URL to its push URL (and LOKI_USERNAME / LOKI_PASSWORD): infra.sh
+# then leaves out the "storage" profile, so only the agent runs and ships there.
+name: pm-logs
+
+services:
+  loki:
+    profiles: [storage]
+    image: grafana/loki:3.5.5
+    container_name: pm-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - pm-loki-data:/loki
+      - ./logs/loki.yaml:/etc/loki/loki.yaml:ro
+    cpus: 1
+    mem_limit: 512m
+    labels:
+      com.product-management.role: server
+      com.product-management.app: loki
+
+  grafana:
+    profiles: [storage]
+    image: grafana/grafana:12.2.0
+    container_name: pm-grafana
+    restart: unless-stopped
+    depends_on: [loki]
+    ports:
+      - "3000:3000"
+    volumes:
+      - pm-grafana-data:/var/lib/grafana
+      - ./logs/grafana/provisioning/datasources.yaml:/etc/grafana/provisioning/datasources/product-management.yaml:ro
+      - ./logs/grafana/provisioning/dashboards.yaml:/etc/grafana/provisioning/dashboards/product-management.yaml:ro
+      - ./logs/grafana/provisioning/alerting:/etc/grafana/provisioning/alerting:ro
+      - ./logs/grafana/dashboards:/var/lib/grafana/dashboards/product-management:ro
+    environment:
+      # Locally the login is disabled (anonymous administrator); a real server uses single sign-on.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    cpus: 1
+    mem_limit: 512m
+    labels:
+      com.product-management.role: server
+      com.product-management.app: grafana
+
+  agent:
+    image: grafana/alloy:v1.10.2
+    container_name: pm-server-agent
+    restart: unless-stopped
+    command: ["run", "/etc/alloy/config.alloy", "--storage.path=/tmp/alloy"]
+    environment:
+      # Default: the `loki` service above.
+      LOKI_URL: ${LOKI_URL:-http://loki:3100/loki/api/v1/push}
+      LOKI_USERNAME: ${LOKI_USERNAME:-}
+      LOKI_PASSWORD: ${LOKI_PASSWORD:-}
+    volumes:
+      # Reads the other containers' logs through Docker (read-only).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./logs/server-agent.alloy:/etc/alloy/config.alloy:ro
+    labels:
+      com.product-management.role: server
+      com.product-management.app: agent
+
+volumes:
+  # Created by infra.sh (`docker volume create`), never by Compose: `docker compose down -v` cannot delete the logs or
+  # Grafana's state.
+  pm-loki-data:
+    external: true
+  pm-grafana-data:
+    external: true

@@ -1,0 +1,7 @@
+# The application's namespace. The backend repository applies the same object: whichever deploys first creates it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: product-management
+  labels:
+    app.kubernetes.io/part-of: product-management

@@ -1,0 +1,172 @@
+// Grafana Alloy: collects the logs of every pod in the cluster and sends them to Loki (LOKI_URL, set in alloy.yaml).
+// It reads them through the Kubernetes API (no host paths, no changes to the applications), adds labels to find them
+// again (namespace, app, pod, container) and lifts the fields that matter out of the JSON lines. It also receives the
+// browser's error reports (Grafana Faro), which the gateway forwards from /collect.
+
+discovery.kubernetes "pods" {
+	role = "pod"
+}
+
+discovery.relabel "pods" {
+	targets = discovery.kubernetes.pods.targets
+
+	// Not the collector itself: its own logs would feed back into it.
+	rule {
+		source_labels = ["__meta_kubernetes_namespace"]
+		regex         = "observability"
+		action        = "drop"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_namespace"]
+		target_label  = "namespace"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_name"]
+		target_label  = "pod"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_container_name"]
+		target_label  = "container"
+	}
+	// app = the app.kubernetes.io/name label (api, gateway, web, load-test…), else the container name.
+	rule {
+		source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name", "__meta_kubernetes_pod_container_name"]
+		regex         = "^;(.+)$"
+		target_label  = "app"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+		regex         = "(.+)"
+		target_label  = "app"
+	}
+}
+
+loki.source.kubernetes "pods" {
+	targets    = discovery.relabel.pods.output
+	forward_to = [loki.process.pods.receiver]
+}
+
+loki.process "pods" {
+	// API: JSON lines from ASP.NET Core. Level and category become searchable; the trace id (from the logging scope)
+	// becomes structured metadata, which Grafana turns into a link to the trace.
+	stage.match {
+		selector = "{app=\"api\"}"
+
+		stage.json {
+			expressions = {
+				level    = "LogLevel",
+				category = "Category",
+				trace_id = "Scopes[?TraceId] | [0].TraceId",
+			}
+		}
+
+		stage.labels {
+			values = {level = ""}
+		}
+
+		stage.structured_metadata {
+			values = {trace_id = "", category = ""}
+		}
+	}
+
+	// Gateway: one JSON line per request (the frontend repository: gateway/default.conf.template).
+	stage.match {
+		selector = "{app=\"gateway\"}"
+
+		stage.json {
+			expressions = {
+				trace_id = "trace_id",
+				status   = "status",
+				user     = "user",
+			}
+		}
+
+		stage.structured_metadata {
+			values = {trace_id = "", status = "", user = ""}
+		}
+	}
+
+	forward_to = [loki.write.loki.receiver]
+}
+
+// The browser's error reports: the web app's Faro SDK (the frontend repository: src/app/core/observability) posts
+// them to the gateway's /collect, which forwards them here through the Service alloy-faro. Only the gateway reaches this port
+// (alloy.yaml: NetworkPolicy), and the gateway already limits each client IP; the limits below protect Loki when
+// many browsers fail at once (a broken release): beyond them reports are refused, and a sample is enough.
+faro.receiver "browser" {
+	server {
+		listen_address = "0.0.0.0"
+		listen_port    = 12347
+		// Same origin through the gateway: no cross-origin caller is allowed (no CORS headers).
+		cors_allowed_origins     = []
+		max_allowed_payload_size = "64KiB"
+
+		rate_limiting {
+			enabled    = true
+			rate       = 50
+			burst_size = 100
+		}
+	}
+
+	// Production builds ship no source maps; stack traces point at the minified bundles of the reported release.
+	sourcemaps {
+		download = false
+	}
+
+	// JSON lines like the API's and the gateway's. `kind` is a label only until the pipeline below has read it.
+	log_format       = "json"
+	extra_log_labels = {kind = ""}
+
+	output {
+		logs = [loki.process.browser.receiver]
+	}
+}
+
+loki.process "browser" {
+	// Errors only: the web app sends nothing else, so events, measurements or logs posted by anyone else are dropped.
+	stage.match {
+		selector = "{kind!=\"exception\"}"
+		action   = "drop"
+	}
+
+	stage.label_drop {
+		values = ["kind"]
+	}
+
+	// Few labels, next to the others: {namespace="browser"} for every browser error. Who, where and which release
+	// become structured metadata, filterable per line without creating a stream per user or page.
+	stage.static_labels {
+		values = {namespace = "browser", app = "browser", level = "error"}
+	}
+
+	stage.json {
+		expressions = {
+			page        = "page_url",
+			user        = "user_id",
+			app_version = "app_version",
+			browser     = "browser_name",
+		}
+	}
+
+	stage.structured_metadata {
+		values = {page = "", user = "", app_version = "", browser = ""}
+	}
+
+	forward_to = [loki.write.loki.receiver]
+}
+
+// Loki's push URL and, for a hosted Loki, its credentials: environment variables of the Deployment (alloy.yaml).
+loki.write "loki" {
+	endpoint {
+		url = sys.env("LOKI_URL")
+
+		basic_auth {
+			username = sys.env("LOKI_USERNAME")
+			password = sys.env("LOKI_PASSWORD")
+		}
+	}
+}

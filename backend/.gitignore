@@ -385,11 +385,6 @@ MigrationBackup/
 FodyWeavers.xsd
 
 # VS Code files for those working on multiple tools
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
 *.code-workspace
 
 # Local History for Visual Studio Code
@@ -483,3 +478,14 @@ $RECYCLE.BIN/
 
 # Reqnroll: code generated from .feature files at build time
 *.feature.cs
+
+# Deployment (deploy/): files generated on each machine, never committed
+# The overlay with this release's image pinned, rendered by deploy/deploy.sh
+deploy/k8s/.build/
+# Local signing key, demo consumers' hashes and local passwords, created by deploy/local-secrets.sh
+deploy/k8s/overlays/local/generated/
+
+# Local tools: editor settings, AI assistants and their MCP servers (never committed)
+.vscode/
+.claude/
+.mcp.json

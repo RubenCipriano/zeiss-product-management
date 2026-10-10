@@ -1,0 +1,68 @@
+// Grafana Alloy agent for the servers outside the cluster (database, Redis, Loki, Grafana): sends their logs to Loki,
+// next to the cluster's. PostgreSQL logs its slow statements (over 250 ms), lock waits, checkpoints and errors
+// (postgres/postgresql.conf); Redis, Loki and Grafana log their own warnings and errors.
+// Locally one agent container (logs.yaml) reads every container labelled com.product-management.role=server. On a
+// real machine the same file runs as the Alloy service on each server, reading journald or the service's log files
+// instead of Docker.
+//
+// Environment: LOKI_URL (Loki's push URL), and LOKI_USERNAME / LOKI_PASSWORD for a hosted Loki (empty locally).
+
+discovery.docker "servers" {
+	host = "unix:///var/run/docker.sock"
+
+	filter {
+		name   = "label"
+		values = ["com.product-management.role=server"]
+	}
+}
+
+discovery.relabel "servers" {
+	targets = discovery.docker.servers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_product_management_app"]
+		target_label  = "app"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+
+	rule {
+		replacement  = "servers"
+		target_label = "namespace"
+	}
+}
+
+loki.source.docker "servers" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.servers.output
+	forward_to = [loki.process.servers.receiver]
+}
+
+// PostgreSQL writes a slow statement over several lines (the SQL keeps its line breaks); without this each line
+// would be a separate entry and the statement would be cut. A new entry starts with the timestamp of log_line_prefix.
+loki.process "servers" {
+	stage.match {
+		selector = "{app=\"postgres\"}"
+
+		stage.multiline {
+			firstline     = "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}"
+			max_wait_time = "3s"
+		}
+	}
+	forward_to = [loki.write.loki.receiver]
+}
+
+loki.write "loki" {
+	endpoint {
+		url = sys.env("LOKI_URL")
+
+		basic_auth {
+			username = sys.env("LOKI_USERNAME")
+			password = sys.env("LOKI_PASSWORD")
+		}
+	}
+}
