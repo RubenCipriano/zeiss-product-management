@@ -1,10 +1,13 @@
 # 0021 — Deployment layout: Kustomize overlays, servers outside the cluster, migrations in the pipeline
 
 **Status:** accepted (supersedes the per-project manifests and the migration Job of [0011](0011-kubernetes-deployment.md)),
-amended twice. **Current state:** [Update (2026-10-10): the infrastructure moves into Kubernetes](#update-2026-10-10-the-infrastructure-moves-into-kubernetes).
-PostgreSQL, Redis and the logs now run in the cluster, in the shared namespace `infra`; the servers outside the
-cluster, the Docker Compose files, the private runner for migrations and the password variables described below are
-history.
+amended three times. **Current state:** where things run is
+[Update (2026-10-10): the infrastructure moves into Kubernetes](#update-2026-10-10-the-infrastructure-moves-into-kubernetes)
+(PostgreSQL, Redis and the logs in the cluster, in the shared namespace `infra`); the layout and the CI/CD flow are
+[Revision (2026-10-10): GitOps with a deploy repository](#revision-2026-10-10-gitops-with-a-deploy-repository)
+(every manifest and environment in the deploy repository, whose pipeline is the only one that applies). The servers
+outside the cluster, the Docker Compose files, the private runner for migrations, the password variables and the
+per-repository deploy scripts and manifests described below are history.
 
 ## Context
 
@@ -22,6 +25,9 @@ secret values in the repository, data stores with their own backups and lifecycl
 and run once, and partial deployments (only the API, only the web app) that stay possible.
 
 ## Decision
+
+*The paths in this section and in the first update are those of their time (a root `deploy/` folder, then
+`backend/deploy/` and `frontend/deploy/`); today's are in the [revision](#revision-2026-10-10-gitops-with-a-deploy-repository).*
 
 **Kustomize base and overlays.** `deploy/k8s/base` holds everything that runs in the cluster, the same in every
 environment; `deploy/k8s/overlays/{local,staging,production}` hold only the differences: the servers' addresses,
@@ -123,7 +129,8 @@ the GitLab agent for Kubernetes, so no cluster API is exposed to the runners.
 
 The decisions above still hold (Kustomize overlays, servers outside the cluster, migrations in the pipeline with the
 API image, least-privilege users, secrets from CI/CD variables). How they are laid out changed: the paths, part
-labels, ExternalName Services, ConfigMap and Secrets described above are history.
+labels, ExternalName Services, ConfigMap and Secrets described above are history. (The three-part layout below was in
+turn replaced by the deploy repository: [revision](#revision-2026-10-10-gitops-with-a-deploy-repository).)
 
 **Three self-contained parts, each its own GitLab repository**
 ([backend](https://gitlab.com/zeiss/backend), [frontend](https://gitlab.com/zeiss/frontend) and
@@ -217,7 +224,8 @@ pods). There were two ways to run things, and only one of them was Kubernetes.
 ### Decision
 
 **Everything runs in Kubernetes**, in one shared namespace, `infra`, for every service on the cluster (not only
-product-management), managed by the infra repository:
+product-management), managed by the infra repository (since the revision below: the deploy repository's `infra/`
+and `scripts/`):
 
 * `postgres.yaml`: PostgreSQL 18 as a StatefulSet (one replica, its data on a PersistentVolumeClaim, the settings
   inline in a ConfigMap) behind the Service `postgres.infra.svc.cluster.local`, and a CronJob that writes a nightly
@@ -235,8 +243,8 @@ the Secret `database-credentials` in the service's namespace. What the app user 
 own business: for the API, the EF Core migration `GrantAppPermissions` (run as the schema owner) replaces `roles.sql`.
 
 **Passwords are generated in the cluster and never leave it.** `infra.sh` creates the administrator's and Redis'
-passwords (Secrets `postgres-admin`, `redis-auth`), `create-database.sh` the users'. The backend's `deploy.sh` copies
-Redis' password into its own namespace (`redis-credentials`), since a pod reads only its namespace's Secrets. No
+passwords (Secrets `postgres-admin`, `redis-auth`), `create-database.sh` the users'. `deploy.sh` (then the backend's,
+now `deploy/scripts/deploy.sh`) copies Redis' password into the service's namespace (`redis-credentials`), since a pod reads only its namespace's Secrets. No
 pipeline variable holds a database or Redis password any more; `api-secrets` holds only the API's signing key and
 consumers.
 
@@ -279,3 +287,90 @@ themselves; without such a node (a laptop, a single k3s server) they run anywher
   only by the migration pod). The API pods still read only `pm_app`'s password, which cannot change the schema.
 * **Rotation is an operator's command** (`create-database.sh --rotate`, a new `redis-auth`) followed by restarting the
   pods that read the Secret, not "change a variable and re-run a job".
+
+## Revision (2026-10-10): GitOps with a deploy repository
+
+This revision supersedes the "three self-contained parts" of the first update (each with its own deploy script,
+manifests and deploying pipeline) and the "GitOps with Argo CD or Flux" alternative's "not now". Kustomize, the shared
+infrastructure in the cluster, configuration as env keys, the headless `api` Service, least-privilege users and
+migrations with the release's image, once, before the rollout, are unchanged.
+
+### Context
+
+After the updates, an environment was spread over three repositories: the API's manifests and overlays in
+`backend/deploy/`, the web app's and the gateway's in `frontend/deploy/`, the shared infrastructure in `infra/`. Each
+app pipeline applied its own part to the clusters, so what ran in staging was the sum of the last successful deploy
+jobs of three pipelines, and no file said it. A rollback was a re-deploy per project; the namespace was declared
+twice; each project had its own pull Secret; and the frontend pipeline needed cluster rights only to apply two
+Deployments.
+
+### Decision
+
+**One deploy repository describes every environment** (`deploy/`, [gitlab.com/zeiss/deploy](https://gitlab.com/zeiss/deploy);
+the former `infra/` folder, renamed):
+
+* `apps/backend/`, `apps/frontend/`: the applications' manifests, the same in every environment (the former bases;
+  the namespace only in `apps/backend`).
+* `environments/{local,staging,production}/`: one `kustomization.yaml` per environment for both apps, with the
+  per-environment patches (`api.yaml`, `gateway.yaml`, and for staging and production `registry.yaml`,
+  `ingress.yaml`) and, in staging and production, the deployed image tags (`images:` with `newTag`).
+* `infra/`: `postgres.yaml`, `redis.yaml`, `logs.yaml`, `dashboards/`.
+* `scripts/`: `deploy.sh <local|staging|production> [infra|apps|all]` (replaces both apps' deploy scripts, their
+  `ci/deploy-environment.sh` and `create-secrets.sh`), `infra.sh`, `create-database.sh`, `add-node.sh`,
+  `local-secrets.sh`, `validate.sh` (every environment and `infra/`, replacing both `validate-manifests.sh`) and
+  `smoke.sh`.
+
+**The app pipelines never apply.** backend and frontend test, build and scan; on `main` they *release*: their
+`ci/release.sh` commits the new tag to `environments/staging/kustomization.yaml` on the deploy repository's `main`
+("backend: api <sha>", "frontend: web, gateway <sha>"), and for production pushes a branch and opens a merge request
+("Release api <sha> to production"). The backend runs `ci/migrate.sh` (the same one-off migration pod) before each
+release commit, staging automatically, production manually.
+
+**The deploy pipeline is the only one that changes the clusters.** It validates every merge request and commit; on
+`main` it applies staging (`deploy:staging` → `scripts/deploy.sh staging apps`) when a commit changes
+`environments/staging`, `apps/`, `infra/` or the script, and smoke-checks it through the public URL (`smoke:staging`);
+production the same after a release merge request is merged, started by hand (`deploy:production`). The shared
+infrastructure is applied only by manual `infra:<env>` jobs. `deploy.sh` creates one pull Secret, `gitlab-registry`,
+from a group deploy token (`gitlab-deploy-token`, `read_registry` on the zeiss group) that reads both registries, and
+`api-secrets` from the deploy project's `API_SIGNING_KEY` and `API_CONSUMERS`; it refuses an environment whose images
+are still `newTag: unreleased`.
+
+**Locally** `scripts/deploy.sh local` builds the three images from the sibling checkouts `../backend` and
+`../frontend`, records their tags in `environments/local/generated/build` (not committed), migrates and applies, so
+`kubectl diff -k environments/local` shows no drift after a deploy. The load tests and the requirements check are
+local tools (`tools/`), in no repository; the end-to-end tests and the requirements check are no longer pipeline
+jobs (they are run by hand against an environment); the smoke check replaces them after each deployment.
+
+### Why
+
+* **One place that describes every environment.** `environments/<env>` says exactly which images and settings run
+  there; a reviewer sees an environment, not three halves of it.
+* **History is the deployment history.** One commit per release: `git log environments/staging` is staging's
+  deployment log, with author and pipeline link.
+* **Rollback is `git revert`** of the release commit (or merge); the pipeline applies the previous tags, and the
+  repository keeps saying what runs.
+* **Promotion is a merge request.** Production gets a tag staging already runs; reviewing and merging the merge request
+  is the release decision, with GitLab's approvals.
+* **Ready for Argo CD.** An `Application` per environment pointing at `environments/<env>` (automated sync for
+  staging, manual for production) replaces the deploy and smoke jobs; the app pipelines do not change.
+* **Fewer cluster rights.** The frontend pipeline needs none; the backend only for its migrations.
+
+### Trade-offs
+
+* **A cross-repository token.** The release jobs push to the deploy repository with `DEPLOY_REPO_TOKEN`, a project
+  access token of `zeiss/deploy` (Maintainer, `write_repository`), masked and protected in backend and frontend. It
+  can push to deploy's protected `main`, so it is a credential to guard, expire and rotate.
+* **Migrations still run from the backend pipeline**, before the release commit, not from the deploy repository: the
+  migration needs the image being released, and the backend keeps cluster access for it. Production's migration
+  (`migrate:production`, manual) runs just before `release:production` opens its merge request, so before anyone
+  merges it; expand/contract makes that safe, and a
+  revert never undoes the schema.
+* **The local build reads sibling checkouts.** `deploy.sh local` expects `../backend` and `../frontend` next to the
+  deploy repository (or `BACKEND_DIR`, `FRONTEND_DIR`).
+* **Two releases at the same moment** race for deploy's `main`; `ci/release.sh` starts again from the new `main` (up to
+  five times).
+* **A production release is two steps** (merge, then start `deploy:production`), and a fresh environment refuses to
+  deploy until both apps have released once.
+* **Thinner automated checks after a deployment:** the smoke check (gateway, web app, the API through the gateway,
+  optionally a signed-in read) instead of the requirements check and Playwright, which now run by hand.
+* Still no pruning: `kubectl apply` does not delete objects removed from the manifests (Argo CD would).

@@ -15,9 +15,9 @@ the decision record (ADR) that explains why. The static picture (topology, compo
 | 6 | [Create a product, update with If-Match](#6-create-a-product-update-with-if-match) | sequences | `ProductCommandService`, `UnitOfWork` |
 | 7 | [Rate limiting](#7-rate-limiting) | flowchart | `SharedTokenBucketRateLimiter`, `RedisDistributedRateLimiter` |
 | 8 | [Frontend: the product list screen](#8-frontend-the-product-list-screen) | flowchart | `products-store.ts`, `products-api.ts` |
-| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `infra.sh`, `create-database.sh`, `deploy.sh` (backend, frontend), `.gitlab-ci.yml` (×3) |
+| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `deploy/scripts/` (`deploy.sh`, `infra.sh`, `create-database.sh`), `ci/release.sh`, `.gitlab-ci.yml` (×3) |
 | 10 | [Autoscaling](#10-autoscaling) | flowchart | `hpa.yaml`, `gateway.yaml`, `default.conf.template` |
-| 11 | [Load test and verification](#11-load-test-and-verification) | flowcharts | `backend/load-tests/`, `check-requirements.py` |
+| 11 | [Load test and verification](#11-load-test-and-verification) | flowcharts | `tools/load-tests/`, `tools/check-requirements.py` |
 | 12 | [Logs, from a request to Grafana](#12-logs-from-a-request-to-grafana) | flowchart | `trace.js`, `logs.yaml` (Alloy's configuration), `browser-errors.ts` |
 
 Names used in the diagrams: **gateway** is the nginx Deployment in front of everything (`frontend/gateway/`),
@@ -286,7 +286,7 @@ sequenceDiagram
 ```
 
 The gateway holds no secret: it can verify tokens, never issue them. The JWKS is fetched over the in-cluster headless
-Service `api` (`JWKS_URL` in `frontend/deploy/k8s/overlays/<environment>/gateway.yaml`); `/.well-known/jwks.json` is not routed to the API by the
+Service `api` (`JWKS_URL` in `deploy/environments/<environment>/gateway.yaml`); `/.well-known/jwks.json` is not routed to the API by the
 gateway, so it is not exposed outside the cluster. Code: [`jwt.js`](../frontend/gateway/jwt.js),
 [`default.conf.template`](../frontend/gateway/default.conf.template),
 [`SecurityServiceCollectionExtensions.cs`](../backend/ProductManagement.Api/Security/SecurityServiceCollectionExtensions.cs),
@@ -572,7 +572,7 @@ the address in `X-Forwarded-For`, which the API trusts because a NetworkPolicy l
 [`RateLimitingServiceCollectionExtensions.cs`](../backend/ProductManagement.Api/RateLimiting/RateLimitingServiceCollectionExtensions.cs),
 [`SharedTokenBucketRateLimiter.cs`](../backend/ProductManagement.Api/RateLimiting/SharedTokenBucketRateLimiter.cs),
 [`RedisDistributedRateLimiter.cs`](../backend/ProductManagement.Infrastructure/Security/RedisDistributedRateLimiter.cs);
-values as env entries in the API's Deployment (`backend/deploy/k8s/base/deployment.yaml`) and the gateway's. Decision: [ADR 0010](adr/0010-rate-limiting.md).
+values as env entries in the API's Deployment (`deploy/apps/backend/deployment.yaml`) and the gateway's. Decision: [ADR 0010](adr/0010-rate-limiting.md).
 
 ---
 
@@ -632,112 +632,114 @@ fresh, so a crowd of open screens is answered by the microcache. An empty name f
 
 ### Deploy to the current kubectl context
 
-Three parts, run in this order: `infra/infra.sh up` creates the shared infrastructure in the namespace `infra`
-(PostgreSQL, Redis, and the logs: Loki, Grafana, Alloy) and installs metrics-server when the cluster has none;
-`infra/create-database.sh` gives the API its database, its two users and their Secret, once per cluster;
-`backend/deploy/deploy.sh` deploys the API; `frontend/deploy/deploy.sh` deploys the web app and the gateway. Each
-deploy script renders its environment's Kustomize overlay with this release's images pinned and applies it with
-`kubectl apply`. Locally they also build the images, with an immutable tag (the commit, plus a timestamp when the
-working tree is dirty). Docker Desktop's Kubernetes uses the locally built images straight from the local Docker
-engine; any other context needs the images from a registry (`API_IMAGE`, `WEB_IMAGE`, `GATEWAY_IMAGE`, as the
-pipelines pass them), and the scripts stop without them.
+Everything that runs in a cluster is described by the deploy repository (`deploy/`) and applied by its
+`scripts/deploy.sh <local|staging|production> [infra|apps|all]`. `infra` (`scripts/infra.sh up`) creates the shared
+infrastructure in the namespace `infra` (PostgreSQL, Redis, and the logs: Loki, Grafana, Alloy) and installs
+metrics-server when the cluster has none; `scripts/create-database.sh` gives the API its database, its two users and
+their Secret, once per cluster; `apps` deploys the API, the web app and the gateway from `environments/<environment>`.
+Locally (`deploy.sh local`, Docker Desktop only) it builds the three images from the sibling checkouts `../backend`
+and `../frontend`, with an immutable tag (the commit, plus a timestamp when the working tree is dirty), straight into
+the local Docker engine, and creates the database itself on the first run. Staging and production apply exactly what
+is committed (below).
 
 ```mermaid
 flowchart TD
-    subgraph infra["infra/infra.sh up [postgres] [redis] [logs]"]
+    subgraph infra["deploy/scripts/infra.sh up [postgres] [redis] [logs]"]
         i0["namespace infra<br/>Secrets postgres-admin, redis-auth<br/>random, only if missing"] --> i0b["metrics-server<br/>only if the cluster has none"]
-        i0b --> i1["postgres: kubectl apply postgres.yaml<br/>StatefulSet, volume, backup CronJob"]
-        i0b --> i3["redis: kubectl apply redis.yaml<br/>--requirepass from redis-auth"]
+        i0b --> i1["postgres: kubectl apply infra/postgres.yaml<br/>StatefulSet, volume, backup CronJob"]
+        i0b --> i3["redis: kubectl apply infra/redis.yaml<br/>--requirepass from redis-auth"]
         i0b --> i4{"logs: LOKI_URL set?"}
-        i4 -->|"no"| i5["dashboards ConfigMap,<br/>kubectl apply logs.yaml:<br/>Loki, Grafana, Alloy"]
+        i4 -->|"no"| i5["dashboards ConfigMap,<br/>kubectl apply infra/logs.yaml:<br/>Loki, Grafana, Alloy"]
         i4 -->|"yes"| i6["Secret loki-external,<br/>Alloy only, pushing to LOKI_URL"]
     end
 
-    subgraph db["infra/create-database.sh, once"]
-        d1["kubectl exec psql in the postgres pod:<br/>database product_management,<br/>users pm_migrator, pm_app"] --> d2["Secret database-credentials<br/>in product-management"]
+    subgraph local["deploy/scripts/deploy.sh local"]
+        l0["local-secrets.sh, first run:<br/>signing key, consumers<br/>(environments/local/generated)"] --> l1["docker build ../backend,<br/>../frontend, ../frontend/gateway<br/>tag = short SHA + dirty timestamp"]
+        l1 --> l2["tags into<br/>environments/local/generated/build<br/>(LOGS=off: COLLECTOR_UPSTREAM empty)"]
+        l2 --> l3{"Secret database-credentials?"}
+        l3 -->|"no, first deploy"| d1["create-database.sh:<br/>kubectl exec psql in the postgres pod,<br/>database, users pm_migrator, pm_app,<br/>Secret database-credentials"]
+        l3 -->|"yes"| l4
+        d1 --> l4["Secret redis-credentials:<br/>copy of infra/redis-auth"]
+        l4 --> l5["kubectl run migrate pod, --rm --attach<br/>API image migrate as pm_migrator:<br/>migrations, seed, cache generations"]
+        l5 --> l6["kubectl apply -k environments/local<br/>secretGenerator api-secrets-hash"]
+        l6 --> l7["rollout status api, web, gateway"]
     end
 
-    subgraph backend["backend/deploy/deploy.sh"]
-        b0["local-secrets.sh, first run:<br/>signing key, consumers"] --> b1["docker build backend/<br/>tag = short SHA + dirty timestamp<br/>(docker-desktop; else API_IMAGE)"]
-        b1 --> b2["Secret redis-credentials:<br/>copy of infra/redis-auth"]
-        b2 --> b3["kubectl run migrate pod, --rm --attach<br/>API image migrate as pm_migrator:<br/>migrations, seed, cache generations"]
-        b3 --> b4["render overlays/local + images<br/>secretGenerator api-secrets-hash"]
-        b4 --> b5["kubectl apply<br/>rollout status api"]
-    end
-
-    subgraph frontend["frontend/deploy/deploy.sh"]
-        f1["docker build frontend/<br/>and frontend/gateway/<br/>(docker-desktop; else WEB_IMAGE, GATEWAY_IMAGE)"] --> f2["images used from<br/>the local Docker engine"]
-        f2 --> f3{"LOGS=off?"}
-        f3 -->|"no"| f4["render overlays/local + images"]
-        f3 -->|"yes"| f5["render + patch<br/>COLLECTOR_UPSTREAM empty"]
-        f4 & f5 --> f6["kubectl apply<br/>rollout status web, gateway"]
-    end
-
-    i1 & i3 --> d1
-    d2 --> b0
-    b5 --> f1
-    f6 --> done["http://localhost:8080"]
+    i1 & i3 --> l0
+    l7 --> done["http://localhost:8080"]
 ```
 
-The rendered kustomization goes to `<part>/deploy/k8s/.build/<environment>/kustomization.yaml` (not committed). The
+`kubectl diff -k deploy/environments/local` compares the cluster with exactly what the last deploy applied. The
 migrations run inside the cluster because the database is reachable only there: `kubectl run --rm --attach` streams
 the pod's output, returns its exit code and leaves nothing behind. The API never migrates at start-up; its database
 user `pm_app` could not (what it may do is granted by the migration `GrantAppPermissions`). Code:
-[`infra.sh`](../infra/infra.sh), [`postgres.yaml`](../infra/postgres.yaml),
-[`create-database.sh`](../infra/create-database.sh),
-[`backend/deploy/deploy.sh`](../backend/deploy/deploy.sh), [`local-secrets.sh`](../backend/deploy/local-secrets.sh),
-[`frontend/deploy/deploy.sh`](../frontend/deploy/deploy.sh), [`collector.sh`](../frontend/gateway/collector.sh),
+[`deploy.sh`](../deploy/scripts/deploy.sh), [`infra.sh`](../deploy/scripts/infra.sh),
+[`postgres.yaml`](../deploy/infra/postgres.yaml), [`create-database.sh`](../deploy/scripts/create-database.sh),
+[`local-secrets.sh`](../deploy/scripts/local-secrets.sh),
+[`environments/local`](../deploy/environments/local/kustomization.yaml), [`collector.sh`](../frontend/gateway/collector.sh),
 [`DatabaseInitializer.cs`](../backend/ProductManagement.Infrastructure/Persistence/DatabaseInitializer.cs).
 Decision: [ADR 0021](adr/0021-deployment-layout.md).
 
-### CI/CD pipelines (GitLab)
+### CI/CD pipelines (GitLab, GitOps)
 
-One pipeline per repository. The backend and the frontend take a commit to staging automatically and to production
-after a manual, protected step, once each environment is switched on (`STAGING_ENABLED`, `PRODUCTION_ENABLED`); the
-infra only validates automatically, and every deployment of the shared infrastructure is a manual job. Every job runs
-on gitlab.com's shared runners; the staging and production jobs have not yet run against real clusters.
+One pipeline per repository. The backend and the frontend never apply anything: they release by committing the new
+image tag to the deploy repository, to `environments/staging` on its `main` automatically, and to
+`environments/production` through a merge request opened by a manual, protected job. The deploy repository's
+pipeline is the only one that changes the clusters: it applies what `main` holds and smoke-checks it. Each
+environment's jobs exist once it is switched on (`STAGING_ENABLED`, `PRODUCTION_ENABLED`). Every job runs on
+gitlab.com's shared runners; the staging and production jobs have not yet run against real clusters.
 
 ```mermaid
 flowchart TB
     subgraph be["backend/.gitlab-ci.yml"]
         direction LR
-        bt["<b>test</b><br/>unit, integration,<br/>format, manifests, SAST"] --> bb["<b>build</b><br/>api image,<br/>migrations.sql"]
+        bt["<b>test</b><br/>unit, integration,<br/>format, SAST"] --> bb["<b>build</b><br/>api image,<br/>migrations.sql"]
         bb --> bs["<b>scan</b><br/>Trivy"]
-        bs --> bms["migrate:staging<br/>migrate pod in the cluster,<br/>pm_migrator"]
-        bms --> bds["deploy:staging<br/>Secret api-secrets,<br/>deploy.sh, MIGRATIONS=skip"]
-        bds --> bv["verify:requirements<br/>check-requirements.py"]
-        bv --> bmp["migrate:production<br/>manual, protected"]
-        bmp --> bdp["deploy:production"]
+        bs --> bms["migrate:staging<br/>ci/migrate.sh: migrate pod<br/>in the cluster, pm_migrator"]
+        bms --> brs["release:staging<br/>ci/release.sh: commit<br/>backend: api sha"]
+        brs --> bmp["migrate:production<br/>manual, protected"]
+        bmp --> brp["release:production<br/>merge request in deploy"]
     end
 
     subgraph fe["frontend/.gitlab-ci.yml"]
         direction LR
-        ft["<b>test</b><br/>lint, unit, build,<br/>manifests, SAST"] --> fb["<b>build</b><br/>web, gateway images"]
+        ft["<b>test</b><br/>lint, unit, build, SAST"] --> fb["<b>build</b><br/>web, gateway images"]
         fb --> fs["<b>scan</b><br/>Trivy"]
-        fs --> fds["deploy:staging<br/>deploy.sh"]
-        fds --> fv["verify:e2e<br/>Playwright"]
-        fv --> fdp["deploy:production<br/>manual, protected"]
+        fs --> frs["release:staging<br/>commit frontend:<br/>web, gateway sha"]
+        frs --> frp["release:production<br/>manual: merge request"]
     end
 
-    subgraph inf["infra/.gitlab-ci.yml"]
+    subgraph dp["deploy/.gitlab-ci.yml"]
         direction LR
-        iv["<b>validate</b><br/>kubeconform, dashboards,<br/>shellcheck, alloy validate"] --> ids["deploy:staging, manual<br/>./infra.sh up"]
-        iv --> idp["deploy:production, manual<br/>./infra.sh up"]
+        dv["<b>validate</b><br/>scripts/validate.sh,<br/>shellcheck, alloy validate"] --> dds["deploy:staging<br/>scripts/deploy.sh staging apps"]
+        dds --> dss["smoke:staging<br/>scripts/smoke.sh"]
+        dv --> ddp["deploy:production<br/>manual, after the merge"]
+        ddp --> dsp["smoke:production"]
+        dv --> di["infra:staging, infra:production<br/>manual: deploy.sh env infra"]
     end
 
-    be ~~~ fe ~~~ inf
+    brs -->|"push to main<br/>environments/staging"| dv
+    frs -->|"push to main"| dv
+    brp -.->|"merged by a person<br/>environments/production"| dv
+    frp -.-> dv
 ```
 
-Merge requests stop after scan (validate for infra). The migrate and deploy jobs reach the cluster through the GitLab
-agent for Kubernetes (`KUBE_CONTEXT`) or a kubeconfig (`KUBECONFIG`); the migrate jobs run the release's image as a
-one-off pod inside the cluster (`deploy-environment.sh migrate`), so no runner needs to be inside the private network.
-No database or Redis password is a CI/CD variable: they live in the cluster's Secrets. Code:
-[`backend/.gitlab-ci.yml`](../backend/.gitlab-ci.yml),
-[`deploy-environment.sh`](../backend/deploy/ci/deploy-environment.sh),
-[`create-secrets.sh`](../backend/deploy/ci/create-secrets.sh), [`frontend/.gitlab-ci.yml`](../frontend/.gitlab-ci.yml),
-[`infra/.gitlab-ci.yml`](../infra/.gitlab-ci.yml); the manifests checks:
-[`backend/deploy/ci/validate-manifests.sh`](../backend/deploy/ci/validate-manifests.sh),
-[`frontend/deploy/ci/validate-manifests.sh`](../frontend/deploy/ci/validate-manifests.sh). Setup: [guide chapter 12](guide/12-from-zero.md).
+`deploy:staging` runs when a commit on `main` changes `environments/staging`, `apps/`, `infra/` or `scripts/deploy.sh`;
+`deploy:production` when it changes `environments/production` or `apps/`, and waits for a person. `deploy.sh` refuses
+an environment while an image still has `newTag: unreleased`, creates the Secrets `gitlab-registry` (the group deploy
+token) and `api-secrets` (the deploy project's `API_SIGNING_KEY`, `API_CONSUMERS`), copies `redis-credentials`,
+applies and waits for the rollouts. The smoke check calls the public URL: `/healthz`, `/`, an unknown client's
+`POST /api/auth/token` (401 `invalid_client`), and with `SMOKE_CLIENT_ID` / `SMOKE_CLIENT_SECRET` a signed-in
+`GET /api/categories`. **Rollback** is `git revert` of the release commit (or merge) in the deploy repository; the
+pipeline applies the previous tags. Migrations are never rolled back (expand/contract). The cluster jobs reach it
+through the GitLab agent for Kubernetes (`KUBE_CONTEXT`) or a kubeconfig (`KUBECONFIG`), so no runner needs to be
+inside the private network; no database or Redis password is a CI/CD variable. The end-to-end tests and the
+requirements check are not pipeline jobs: they run by hand against an environment. Code:
+[`backend/.gitlab-ci.yml`](../backend/.gitlab-ci.yml), [`migrate.sh`](../backend/ci/migrate.sh),
+[`release.sh`](../backend/ci/release.sh), [`frontend/.gitlab-ci.yml`](../frontend/.gitlab-ci.yml),
+[`deploy/.gitlab-ci.yml`](../deploy/.gitlab-ci.yml), [`validate.sh`](../deploy/scripts/validate.sh),
+[`smoke.sh`](../deploy/scripts/smoke.sh), [`environments/staging`](../deploy/environments/staging/kustomization.yaml).
+Setup: [guide chapter 12](guide/12-from-zero.md).
 
 ---
 
@@ -772,10 +774,10 @@ flowchart LR
 * Change a range without touching the other project:
   `kubectl -n product-management patch hpa api -p '{"spec":{"minReplicas":4}}'`.
 
-Code: [`hpa.yaml`](../backend/deploy/k8s/base/hpa.yaml) (HPA `api`), [`service.yaml`](../backend/deploy/k8s/base/service.yaml)
-(Service `api`), [`gateway.yaml`](../frontend/deploy/k8s/base/gateway.yaml) (HPA `gateway`),
+Code: [`hpa.yaml`](../deploy/apps/backend/hpa.yaml) (HPA `api`), [`service.yaml`](../deploy/apps/backend/service.yaml)
+(Service `api`), [`gateway.yaml`](../deploy/apps/frontend/gateway.yaml) (HPA `gateway`),
 [`default.conf.template`](../frontend/gateway/default.conf.template) (`resolver valid=5s`, `resolve`, `least_conn`),
-[`infra.sh`](../infra/infra.sh) (installs metrics-server where it is missing). Decision:
+[`infra.sh`](../deploy/scripts/infra.sh) (installs metrics-server where it is missing). Decision:
 [ADR 0018](adr/0018-autoscaling-and-scale-testing.md).
 
 ---
@@ -791,12 +793,12 @@ gained: one applied change must mean exactly one ledger row. Then `verify-data.s
 
 ```mermaid
 flowchart TD
-    seed["backend/load-tests/seed-bulk.sh<br/>PRODUCTS=850000 by default"] --> s1["psql in the postgres pod: data/bulk-seed.sql<br/>products + about 5 million movements"]
+    seed["tools/load-tests/seed-bulk.sh<br/>PRODUCTS=850000 by default"] --> s1["psql in the postgres pod: data/bulk-seed.sql<br/>products + about 5 million movements"]
     s1 --> s2["redis-cli INCR catalog:generation"]
     s2 --> s3["verify-data.sh"]
     s3 --> r1
 
-    subgraph run["backend/load-tests/run.sh teams"]
+    subgraph run["tools/load-tests/run.sh teams"]
         r1["raise the gateway per-IP limit<br/>and the API's per-user limits"] --> r2["SQL: id range,<br/>highest ledger id before"]
         r2 --> r3["ConfigMaps k6-scripts, k6-lib<br/>Job k6-teams, grafana/k6"]
         r3 --> k6
@@ -823,14 +825,14 @@ Other scenarios (`smoke`, `load`, `stress`, `spike`, `stock-consistency`, `rate-
 `run.sh` Job without the ledger comparison. Every scenario except `rate-limit` raises the API's per-user limits for
 the run, and `stress`, `spike`, `browse` and `teams` also the gateway's per-IP limit; the deployed values are saved
 first and set back on exit, so no override is left behind. Code:
-[`seed-bulk.sh`](../backend/load-tests/seed-bulk.sh), [`run.sh`](../backend/load-tests/run.sh), [`teams.js`](../backend/load-tests/teams.js),
-[`verify-data.sh`](../backend/load-tests/verify-data.sh), [`verify.sql`](../backend/load-tests/data/verify.sql). Results:
+[`seed-bulk.sh`](../tools/load-tests/seed-bulk.sh), [`run.sh`](../tools/load-tests/run.sh), [`teams.js`](../tools/load-tests/teams.js),
+[`verify-data.sh`](../tools/load-tests/verify-data.sh), [`verify.sql`](../tools/load-tests/data/verify.sql). Results:
 [load-test-results.md](load-test-results.md). Decisions: [ADR 0015](adr/0015-load-testing.md),
 [ADR 0018](adr/0018-autoscaling-and-scale-testing.md).
 
 ### The assessment, checked against the running system
 
-`backend/scripts/check-requirements.py` walks the assessment PDF requirement by requirement through the gateway (so the
+`tools/check-requirements.py` (a local tool, not a pipeline job) walks the assessment PDF requirement by requirement through the gateway (so the
 requests spread over the replicas), with `Cache-Control: no-cache` on every call and retrying on 429.
 
 ```mermaid
@@ -844,7 +846,7 @@ flowchart LR
     c6 --> c7["delete its products<br/>print passed of 14<br/>exit 1 on any failure"]
 ```
 
-Code: [`check-requirements.py`](../backend/scripts/check-requirements.py).
+Code: [`check-requirements.py`](../tools/check-requirements.py).
 
 ---
 
@@ -874,5 +876,5 @@ flowchart LR
 ```
 
 Code: [`browser-errors.ts`](../frontend/src/app/core/observability/browser-errors.ts), [`trace.js`](../frontend/gateway/trace.js), [`LoggingExtensions.cs`](../backend/ProductManagement.Api/Observability/LoggingExtensions.cs),
-[`logs.yaml`](../infra/logs.yaml) (Alloy's configuration in the ConfigMap `alloy-config`, the alert rules in
-`grafana-alerting`), [`dashboards/`](../infra/dashboards).
+[`logs.yaml`](../deploy/infra/logs.yaml) (Alloy's configuration in the ConfigMap `alloy-config`, the alert rules in
+`grafana-alerting`), [`dashboards/`](../deploy/infra/dashboards).

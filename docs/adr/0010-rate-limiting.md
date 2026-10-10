@@ -31,7 +31,7 @@ everyone. Limits must also hold with several replicas behind a load balancer.
   `limit × replicas`. That is deliberate. The per-replica limit protects replicas, and exact global quotas would need
   a shared store (Redis-backed limiter), adding a network hop to every request. It is the next step if contractual
   quotas are needed.
-* Load tests that originate from a single pod IP would hit the gateway's per-IP limit. `backend/load-tests/run.sh` raises it
+* Load tests that originate from a single pod IP would hit the gateway's per-IP limit. `tools/load-tests/run.sh` raises it
   for stress and spike runs only and restores it afterwards, and simulates 10 distinct users for the per-user limits.
   (Later: the load tests sign in as the three demo accounts only, so `run.sh` raises the per-user limits for every
   scenario except `rate-limit`; [ADR 0015](0015-load-testing.md).)

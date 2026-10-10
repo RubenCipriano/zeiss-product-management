@@ -3,7 +3,7 @@
 **Status:** accepted
 
 > **Update (2026-10-10):** (1) The stored responses live for `Idempotency:KeyLifetime`: 24 hours by default, **1 hour**
-> in the Kubernetes configuration (`Idempotency__KeyLifetime` in `backend/deploy/k8s/base/deployment.yaml`); past it a retry is still never applied twice
+> in the Kubernetes configuration (`Idempotency__KeyLifetime` in `deploy/apps/backend/deployment.yaml`); past it a retry is still never applied twice
 > (the ledger's unique key), it is answered from the current state. (2) The database backstop also tells a replay
 > from a reuse: when the ledger already holds the key, its row is compared with the request (product, quantity,
 > reason). The same change is answered as applied once (200); a different one is `422 idempotency_key_reused`, even

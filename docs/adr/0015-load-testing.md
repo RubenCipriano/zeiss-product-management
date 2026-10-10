@@ -9,7 +9,7 @@ point, behaviour under sudden spikes, and, as important, *correctness* under con
 
 ## Decision
 
-[k6](https://k6.io) scripts in `backend/load-tests/`, run **as a Kubernetes Job inside the cluster** (`backend/load-tests/run.sh`), so
+[k6](https://k6.io) scripts in `tools/load-tests/`, run **as a Kubernetes Job inside the cluster** (`tools/load-tests/run.sh`), so
 results measure gateway + API + PostgreSQL + Redis (and token issuance) rather than a laptop's port-forward tunnel.
 
 | Scenario            | Shape                                               | Pass criteria (thresholds)                      |
@@ -27,7 +27,7 @@ results measure gateway + API + PostgreSQL + Redis (and token issuance) rather t
   a few accounts, not many distinct users. (Earlier runs used ten dedicated load-test consumers, since removed.)
   Like a well-behaved client, the consistency test waits for `Retry-After` and retries when it is
   rate limited. Setup creates dedicated products and teardown deletes them.
-* `smoke` and `stock-consistency` are the quick checks after a deployment (`backend/load-tests/run.sh smoke`).
+* `smoke` and `stock-consistency` are the quick checks after a deployment (`tools/load-tests/run.sh smoke`).
 
 ## Consequences
 

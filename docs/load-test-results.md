@@ -1,7 +1,7 @@
 # Load test results
 
-Runs made on 2026-10-09 with the k6 scenarios in [`backend/load-tests/`](../backend/load-tests), executed **inside** the cluster
-(`backend/load-tests/run.sh`), so they include the gateway, the API, PostgreSQL, Redis and token validation.
+Runs made on 2026-10-09 with the k6 scenarios in [`tools/load-tests/`](../tools/load-tests), executed **inside** the cluster
+(`tools/load-tests/run.sh`), so they include the gateway, the API, PostgreSQL, Redis and token validation.
 
 **Environment:** MicroK8s 1.34 in a single Multipass VM with **4 vCPU / 6 GB RAM** on an Apple Silicon laptop. k6
 itself (about 0.5 CPU at peak), the gateway, PostgreSQL and every API replica share those 4 vCPU, so the absolute
@@ -31,7 +31,7 @@ limit, and the API throttled them as designed. The scenario now behaves like a w
 ## Many teams on 850,000 products (Docker Desktop, autoscaling)
 
 The `teams` scenario ([ADR 0018](adr/0018-autoscaling-and-scale-testing.md)) on the bulk dataset
-(`backend/load-tests/seed-bulk.sh`: **850,024 products, 5.1 million stock movements, 1 GB**). Ten consumers act as ten
+(`tools/load-tests/seed-bulk.sh`: **850,024 products, 5.1 million stock movements, 1 GB**). Ten consumers act as ten
 teams: browsing (20 % of list views go up to page 2,000), searching, reading products and histories, and changing
 stock (half on 50 hot products all teams touch). **30 % of the stock changes are sent twice with the same
 `Idempotency-Key`**, one after the other or at the same instant. The API autoscales (HPA, 2–8 replicas).
@@ -66,7 +66,7 @@ Run 3 per endpoint (p95): list 16 ms, product 5 ms, search 5 ms, stock level 17 
 3. **Within targets with headroom.** PostgreSQL at 15–20 % of its CPU; API pods at 70–250 m each.
 
 **Correctness, every run** (`run.sh` compares the changes k6 saw applied with the rows the ledger gained, then
-runs `backend/load-tests/verify-data.sh`):
+runs `tools/load-tests/verify-data.sh`):
 
 | Run | Applied (k6) | Outcome unknown to k6 | Ledger rows added | Replayed copies | Simultaneous copies refused (in progress) | Invariants |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
@@ -170,8 +170,8 @@ The runs below were made earlier on MicroK8s (Multipass VM, 4 vCPU / 6 GB), befo
 The catalogue is capped at 900,000 products (six-digit ids), so the table that grows is the stock ledger. It was
 grown from 5.55 to **20 million movements** on the PostgreSQL server outside the cluster (a Docker container on the
 same machine at the time; PostgreSQL now runs in the cluster, in the namespace `infra`, with the same settings, and the
-data was copied there unchanged) (`PRODUCTS=0 LEDGER_ROWS=20000000 backend/load-tests/seed-bulk.sh`: +N/−N pairs in time order, 5 products with ~100,000
-movements each, 1,000 with ~2,000; 14.4 million rows in 19.5 minutes). `backend/load-tests/verify-data.sh` passes on the
+data was copied there unchanged) (`PRODUCTS=0 LEDGER_ROWS=20000000 tools/load-tests/seed-bulk.sh`: +N/−N pairs in time order, 5 products with ~100,000
+movements each, 1,000 with ~2,000; 14.4 million rows in 19.5 minutes). `tools/load-tests/verify-data.sh` passes on the
 result: 20,010,066 movements, every invariant 0, in 53 s. Decisions and the full index inventory:
 [ADR 0022](adr/0022-database-at-scale.md).
 
@@ -277,20 +277,20 @@ In order of expected impact for a write-heavy peak:
 ## Reproduce
 
 ```bash
-backend/load-tests/run.sh smoke
-backend/load-tests/run.sh stock-consistency
-RATE=150 backend/load-tests/run.sh load
-PEAK=2000 backend/load-tests/run.sh stress
+tools/load-tests/run.sh smoke
+tools/load-tests/run.sh stock-consistency
+RATE=150 tools/load-tests/run.sh load
+PEAK=2000 tools/load-tests/run.sh stress
 kubectl -n product-management patch hpa api -p '{"spec":{"minReplicas":4}}'   # the HPA owns the count
-PEAK=2000 backend/load-tests/run.sh stress
-backend/load-tests/run.sh rate-limit
+PEAK=2000 tools/load-tests/run.sh stress
+tools/load-tests/run.sh rate-limit
 
-infra/infra.sh up                         # PostgreSQL, Redis, logs; metrics-server for the autoscaler if missing
-backend/load-tests/seed-bulk.sh                   # 850,000 products, 5 million movements (~2 minutes)
-PRODUCTS=0 LEDGER_ROWS=20000000 backend/load-tests/seed-bulk.sh   # grow the ledger to 20 million movements (~20 minutes)
-RATE=300 backend/load-tests/run.sh teams          # many teams + duplicate retries, then verifies the data
-PEAK=6000 K6_CPU=3 backend/load-tests/run.sh teams  # the same as a capacity staircase (limits lifted)
-PEAK=12000 K6_CPU=4 backend/load-tests/run.sh browse   # read capacity with a hot set
-RATE=10000 K6_CPU=4 backend/load-tests/run.sh browse   # hold a constant rate for a minute
+deploy/scripts/infra.sh up                          # PostgreSQL, Redis, logs; metrics-server for the autoscaler if missing
+tools/load-tests/seed-bulk.sh                       # 850,000 products, 5 million movements (~2 minutes)
+PRODUCTS=0 LEDGER_ROWS=20000000 tools/load-tests/seed-bulk.sh   # grow the ledger to 20 million movements (~20 minutes)
+RATE=300 tools/load-tests/run.sh teams              # many teams + duplicate retries, then verifies the data
+PEAK=6000 K6_CPU=3 tools/load-tests/run.sh teams    # the same as a capacity staircase (limits lifted)
+PEAK=12000 K6_CPU=4 tools/load-tests/run.sh browse  # read capacity with a hot set
+RATE=10000 K6_CPU=4 tools/load-tests/run.sh browse  # hold a constant rate for a minute
 kubectl -n product-management get hpa api -w   # in another terminal: watch it scale
 ```

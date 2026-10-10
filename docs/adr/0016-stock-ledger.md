@@ -49,7 +49,7 @@ Every stock change is recorded in an append-only **`stock_movements`** table:
   `(product_id, occurred_at DESC, id DESC)`. Readers see it in the UI's *Stock history* dialog.
 * The migration backfills one `InitialStock` movement per existing product, so the invariant holds from day one.
 
-**Invariants** (checked by `backend/load-tests/data/verify.sql` and by integration tests):
+**Invariants** (checked by `tools/load-tests/data/verify.sql` and by integration tests):
 
 1. `products.stock_quantity = SUM(stock_movements.quantity_change)` for every product.
 2. Each `stock_after` equals the running total of the movements before it (by `id`).

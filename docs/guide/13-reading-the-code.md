@@ -1,7 +1,7 @@
 # 13. Reading the code
 
 **After this chapter you will know** where to open the code for any question, how one click travels through every
-file it touches, and what each C#, Angular and nginx construct in this repository means in plain words. It is written
+file it touches, and what each C#, Angular and nginx construct in this code means in plain words. It is written
 for someone who did not write the code, including someone who does not use .NET or Angular every day.
 
 ---
@@ -17,8 +17,7 @@ backend/
   ProductManagement.UnitTests/       Core/ · Infrastructure/ · Api/  (fast, no database)
   ProductManagement.Api.IntegrationTests/  real HTTP against real PostgreSQL and Redis (Testcontainers)
   ProductManagement.Api.AcceptanceTests/   the user outcomes, in Gherkin (Given / When / Then)
-  deploy/                            how the API runs: its Kubernetes manifests, deploy.sh, local secrets, CI helpers
-  load-tests/                        k6 scenarios run inside the cluster
+  ci/                                pipeline helpers: migrate.sh (migrations in the cluster), release.sh
 frontend/
   src/app/core/          once per app: sign-in, HTTP interceptors, browser cache, error reporting
   src/app/features/products/
@@ -27,8 +26,13 @@ frontend/
     ui/                  pure display pieces: table, filters, summary cards, stock badge
   src/app/shared/        reusable widgets, form validators, pipes
   gateway/               the nginx in front of everything: routing, token check, rate limits, 1 s cache
-  deploy/                how the web app and the gateway run: their Kubernetes manifests, deploy.sh
-infra/                   the shared infrastructure (namespace infra): PostgreSQL, Redis, Loki + Grafana, Alloy
+  e2e/                   Playwright tests against a running system
+deploy/
+  apps/                  how the API, the web app and the gateway run: their Kubernetes manifests
+  environments/          local, staging, production: settings and image tags per environment
+  infra/                 the shared infrastructure (namespace infra): PostgreSQL, Redis, Loki + Grafana, Alloy
+  scripts/               deploy.sh, infra.sh, create-database.sh, local-secrets.sh, validate.sh, smoke.sh
+tools/                   local only: load-tests/ (k6 scenarios run inside the cluster), check-requirements.py
 ```
 
 One rule holds the backend together: **Api → Infrastructure → Core**, never the other way. Core has no reference to

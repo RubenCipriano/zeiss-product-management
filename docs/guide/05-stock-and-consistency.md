@@ -89,7 +89,7 @@ and when.
 
 Because the movement is written in the same statement or transaction as the change, there is never a change without
 its movement, and `stock_after` is the exact value the row lock produced. For every product, its stock equals the sum
-of its movements. `backend/load-tests/verify-data.sh` checks that, and five other invariants, on all 850,000 products after
+of its movements. `tools/load-tests/verify-data.sh` checks that, and five other invariants, on all 850,000 products after
 every load test; every count has always been 0 ([ADR 0016](../adr/0016-stock-ledger.md)). In the UI, *Stock history*
 shows a product's movements, newest first.
 
@@ -191,9 +191,9 @@ rows, with 4,991 replayed copies and 1,753 simultaneous copies, none applied twi
 ## How to verify
 
 ```bash
-backend/load-tests/run.sh stock-consistency     # 300 orders for 100 units across replicas: exactly 100, stock 0
-backend/load-tests/verify-data.sh               # six invariants, every count must be 0
-python3 backend/scripts/check-requirements.py   # includes 40 concurrent creates → 40 unique six-digit ids
+tools/load-tests/run.sh stock-consistency       # 300 orders for 100 units across replicas: exactly 100, stock 0
+tools/load-tests/verify-data.sh                 # six invariants, every count must be 0
+python3 tools/check-requirements.py             # includes 40 concurrent creates → 40 unique six-digit ids
 
 cd backend && dotnet test --project ProductManagement.Api.IntegrationTests \
   --filter-class ProductManagement.Api.IntegrationTests.Products.ConcurrencyTests

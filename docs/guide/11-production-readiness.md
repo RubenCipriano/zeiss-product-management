@@ -9,8 +9,8 @@ something" or "partly done"; ❌ means missing.
 
 **Verdict:** the application is production-ready as software: every requirement is implemented and checked
 automatically, it is secure by default, scales horizontally, stays correct under concurrency and overload, and has
-been measured at load. The deployment is written for staging and production too (Kustomize overlays, a GitLab
-pipeline, shared PostgreSQL, Redis and logs in the cluster's `infra` namespace, least-privilege database users, logs
+been measured at load. The deployment is written for staging and production too (one Kustomize folder per environment in a
+deploy repository applied by its own GitLab pipeline, shared PostgreSQL, Redis and logs in the cluster's `infra` namespace, least-privilege database users, logs
 with alerts), with a runbook in [chapter 12](12-from-zero.md). Going live still needs the environment items in
 [Before go-live](#before-go-live) (backups shipped off the node, the pipeline run for real, a secret manager, a
 multi-node cluster whose network plugin enforces NetworkPolicies); none of them requires application code changes.
@@ -23,7 +23,7 @@ multi-node cluster whose network plugin enforces NetworkPolicies); none of them 
 
 ## 1. The assessment PDF
 
-Checked against the running system by `backend/scripts/check-requirements.py` (14 checks, all passing; also in the backend pipeline, against staging).
+Checked against the running system by `tools/check-requirements.py` (14 checks, all passing; run by hand, also against staging with `BASE_URL`).
 
 | Requirement | Status | Evidence |
 | --- | :---: | --- |
@@ -35,8 +35,8 @@ Checked against the running system by `backend/scripts/check-requirements.py` (1
 | Unique 6-digit id, no duplicates with multiple instances | ✅ | PostgreSQL sequence `100000–999999`; 40 concurrent creates over the replicas → 40 unique ids; 850,024 products unique ([ADR 0002](../adr/0002-product-id-generation.md), [chapter 5](05-stock-and-consistency.md)) |
 | Validation of create and update | ✅ | 400 with the invalid fields named; domain guards; database CHECKs |
 | Stock in every list response | ✅ | checked on all three list endpoints |
-| EF Core code-first migrations | ✅ | `Persistence/Migrations`, applied once per deployment, before the rollout, with the API image being deployed, as the schema owner `pm_migrator` (`backend/deploy/deploy.sh` locally, the `migrate:*` jobs in GitLab; large indexes built `CONCURRENTLY`) |
-| Database seeding | ✅ | sample data via `UseSeeding`; bulk data via `backend/load-tests/seed-bulk.sh` |
+| EF Core code-first migrations | ✅ | `Persistence/Migrations`, applied once per deployment, before the rollout, with the API image being deployed, as the schema owner `pm_migrator` (`deploy/scripts/deploy.sh local` locally, the backend pipeline's `migrate:*` jobs in GitLab; large indexes built `CONCURRENTLY`) |
+| Database seeding | ✅ | sample data via `UseSeeding`; bulk data via `tools/load-tests/seed-bulk.sh` |
 | Angular frontend consuming the API, reflecting changes made through the API | ✅ | every endpoint used; background refresh; E2E suite ([chapter 7](07-frontend.md)) |
 | Unit tests for various scenarios; BDD optional | ✅ | 381 back-end tests (212 unit, 153 integration, 16 Reqnroll BDD scenarios); 185 front-end tests; 22 E2E ([chapter 10](10-testing-and-quality.md)) |
 | Documentation for running locally | ✅ | [README](../../README.md) "Run it"; this guide |
@@ -65,11 +65,11 @@ Checked against the running system by `backend/scripts/check-requirements.py` (1
 | Exactly-once writes | ✅ | Idempotency-Key + unique request key in the ledger ([ADR 0017](../adr/0017-idempotency-keys.md)) |
 | Browser security | ✅ | strict CSP, no third-party requests, COOP/CORP, Permissions-Policy ([ADR 0019](../adr/0019-content-security-policy.md)) |
 | Fail fast on bad configuration | ✅ | signing key, consumers and every options section validated at start-up; no Redis outside Development → the API does not start |
-| Database privileges | ✅ | the API's user `pm_app` reads and writes rows only (`CREATE`, `ALTER`, `DROP` refused), 30 s statement timeout; only the migration step, a one-off pod, uses the schema owner `pm_migrator`; users from [`create-database.sh`](../../infra/create-database.sh), grants from the migration [`GrantAppPermissions`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs) |
+| Database privileges | ✅ | the API's user `pm_app` reads and writes rows only (`CREATE`, `ALTER`, `DROP` refused), 30 s statement timeout; only the migration step, a one-off pod, uses the schema owner `pm_migrator`; users from [`create-database.sh`](../../deploy/scripts/create-database.sh), grants from the migration [`GrantAppPermissions`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs) |
 | Network | ⚠️ | NetworkPolicies: the API and the web pods accept connections only from the gateway. **Not enforced on Docker Desktop** (its network plugin ignores them; verified: a web pod reaches an API pod). Enforced on k3s and on production clusters with Calico or Cilium. PostgreSQL and Redis (namespace `infra`) are reachable only inside the cluster and protected by random credentials; between nodes only the k3s ports are open ([chapter 12](12-from-zero.md)). |
 | Containers | ⚠️ | api, web: non-root, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp. gateway: the same, but with a writable root filesystem (nginx renders its configuration at start-up). |
-| Secrets | ⚠️ | no password in any YAML, connection string or CI/CD variable: the database and Redis passwords are random and live only in the cluster (`database-credentials` from `infra/create-database.sh`, `redis-credentials` copied by the deploy); the API's own keys in `api-secrets`, locally generated on each machine (`backend/deploy/local-secrets.sh`, gitignored), staging and production from protected CI/CD variables (`backend/deploy/ci/create-secrets.sh`; CI fails if a Secret appears in their overlays). Next: a secret manager (External Secrets / Vault) |
-| TLS | ⚠️ | at the edge: the staging and production overlays have an Ingress with a Let's Encrypt certificate from cert-manager (then add HSTS). Inside the cluster (API to PostgreSQL and Redis): plain TCP on the pod network, optional; a database or cache outside the cluster would get `SSL Mode=VerifyFull` with the internal CA in the API pods ([chapter 12](12-from-zero.md)) |
+| Secrets | ⚠️ | no password in any YAML, connection string or CI/CD variable: the database and Redis passwords are random and live only in the cluster (`database-credentials` from `deploy/scripts/create-database.sh`, `redis-credentials` copied by the deploy); the API's own keys in `api-secrets`, locally generated on each machine (`deploy/scripts/local-secrets.sh`, gitignored), staging and production from the deploy project's protected CI/CD variables (`deploy/scripts/deploy.sh`; the deploy pipeline fails if a Secret appears in their environment folders). Next: a secret manager (External Secrets / Vault) |
+| TLS | ⚠️ | at the edge: the staging and production environments have an Ingress with a Let's Encrypt certificate from cert-manager (then add HSTS). Inside the cluster (API to PostgreSQL and Redis): plain TCP on the pod network, optional; a database or cache outside the cluster would get `SSL Mode=VerifyFull` with the internal CA in the API pods ([chapter 12](12-from-zero.md)) |
 | Client IPs at the edge | ⚠️ | behind the Ingress the gateway trusts the controller's `X-Forwarded-For` (`GATEWAY_TRUSTED_PROXIES`); the controller's own load balancer must preserve client addresses (`externalTrafficPolicy: Local` / PROXY protocol) |
 | Image supply chain | ⚠️ | images built and deployed by immutable tag; production: a registry with vulnerability scanning and signing |
 
@@ -83,7 +83,7 @@ Checked against the running system by `backend/scripts/check-requirements.py` (1
 | Graceful degradation | ✅ | Redis down → cache and limits fall back; idempotency refuses (503) rather than risk duplicates |
 | Health probes | ✅ | readiness tolerant of a slow database, its check on a connection of its own so a saturated pool never fails every replica at once (no cascading outage), liveness, startup |
 | Zero-downtime deploys | ✅ | rolling updates with `maxUnavailable: 0`, preStop, PodDisruptionBudgets |
-| Database backups / point-in-time recovery | ⚠️ | a nightly `pg_dump` of every database (CronJob `postgres-backup`, 7 days kept) onto a volume on the same node: it protects against mistakes, not against losing the node. Production ships the dumps off the node (object storage) or uses volume snapshots; point-in-time recovery and a standby need an operator such as CloudNativePG ([ADR 0006](../adr/0006-postgresql.md), [chapter 12](12-from-zero.md)). The API reaches the database only by name, so replacing it changes the connection string in the backend's overlay and nothing else |
+| Database backups / point-in-time recovery | ⚠️ | a nightly `pg_dump` of every database (CronJob `postgres-backup`, 7 days kept) onto a volume on the same node: it protects against mistakes, not against losing the node. Production ships the dumps off the node (object storage) or uses volume snapshots; point-in-time recovery and a standby need an operator such as CloudNativePG ([ADR 0006](../adr/0006-postgresql.md), [chapter 12](12-from-zero.md)). The API reaches the database only by name, so replacing it changes the connection string in the environment's `api.yaml` and nothing else |
 | Redis high availability | ⚠️ | a single instance here; correctness never depends on it, but production would use a replicated Redis |
 
 ### Scalability and performance
@@ -111,12 +111,12 @@ Checked against the running system by `backend/scripts/check-requirements.py` (1
 
 | Item | Status | Notes |
 | --- | :---: | --- |
-| CI | ⚠️ | one GitLab pipeline per part: build with warnings as errors, `dotnet format`, all test suites, lint, every overlay validated, image scan, then the PDF check and Playwright against staging; defined and validated against GitLab's CI schema, **not yet run on a GitLab instance** ([chapter 9](09-deployment-and-operations.md#cicd-pipelines)) |
-| CD to staging and production | ⚠️ | one GitLab pipeline per part: backend (test → build → scan → migrate and deploy staging → verify → manual production), frontend (test → build → scan → deploy staging → Playwright → manual production), infra (validate → manual deploy per environment); **not yet run on a GitLab instance** ([chapter 12](12-from-zero.md)) |
+| CI | ⚠️ | one GitLab pipeline per repository: build with warnings as errors, `dotnet format`, all test suites, lint, image scan (backend, frontend); every environment's manifests validated, shellcheck, the Alloy configuration (deploy); the PDF check and Playwright are run by hand against an environment; defined and validated against GitLab's CI schema, **not yet run on a GitLab instance** ([chapter 9](09-deployment-and-operations.md#cicd-pipelines)) |
+| CD to staging and production | ⚠️ | GitOps: backend (test → build → scan → migrate staging → release: a commit of the new tag to the deploy repository → manual migrate and release production: a merge request), frontend (test → build → scan → release staging → manual release production), deploy (validate → `deploy:staging` and smoke check on every change → manual `deploy:production` after a release merge request; manual infra jobs); rollback is a `git revert` in the deploy repository; **not yet run on a GitLab instance** ([chapter 12](12-from-zero.md)) |
 | Database migrations | ✅ | run once per deployment, before the rollout, by the image being deployed, as `pm_migrator`; large indexes built concurrently; expand/contract, never rolled back |
-| Independent deployment of each part | ✅ | three self-contained parts, each with its own deploy script and pipeline: `infra/infra.sh up [postgres] [redis] [logs]`, `backend/deploy/deploy.sh`, `frontend/deploy/deploy.sh` ([chapter 9](09-deployment-and-operations.md#the-layout-three-parts)) |
-| Environments | ✅ | one Kustomize overlay each (`local`, `staging`, `production`); the differences fit in one short file per environment |
-| GitOps | ⚠️ | the pipeline runs `kubectl apply`; Argo CD or Flux pointed at the overlays is the next step (pruning, drift detection) |
+| Independent deployment of each part | ✅ | the API and the web app are released on their own (each pipeline changes only its own image tags in the deploy repository); the shared infrastructure separately: `deploy/scripts/deploy.sh <environment> apps` or `infra`, locally `deploy/scripts/infra.sh up [postgres] [redis] [logs]` and `deploy/scripts/deploy.sh local` ([chapter 9](09-deployment-and-operations.md#the-layout-three-parts)) |
+| Environments | ✅ | one Kustomize folder each (`deploy/environments/local`, `staging`, `production`); the differences fit in one short file per environment |
+| GitOps | ⚠️ | the deploy repository is the only record of what runs (one commit per release, `git revert` to roll back) and only its pipeline changes the clusters, with `kubectl apply`; Argo CD pointed at `deploy/environments/<environment>` is the next step (pruning, drift detection) |
 
 ## Before go-live
 
@@ -126,29 +126,28 @@ Environment work, in order, following the runbook in [chapter 12](12-from-zero.m
    for point-in-time recovery and a standby, PostgreSQL under an operator (CloudNativePG); the logs on a Loki with
    object storage and the company's retention (or outside the cluster through `LOKI_URL`), Grafana behind SSO and
    alerts routed to on-call.
-2. **GitLab:** the agent for Kubernetes (or a `KUBECONFIG`), protected environments, the CI/CD variables; then a first
-   full pipeline run through staging and a rehearsed rollback. The shared runners are enough: every job reaches the
+2. **GitLab:** the agent for Kubernetes (or a `KUBECONFIG`), protected environments, the CI/CD variables of the three
+   projects (with the deploy repository's access token for the release jobs); then a first full pipeline run through
+   staging and a rehearsed rollback (`git revert` in the deploy repository). The shared runners are enough: every job reaches the
    cluster through `kubectl`.
 3. **TLS:** the certificate for the public names and HSTS; inside the cluster TLS is optional (a database or cache
    outside it would need `SSL Mode=VerifyFull` and the internal CA in the API pods).
 4. **Secrets** from a secret manager; a new signing key and consumer secrets per environment (never the local ones).
-5. **Multi-node cluster** (k3s, one or three servers for the control plane, and `infra/add-node.sh` for nodes with
+5. **Multi-node cluster** (k3s, one or three servers for the control plane, and `deploy/scripts/add-node.sh` for nodes with
    the roles database, cache and apps) with a network plugin that enforces NetworkPolicies, Pod Security admission
    (`restricted`), a replicated Redis, and the HPAs' limits re-measured on the real nodes.
-6. **Client IPs** preserved by the load balancer in front of the Ingress controller; GitOps later.
+6. **Client IPs** preserved by the load balancer in front of the Ingress controller; Argo CD later.
 
 ## How to verify everything
 
 ```bash
-infra/infra.sh up                          # PostgreSQL, Redis and the logs, in the namespace infra
-infra/create-database.sh product-management product_management pm_app pm_migrator   # once
-backend/deploy/deploy.sh                   # migrations, then the API
-frontend/deploy/deploy.sh                  # the web app and the gateway
-python3 backend/scripts/check-requirements.py   # the PDF, 14 checks
+deploy/scripts/infra.sh up                 # PostgreSQL, Redis and the logs, in the namespace infra
+deploy/scripts/deploy.sh local             # database (first run), migrations, the API, the web app and the gateway
+python3 tools/check-requirements.py        # the PDF, 14 checks
 kubectl -n infra port-forward svc/grafana 3000:3000 &   # then http://localhost:3000: Grafana, dashboards, alert rules
 cd frontend && npm run e2e                 # Playwright, desktop and mobile
 cd frontend && npm run audit:lighthouse    # Lighthouse user flow (FORM_FACTOR=desktop for desktop)
-backend/load-tests/verify-data.sh          # data invariants
+tools/load-tests/verify-data.sh            # data invariants
 ```
 
 

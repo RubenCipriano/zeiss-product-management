@@ -163,7 +163,7 @@ curl -s -o /dev/null -D - "localhost:8080/api/products?page=1" -H "Authorization
 curl -s -o /dev/null -D - "localhost:8080/api/products?page=1" -H "Authorization: Bearer $TOKEN" -H 'Cache-Control: no-cache' | grep X-Cache
 
 # Redis: the generations and some cached entries
-# (Redis runs in the namespace infra: infra/infra.sh up redis; redis-cli in the pod finds the password in REDISCLI_AUTH)
+# (Redis runs in the namespace infra: deploy/scripts/infra.sh up redis; redis-cli in the pod finds the password in REDISCLI_AUTH)
 kubectl -n infra exec deployment/redis -- redis-cli GET product-management:catalog:listing-generation
 kubectl -n infra exec deployment/redis -- redis-cli --scan --pattern 'product-management:v*:products:all:*' | head
 

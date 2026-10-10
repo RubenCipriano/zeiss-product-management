@@ -10,7 +10,7 @@ fixed, how far one laptop goes, and which levers come next.
 
 ## Autoscaling
 
-Two HorizontalPodAutoscalers (HPAs) watch CPU through **metrics-server** (installed by `infra/infra.sh up`
+Two HorizontalPodAutoscalers (HPAs) watch CPU through **metrics-server** (installed by `deploy/scripts/infra.sh up`
 where the cluster lacks it, as on Docker Desktop; k3s and most managed clusters ship it).
 
 | | API | Gateway |
@@ -49,7 +49,7 @@ instance, read replicas for lists and searches, a connection pooler (PgBouncer).
 
 ## The bulk dataset
 
-`backend/load-tests/seed-bulk.sh` loads **850,024 products** and about **5.1 million stock movements** (about 1 GB), so every
+`tools/load-tests/seed-bulk.sh` loads **850,024 products** and about **5.1 million stock movements** (about 1 GB), so every
 query is measured at a realistic size. The indexes that matter at that size:
 
 | Index | Serves | Measured |
@@ -65,7 +65,7 @@ while they build.
 
 ## The load-test scenarios
 
-All scenarios are k6 scripts run **inside** the cluster as a Job (`backend/load-tests/run.sh <scenario>`), so they measure the
+All scenarios are k6 scripts run **inside** the cluster as a Job (`tools/load-tests/run.sh <scenario>`), so they measure the
 gateway, the API, Redis, PostgreSQL and token verification, not a port-forward tunnel.
 
 | Scenario | What it does | What it checks |
@@ -151,7 +151,7 @@ cluster; the comparisons between runs, and the correctness checks, are the point
 
 In order of expected effect for a write-heavy peak:
 
-1. **More nodes**, with PostgreSQL on a node of its own (`infra/add-node.sh <host> database`). The API and the gateway already scale out.
+1. **More nodes**, with PostgreSQL on a node of its own (`deploy/scripts/add-node.sh <host> database`). The API and the gateway already scale out.
 2. **Read replicas** for lists and searches; the primary only for writes.
 3. **PgBouncer** in transaction mode, sized to the database, when there are many API pods.
 4. **Keyset pagination** (`?after=`): today a deep page costs time proportional to its depth (page 40,000 takes about
@@ -160,14 +160,14 @@ In order of expected effect for a write-heavy peak:
 
 ## Where to look
 
-* HPAs, pools and probes: [`backend/deploy/k8s/base`](../../backend/deploy/k8s/base) (`hpa.yaml`, the probes in
+* HPAs, pools and probes: [`deploy/apps/backend`](../../deploy/apps/backend) (`hpa.yaml`, the probes in
   `deployment.yaml`), the connection string with `Maximum Pool Size=10`
-  ([`overlays/local/api.yaml`](../../backend/deploy/k8s/overlays/local/api.yaml)),
+  ([`environments/local/api.yaml`](../../deploy/environments/local/api.yaml)),
   [`DatabaseHealthCheck.cs`](../../backend/ProductManagement.Infrastructure/Persistence/DatabaseHealthCheck.cs),
-  [`frontend/deploy/k8s/base/gateway.yaml`](../../frontend/deploy/k8s/base/gateway.yaml) (HPA `gateway`), [`infra/postgres.yaml`](../../infra/postgres.yaml) (PostgreSQL's CPUs, memory, `pg_stat_statements`)
-* Load tests: [`backend/load-tests/run.sh`](../../backend/load-tests/run.sh), [`teams.js`](../../backend/load-tests/teams.js),
-  [`browse.js`](../../backend/load-tests/browse.js), [`seed-bulk.sh`](../../backend/load-tests/seed-bulk.sh),
-  [`verify-data.sh`](../../backend/load-tests/verify-data.sh), [`data/verify.sql`](../../backend/load-tests/data/verify.sql)
+  [`deploy/apps/frontend/gateway.yaml`](../../deploy/apps/frontend/gateway.yaml) (HPA `gateway`), [`deploy/infra/postgres.yaml`](../../deploy/infra/postgres.yaml) (PostgreSQL's CPUs, memory, `pg_stat_statements`)
+* Load tests: [`tools/load-tests/run.sh`](../../tools/load-tests/run.sh), [`teams.js`](../../tools/load-tests/teams.js),
+  [`browse.js`](../../tools/load-tests/browse.js), [`seed-bulk.sh`](../../tools/load-tests/seed-bulk.sh),
+  [`verify-data.sh`](../../tools/load-tests/verify-data.sh), [`data/verify.sql`](../../tools/load-tests/data/verify.sql)
 * All numbers: [load-test-results.md](../load-test-results.md)
 * Decisions: [ADR 0015 load testing](../adr/0015-load-testing.md), [ADR 0018 autoscaling and scale testing](../adr/0018-autoscaling-and-scale-testing.md)
 * Precise diagrams: [flows.md §10 autoscaling](../flows.md#10-autoscaling),
@@ -176,15 +176,15 @@ In order of expected effect for a write-heavy peak:
 ## How to verify
 
 ```bash
-infra/infra.sh up                                      # installs metrics-server where the cluster has none
+deploy/scripts/infra.sh up                             # installs metrics-server where the cluster has none
 kubectl -n product-management get hpa -w               # in a second terminal: watch the replica counts
 kubectl -n product-management top pods
 
-backend/load-tests/seed-bulk.sh                        # 850,000 products, ~5 million movements (minutes)
-RATE=300 backend/load-tests/run.sh teams               # many teams; compares ledger rows with changes applied
-PEAK=6000 K6_CPU=3 backend/load-tests/run.sh teams     # worst-case capacity staircase (limits lifted, then restored)
-RATE=20000 K6_CPU=4 backend/load-tests/run.sh browse   # read capacity at a constant rate
-backend/load-tests/run.sh rate-limit                   # one user over the limit: 429 + Retry-After
+tools/load-tests/seed-bulk.sh                          # 850,000 products, ~5 million movements (minutes)
+RATE=300 tools/load-tests/run.sh teams                 # many teams; compares ledger rows with changes applied
+PEAK=6000 K6_CPU=3 tools/load-tests/run.sh teams       # worst-case capacity staircase (limits lifted, then restored)
+RATE=20000 K6_CPU=4 tools/load-tests/run.sh browse     # read capacity at a constant rate
+tools/load-tests/run.sh rate-limit                     # one user over the limit: 429 + Retry-After
 
 # The slowest queries, as used to find the bottlenecks
 kubectl -n infra exec statefulset/postgres -- psql -U postgres -d product_management -c \

@@ -5,14 +5,18 @@
 > **Update (2026-10-10):** the per-project manifests and deploy scripts, PostgreSQL and Redis in the cluster, the
 > migration Job and the `api` ClusterIP Service are gone: see [0021](0021-deployment-layout.md) (Kustomize overlays,
 > at first servers outside the cluster, migrations run by the pipeline with the API image). Later PostgreSQL, Redis
-> and the logs came back into the cluster, as shared infrastructure in their own namespace `infra` (the infra
-> repository: `infra/infra.sh`), and the migrations run as a one-off pod that the backend's deploy script starts with
-> `kubectl run`, still without a Job manifest. Still valid: Kubernetes on Docker
+> and the logs came back into the cluster, as shared infrastructure in their own namespace `infra` (now in the
+> deploy repository: `deploy/infra/`, applied by `deploy/scripts/infra.sh`), and the migrations run as a one-off pod
+> started with `kubectl run` (by the backend pipeline's `ci/migrate.sh`; locally by `deploy/scripts/deploy.sh local`),
+> still without a Job manifest. Still valid: Kubernetes on Docker
 > Desktop locally, one Dockerfile per image, pod hardening, zero-downtime rollouts, NetworkPolicies between the
 > gateway and the applications; the HorizontalPodAutoscalers were added later ([0018](0018-autoscaling-and-scale-testing.md)).
 > The second local cluster option and its VM scripts (`scripts/cluster-up.sh`, `cluster-down.sh`) were removed:
 > Docker Desktop is the only local cluster, and any other cluster takes images from a registry. Later the deployment was split into three parts (infra, backend, frontend) and the
-> headless Service `api-headless` renamed to `api` ([0021, update](0021-deployment-layout.md#update-2026-10-10)).
+> headless Service `api-headless` renamed to `api` ([0021, update](0021-deployment-layout.md#update-2026-10-10));
+> finally every manifest and environment moved into one deploy repository (`deploy/apps/`, `deploy/environments/`),
+> whose pipeline is the only one that applies, while the app pipelines release by committing image tags to it
+> ([0021, revision](0021-deployment-layout.md#revision-2026-10-10-gitops-with-a-deploy-repository)).
 
 ## Context
 
@@ -26,7 +30,8 @@ deployments.
   the gateway is published on `localhost:8080`). The manifests are plain Kubernetes and also work on k3s, AKS, EKS
   or GKE. The deploy scripts target the current `kubectl` context. On Docker Desktop, images built locally are used
   directly; other clusters pull them from a registry.
-* **One self-contained YAML per project**, each with its own deploy script:
+* **One self-contained YAML per project**, each with its own deploy script (both files removed since; see the update
+  above):
   * `backend/deploy/kubernetes.yaml`: PostgreSQL (StatefulSet + PVC), Redis, the API's signing key and consumers
     (Secrets), the migration Job, the API (Deployment, `api` and headless `api-headless` Services,
     PodDisruptionBudget) and NetworkPolicies.

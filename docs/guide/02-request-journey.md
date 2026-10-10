@@ -197,12 +197,12 @@ WWW-Authenticate: Bearer error="invalid_token"
 * Gateway: [`default.conf.template`](../../frontend/gateway/default.conf.template),
   [`jwt.js`](../../frontend/gateway/jwt.js), [`nginx.conf`](../../frontend/gateway/nginx.conf),
   [`security-headers.conf`](../../frontend/gateway/security-headers.conf)
-* Services and pods: [`backend/deploy/k8s/base`](../../backend/deploy/k8s/base) (Deployment `api`,
-  [`service.yaml`](../../backend/deploy/k8s/base/service.yaml): the headless Service `api`),
-  [`frontend/deploy/k8s/base`](../../frontend/deploy/k8s/base) (`gateway`, `web`),
-  the connection strings in [`backend/deploy/k8s/overlays/local/api.yaml`](../../backend/deploy/k8s/overlays/local/api.yaml),
-  [`infra/postgres.yaml`](../../infra/postgres.yaml) and [`infra/redis.yaml`](../../infra/redis.yaml) (the database
-  and the cache themselves, started by [`infra/infra.sh`](../../infra/infra.sh))
+* Services and pods: [`deploy/apps/backend`](../../deploy/apps/backend) (Deployment `api`,
+  [`service.yaml`](../../deploy/apps/backend/service.yaml): the headless Service `api`),
+  [`deploy/apps/frontend`](../../deploy/apps/frontend) (`gateway`, `web`),
+  the connection strings in [`deploy/environments/local/api.yaml`](../../deploy/environments/local/api.yaml),
+  [`deploy/infra/postgres.yaml`](../../deploy/infra/postgres.yaml) and [`deploy/infra/redis.yaml`](../../deploy/infra/redis.yaml) (the database
+  and the cache themselves, started by [`deploy/scripts/infra.sh`](../../deploy/scripts/infra.sh))
 * API pipeline: [`Program.cs`](../../backend/ProductManagement.Api/Program.cs),
   [`ProductsController.cs`](../../backend/ProductManagement.Api/Controllers/ProductsController.cs),
   [`CachingProductQueries.cs`](../../backend/ProductManagement.Infrastructure/Caching/CachingProductQueries.cs)

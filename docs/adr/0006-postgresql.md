@@ -4,10 +4,10 @@
 
 > **Update (2026-10-10, second):** PostgreSQL runs in the cluster again, now as shared infrastructure for every
 > service ([0021, update](0021-deployment-layout.md#update-2026-10-10-the-infrastructure-moves-into-kubernetes)):
-> a StatefulSet with one replica in the namespace `infra` (`infra/postgres.yaml`), its data on a PersistentVolumeClaim,
+> a StatefulSet with one replica in the namespace `infra` (`deploy/infra/postgres.yaml`), its data on a PersistentVolumeClaim,
 > the settings inline in a ConfigMap (sized from measurements, [0022](0022-database-at-scale.md)), and a CronJob that
 > writes a nightly `pg_dump` of every database to a second volume, kept 7 days. One server for the platform, one
-> database per service: `infra/create-database.sh` creates a service's database and two least-privilege users
+> database per service: `deploy/scripts/create-database.sh` creates a service's database and two least-privilege users
 > (`pm_migrator` owns the schema and runs the migrations; `pm_app`, the API, may only connect and use the schema, with
 > a 30 s statement timeout) with random passwords in the Secret `database-credentials`. What `pm_app` may do on the
 > tables is granted by the service's own EF Core migration `GrantAppPermissions` (rows and sequences, including
@@ -16,7 +16,7 @@
 > for point-in-time recovery, scheduled base backups) is the next step for production. Tests still use Testcontainers.
 >
 > **Update (2026-10-10, first; history):** PostgreSQL no longer runs in Kubernetes. It is a server outside the cluster (locally the
-> container `pm-postgres` started by `infra/infra.sh up database`), reached by the API's connection string (first
+> container `pm-postgres`, started by that day's infra script with `up database`), reached by the API's connection string (first
 > through an ExternalName Service `postgres`, removed later the same day: [0021, update](0021-deployment-layout.md#update-2026-10-10)),
 > with least-privilege users `pm_migrator` and `pm_app` ([0021](0021-deployment-layout.md)) and settings sized from
 > measurements ([0022](0022-database-at-scale.md)). Tests still use Testcontainers.

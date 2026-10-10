@@ -13,8 +13,8 @@ The two tables grow very differently:
   forever. "5 million or more records" is this table.
 
 So the ledger was grown on the real server from 5.55 million to **20 million rows**, consistently (every product's
-stock is still the sum of its movements and every `stock_after` the running total: `backend/load-tests/verify-data.sh`
-passes). The rows were generated in SQL by `backend/load-tests/data/bulk-ledger.sql`, as +N/−N pairs appended in time order
+stock is still the sum of its movements and every `stock_after` the running total: `tools/load-tests/verify-data.sh`
+passes). The rows were generated in SQL by `tools/load-tests/data/bulk-ledger.sql`, as +N/−N pairs appended in time order
 with a realistic skew: 5 very busy products with ~100,000 movements each, 1,000 busy ones with ~2,000, and the rest
 spread over every product. Every query the API runs was then measured with `EXPLAIN (ANALYZE, BUFFERS)` and through
 the gateway, at 5.5 and at 20 million rows. The server is PostgreSQL 18 in a container with 1 GiB of memory and a
@@ -89,7 +89,7 @@ pages marked all-visible in the visibility map, and only VACUUM sets those marks
 Both are model-driven (`HasStorageParameter` in the entity configurations, migration `AutovacuumAtScale`): an
 `ALTER TABLE ... SET (...)`, instant, which blocks neither reads nor writes.
 
-### 3. Server settings (`postgresql.conf`, in `infra/postgres.yaml`)
+### 3. Server settings (`postgresql.conf`, in `deploy/infra/postgres.yaml`)
 
 Applied to the server after these measurements. Each value comes with the evidence for it:
 
@@ -179,7 +179,7 @@ random leaf of the 1 GB+ product index), and the lack of a way to retire old dat
 * Index-only scans stay index-only between vacuums. The price is more frequent, short autovacuums on two tables.
 * The capped products table needs no further indexes. The ledger needs none until partitioning, and the plan for
   that is written down, including how exactly-once survives it.
-* `backend/load-tests/seed-bulk.sh` can grow the ledger (`LEDGER_ROWS=20000000`), and `seed-bulk.sh`, `verify-data.sh` and
+* `tools/load-tests/seed-bulk.sh` can grow the ledger (`LEDGER_ROWS=20000000`), and `seed-bulk.sh`, `verify-data.sh` and
   `run.sh` talk to PostgreSQL and Redis directly (`kubectl -n infra exec` into `statefulset/postgres` /
   `deployment/redis` by default, `PSQL` / `REDIS_CLI` to target others).
 * Numbers before and after, including through the gateway, are in [load-test-results.md](../load-test-results.md).

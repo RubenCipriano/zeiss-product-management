@@ -26,19 +26,19 @@ duplicated or lost?
 * Fast scale-up (up to 2 pods every 30 s, no stabilisation window) and slow scale-down (3 minutes of lower load,
   then 1 pod a minute): adding capacity late costs errors, removing it late costs only a little CPU.
 * The Deployment has no `replicas` field, so `kubectl apply` never fights the autoscaler.
-* Needs metrics-server: `infra/infra.sh up` installs it where the cluster has none, as on Docker Desktop (k3s and most
+* Needs metrics-server: `deploy/scripts/infra.sh up` installs it where the cluster has none, as on Docker Desktop (k3s and most
   managed clusters ship it).
 
-**Data at scale.** `backend/load-tests/seed-bulk.sh` loads 850,000 products (most of the 900,000 six-digit ids, leaving
+**Data at scale.** `tools/load-tests/seed-bulk.sh` loads 850,000 products (most of the 900,000 six-digit ids, leaving
 room for new ones) with 5 million stock movements, generated in SQL in about two minutes:
 
 * ids from `product_id_seq`, exactly like the API, so later inserts never collide;
 * realistic names, categories, prices and dates, and per product 1–11 movements by eight teams (stores, warehouses,
   the online shop, returns);
 * consistent by construction: each product's stock is the sum of its movements and the running stock never goes
-  below zero. `backend/load-tests/verify-data.sh` checks those invariants (and id uniqueness) in a few seconds.
+  below zero. `tools/load-tests/verify-data.sh` checks those invariants (and id uniqueness) in a few seconds.
 
-**The `teams` scenario** (`backend/load-tests/run.sh teams`): virtual users act as teams on the big catalogue. They
+**The `teams` scenario** (`tools/load-tests/run.sh teams`): virtual users act as teams on the big catalogue. They
 browse (including deep pages), search, read products and histories, and change stock, half of the changes on 50
 "hot" products that every team touches. 30 % of the stock changes are sent twice with the same `Idempotency-Key`,
 one after the other or at the same instant. After the run, the script compares the number of changes the API

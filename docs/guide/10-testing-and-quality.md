@@ -19,7 +19,7 @@ prove, one real example of each, how to run every one of them, and the project a
 | **Back end total** | | **381** | `dotnet test` |
 | Unit / component | front end (Vitest) | **185** (34 spec files) | Angular components, services and the store, in a simulated DOM |
 | End-to-end | Playwright | **22** | the running system (gateway, API, Redis, PostgreSQL) in a real browser: 11 scenarios × desktop and phone; the browser-errors scenario also reads Loki and is skipped when no Loki is reachable (e.g. `LOGS=off`) |
-| Requirements | `backend/scripts/check-requirements.py` | 14 checks | the running system, through the gateway |
+| Requirements | `tools/check-requirements.py` | 14 checks | the running system, through the gateway |
 | Audit | Lighthouse user flow | 5 steps × 2 form factors | the running system, signed in |
 | Load | k6 scenarios | 8 | the running cluster, from inside it ([chapter 6](06-scaling-and-capacity.md)) |
 
@@ -105,21 +105,22 @@ cd backend && dotnet test --project ProductManagement.UnitTests --filter-namespa
 # Front end: 185 tests, lint and format (ESLint and Prettier also cover e2e/)
 cd frontend && npm ci && npm run lint && npm run format:check && npm run test:ci
 
-# Against the running system (deploy first: infra/infra.sh up, infra/create-database.sh product-management
-# product_management pm_app pm_migrator, backend/deploy/deploy.sh, frontend/deploy/deploy.sh)
-python3 backend/scripts/check-requirements.py                # 14 checks
+# Against the running system (deploy first: deploy/scripts/infra.sh up, deploy/scripts/deploy.sh local)
+python3 tools/check-requirements.py                          # 14 checks
 cd frontend && npm run e2e                                   # 22 Playwright tests; report in e2e/reports/playwright
 cd frontend && npm run audit:lighthouse                      # mobile; FORM_FACTOR=desktop for desktop
-backend/load-tests/run.sh smoke                              # or any of the 8 scenarios
-backend/load-tests/verify-data.sh                            # data invariants
+tools/load-tests/run.sh smoke                                # or any of the 8 scenarios
+tools/load-tests/verify-data.sh                              # data invariants
 ```
 
 On macOS with Homebrew, the .NET SDK may need
 `export PATH="/opt/homebrew/opt/dotnet/bin:$PATH" DOTNET_ROOT=/opt/homebrew/opt/dotnet/libexec`.
 
-CI runs all of this except Lighthouse and the long load tests on every push and pull request
+CI runs the back-end and front-end tests, lint and format checks on every merge request and commit
 ([chapter 9](09-deployment-and-operations.md#cicd-pipelines)); the back-end job also fails on unformatted code
-(`dotnet format --verify-no-changes`).
+(`dotnet format --verify-no-changes`). The checks that need a running system (the requirements check, the
+end-to-end tests, Lighthouse and the load tests) are not pipeline jobs: they are run by hand against an environment,
+the end-to-end tests with `BASE_URL=<environment URL> npm run e2e`.
 
 ## Where to look
 
@@ -130,7 +131,7 @@ CI runs all of this except Lighthouse and the long load tests on every push and 
 * BDD: [`Features/`](../../backend/ProductManagement.Api.AcceptanceTests/Features)
 * Front end: `frontend/src/**/*.spec.ts`; end-to-end: [`frontend/e2e/`](../../frontend/e2e),
   [`playwright.config.ts`](../../frontend/playwright.config.ts)
-* Requirement check: [`backend/scripts/check-requirements.py`](../../backend/scripts/check-requirements.py)
+* Requirement check: [`tools/check-requirements.py`](../../tools/check-requirements.py)
 * Decisions: [ADR 0006 PostgreSQL, tested against the real engine](../adr/0006-postgresql.md),
   [ADR 0015 load testing](../adr/0015-load-testing.md)
 * Precise diagram of the requirement check: [flows.md §11](../flows.md#the-assessment-checked-against-the-running-system)

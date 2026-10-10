@@ -1,7 +1,7 @@
 # 1. Overview
 
 **After this chapter you will know** what the system does, who uses it, which pieces it is made of, how the work is
-split into three parts (infra, backend, frontend), the few numbers that describe it, and where to read next.
+split into three parts (deploy, backend, frontend), the few numbers that describe it, and where to read next.
 
 ![Overview: users and clients reach one gateway on localhost:8080; behind it the web app and the API replicas; the API uses PostgreSQL and Redis; two autoscalers adjust the number of pods](../images/overview.svg)
 
@@ -17,7 +17,7 @@ The assessment asks for a product and stock management API with an Angular front
 > duplicates even when several API instances run at once. The schema is built with **EF Core code-first migrations**
 > and **seeded**. An **Angular UI** uses the API and reflects changes made through it. Everything is **tested**.
 
-All of that is implemented, and `backend/scripts/check-requirements.py` checks it against the running system (14 checks;
+All of that is implemented, and `tools/check-requirements.py` checks it against the running system (14 checks;
 see [chapter 10](10-testing-and-quality.md)). On top of the PDF, the system was built to the standard of a service
 that could go to production: authentication, permissions, rate limits, caching, autoscaling, a stock ledger,
 exactly-once writes and load tests. [Chapter 11](11-production-readiness.md) says honestly what is still missing.
@@ -26,8 +26,8 @@ exactly-once writes and load tests. [Chapter 11](11-production-readiness.md) say
 
 Every caller is a **registered API consumer**: a client id, a secret (stored only as a PBKDF2 hash) and one or more
 roles. The local demo consumers' hashes are generated on each machine by
-[`backend/deploy/local-secrets.sh`](../../backend/deploy/local-secrets.sh) (into the Secret `api-secrets`; never committed); staging and
-production get theirs from the pipeline's CI/CD variables.
+[`deploy/scripts/local-secrets.sh`](../../deploy/scripts/local-secrets.sh) (into the Secret `api-secrets`; never committed); staging and
+production get theirs from the deploy repository's CI/CD variables.
 
 | Consumer | Role | What it may do | Who it represents |
 | --- | --- | --- | --- |
@@ -57,7 +57,7 @@ namespace can be deleted and redeployed from Git at any time without touching th
 | **api** | ASP.NET Core (.NET 10), 2–8 pods (autoscaled) | The REST API: issues and verifies tokens, permissions, per-user limits, validation, business rules. |
 | **PostgreSQL** | PostgreSQL 18, a StatefulSet in `infra` with a 20 GiB volume and a nightly backup | The source of truth: products, categories, the stock ledger, the id sequence. The API connects as `pm_app`, which can read and write rows but not change the schema. |
 | **Redis** | Redis 8, a Deployment in `infra`, memory only, password protected | Shared state for the API replicas: read cache, idempotency keys, rate-limit buckets, failed sign-ins. |
-| **migrations** | the API image run once with `migrate`, as the schema owner `pm_migrator` | Applies EF Core migrations and seed data once per deployment, before the rollout, as a one-off pod in the cluster: started by `backend/deploy/deploy.sh` locally, by a pipeline job in CI/CD. |
+| **migrations** | the API image run once with `migrate`, as the schema owner `pm_migrator` | Applies EF Core migrations and seed data once per deployment, before the rollout, as a one-off pod in the cluster: started by `deploy/scripts/deploy.sh local` locally, by the backend pipeline's migrate job in CI/CD. |
 | **HPAs** | two HorizontalPodAutoscalers | Add or remove API and gateway pods based on CPU. |
 | **logs** (optional) | Alloy, Loki and Grafana in `infra`; Alloy reads every pod's log, PostgreSQL's and Redis' included | Every log line in one place, the browser's errors included, kept 14 days; two dashboards, twelve alerts, one trace id per request ([chapter 8](08-observability.md)). |
 
@@ -66,16 +66,21 @@ feature, no EF Core and no HTTP) ← `Infrastructure` (EF Core, Redis) ← `Api`
 ([ADR 0001](../adr/0001-clean-architecture.md)). The front end is split into `core`, `shared` and `features`
 ([chapter 7](07-frontend.md)).
 
-## Three parts, each deployed on its own
+## Three parts, one place that deploys
 
-The system is in three self-contained GitLab repositories: backend, frontend and deploy (the folder `infra/`). Each
-has its code (or configuration), its deploy script, its Kubernetes manifests and its own GitLab pipeline:
+The system is in three GitLab repositories: backend, frontend and deploy. The two application repositories hold code,
+tests, Dockerfiles and a pipeline that builds and releases images; the deploy repository holds what runs in every
+environment (GitOps): the Kubernetes manifests, the shared infrastructure and the scripts that apply them. Only its
+pipeline changes the clusters:
 
-| Part | What it holds | Deployed by |
+| Part | What it holds | Released or deployed by |
 | --- | --- | --- |
-| `infra/` | The shared infrastructure in the namespace `infra`, one manifest per component: PostgreSQL (`postgres.yaml`: its settings, the StatefulSet, the nightly backup), Redis (`redis.yaml`) and the logs (`logs.yaml`: Loki, Grafana with its alert rules, Alloy; the dashboards in `dashboards/`); `create-database.sh` gives a service its database, users and the Secret `database-credentials`; `add-node.sh` adds a k3s node for the database, the cache or the services. | `infra/infra.sh up [postgres] [redis] [logs]`, then `infra/create-database.sh` once per service |
-| `backend/` | The .NET solution, its Dockerfile and tests; `deploy/` with the API's Kustomize base (the Deployment, with its configuration as environment variables, the headless Service `api`, autoscaler, disruption budget, network policy) and one overlay per environment (the connection strings and a few settings); the load tests and the requirements check. | `backend/deploy/deploy.sh` |
-| `frontend/` | The Angular workspace, the web and gateway Dockerfiles and tests; `deploy/` with the web app's and the gateway's base and overlays (where the API and the log collector are, how the gateway is exposed). | `frontend/deploy/deploy.sh` |
+| `backend/` | The .NET solution, its Dockerfile and tests; `ci/migrate.sh` and `ci/release.sh` for its pipeline. | its pipeline migrates the database, then commits the new API image tag to `deploy/environments/staging` (a merge request for production) |
+| `frontend/` | The Angular workspace, the web and gateway Dockerfiles, unit and Playwright tests; `ci/release.sh`. | its pipeline commits the new web and gateway tags to the deploy repository, like the backend |
+| `deploy/` | `apps/backend/` (the API's Deployment, with its configuration as environment variables, the headless Service `api`, autoscaler, disruption budget, network policy) and `apps/frontend/` (the web app and the gateway); `environments/<local, staging, production>/` (one Kustomize folder per environment: connection strings, a few settings, the image tags); `infra/` (the shared infrastructure in the namespace `infra`: PostgreSQL in `postgres.yaml` with its settings, StatefulSet and nightly backup, Redis in `redis.yaml`, the logs in `logs.yaml`: Loki, Grafana with its alert rules, Alloy; the dashboards in `dashboards/`); `scripts/` (`deploy.sh`, `infra.sh`, `create-database.sh` for a service's database, users and the Secret `database-credentials`, `add-node.sh` for a k3s node). | its pipeline (`deploy:staging`, `deploy:production`) runs `scripts/deploy.sh <environment> apps`; locally `deploy/scripts/infra.sh up` and `deploy/scripts/deploy.sh local` |
+
+The documentation (`docs/`) and the local tools (`tools/`: the load tests and the requirements check) are in no
+repository; they sit next to the three.
 
 | Image | Built from | Used by |
 | --- | --- | --- |
@@ -83,12 +88,12 @@ has its code (or configuration), its deploy script, its Kubernetes manifests and
 | `product-management/web` | `frontend/Dockerfile` | the web pods |
 | `product-management/gateway` | `frontend/gateway/Dockerfile` | the gateway pods |
 
-Each deploy script takes an environment (`ENVIRONMENT=local`, the default, `staging` or `production`); the GitLab
-pipelines run the same scripts ([chapter 9](09-deployment-and-operations.md)). The API knows its data stores only
-through two connection strings in its overlay (`postgres.infra.svc.cluster.local:5432`,
+`deploy/scripts/deploy.sh` takes an environment (`local`, `staging` or `production`); the deploy repository's
+pipeline runs the same script ([chapter 9](09-deployment-and-operations.md)). The API knows its data stores only
+through two connection strings in its environment's `api.yaml` (`postgres.infra.svc.cluster.local:5432`,
 `redis.infra.svc.cluster.local:6379`), which hold no password; the passwords come from the Secrets
-`database-credentials` (made by `infra/create-database.sh`) and `redis-credentials` (copied by the backend's deploy
-script from the infra's Redis password). Moving to another database or cache, even outside the cluster, changes those
+`database-credentials` (made by `deploy/scripts/create-database.sh`) and `redis-credentials` (copied by
+`deploy/scripts/deploy.sh` from the shared Redis' password). Moving to another database or cache, even outside the cluster, changes those
 two strings and the passwords, nothing else. The logs are optional: without them the application works the same.
 
 The contract between the API and the web app is small and made of names only:
@@ -103,7 +108,7 @@ The contract between the API and the web app is small and made of names only:
 
 | What | Value | Source |
 | --- | --- | --- |
-| Products in the scale dataset | 850,024 | `backend/load-tests/seed-bulk.sh` |
+| Products in the scale dataset | 850,024 | `tools/load-tests/seed-bulk.sh` |
 | Stock movements (ledger rows) | about 5 million seeded; grown to 20 million to measure the database at scale | same; [ADR 0022](../adr/0022-database-at-scale.md) |
 | Deepest stock-history page of a busy product (SQL), 20 million ledger rows | 1.3–6.3 s before, 8–22 ms after (late row lookup) | [ADR 0022](../adr/0022-database-at-scale.md) |
 | Product ids available | 900,000 (100000–999999, never reused) | [ADR 0002](../adr/0002-product-id-generation.md) |
@@ -124,7 +129,7 @@ The contract between the API and the web app is small and made of names only:
 | [6. Scaling and capacity](06-scaling-and-capacity.md) | autoscaling, why the database is the ceiling, what each load test found |
 | [7. Front end](07-frontend.md) | the Angular structure, the product page's data flow, what Lighthouse and Playwright found |
 | [8. Logs, dashboards and alerts](08-observability.md) | how the system is observed through its logs, and what each alert means |
-| [9. Deployment and operations](09-deployment-and-operations.md) | what runs where, the three parts and their deploy scripts, the overlays, CI/CD, day-2 commands |
+| [9. Deployment and operations](09-deployment-and-operations.md) | what runs where, the three repositories, the environments, CI/CD and releases, day-2 commands |
 | [10. Testing and quality](10-testing-and-quality.md) | the test pyramid, what each layer proves, how to run it |
 | [11. Production readiness](11-production-readiness.md) | what is done, what the environment must still provide |
 | [12. From zero to production](12-from-zero.md) | the runbook for standing up staging and production |
@@ -143,12 +148,10 @@ listed in the [documentation home](../README.md#reference-material).
 
 ```bash
 kubectl config use-context docker-desktop
-infra/infra.sh up                                      # PostgreSQL, Redis and the logs, in the namespace infra
-infra/create-database.sh product-management product_management pm_app pm_migrator   # once: database, users, Secret
-backend/deploy/deploy.sh                               # migrations, then the API
-frontend/deploy/deploy.sh                              # the web app and the gateway
+deploy/scripts/infra.sh up                             # PostgreSQL, Redis and the logs, in the namespace infra
+deploy/scripts/deploy.sh local                         # database (first run), images, migrations, API, web app, gateway
 kubectl -n product-management get pods,svc,hpa         # the pieces in the cluster
-infra/infra.sh status                                  # the shared infrastructure
-python3 backend/scripts/check-requirements.py          # the assessment PDF, 14 checks against the running system
+deploy/scripts/infra.sh status                         # the shared infrastructure
+python3 tools/check-requirements.py                    # the assessment PDF, 14 checks against the running system
 open http://localhost:8080                             # sign in as viewer, clerk or manager
 ```

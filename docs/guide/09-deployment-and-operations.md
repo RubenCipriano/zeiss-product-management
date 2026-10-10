@@ -1,11 +1,12 @@
 # 9. Deployment and operations
 
 **After this chapter you will know** what runs where (everything in Kubernetes: the application in its namespace,
-the shared PostgreSQL, Redis and logs in the namespace `infra`), how the deployment is split into three parts that
-each deploy on their own, how each part's manifests are split into a base and one overlay per environment, where the
-configuration and the passwords come from, what each script does step by step, how and why migrations run before the
-rollout, inside the cluster and as which database user, what the CI/CD pipelines do, and the commands for day-to-day
-operation: rollouts, rollbacks, secret rotation, scaling, backups and restores, troubleshooting, resetting data and
+the shared PostgreSQL, Redis and logs in the namespace `infra`), how the system is split into three repositories
+(backend, frontend, and deploy, which describes every environment), how the manifests are split into the apps and
+one folder per environment, where the configuration and the passwords come from, what each script does step by step,
+how and why migrations run before the rollout, inside the cluster and as which database user, how the CI/CD pipelines
+release by committing to the deploy repository (GitOps), and the commands for day-to-day operation: rollouts,
+rollbacks, secret rotation, scaling, backups and restores, troubleshooting, resetting data and
 running load tests.
 
 ![What runs where: everything inside the Kubernetes cluster, the namespace product-management with the gateway, web and API, and the namespace infra with PostgreSQL, Redis, Loki, Grafana and Alloy](../images/kubernetes-map.svg)
@@ -14,134 +15,135 @@ running load tests.
 
 ## The layout: three parts
 
-The system is in three self-contained parts, each its own GitLab repository with its own pipeline: backend,
-frontend and deploy (the folder `infra/`) ([ADR 0021](../adr/0021-deployment-layout.md)). Each one has its code (or configuration), its deploy script
-and its manifests together:
+The system is in three GitLab repositories, each with its own pipeline: backend, frontend and deploy
+([ADR 0021](../adr/0021-deployment-layout.md), revision of 2026-10-10). The backend and the frontend hold only code,
+tests, Dockerfiles and the scripts their pipelines run; everything that describes what runs in a cluster is in the
+deploy repository (GitOps):
 
 ```text
-infra/                              the shared infrastructure, namespace `infra`, for every service on the cluster
-├── infra.sh                        infra.sh up|down|status [postgres] [redis] [logs] [--delete-data]
-├── postgres.yaml                   PostgreSQL 18: StatefulSet, Service, settings (postgresql.conf inline), nightly pg_dump
-├── redis.yaml                      Redis 8: Deployment, Service, settings (redis.conf inline)
-├── logs.yaml                       Loki, Grafana (data source, alert rules), Alloy (every pod's logs, the browser's errors)
-├── dashboards/                     the two Grafana dashboards (JSON), loaded by infra.sh into a ConfigMap
-├── create-database.sh              one database per service, with its two users and the Secret database-credentials
-├── add-node.sh                     joins a machine to a k3s cluster as a database, cache or apps node
-└── .gitlab-ci.yml
-
-backend/                            the API
-├── deploy/
-│   ├── deploy.sh                   [ENVIRONMENT=local|staging|production] deploy/deploy.sh
+deploy/                             gitlab.com/zeiss/deploy: every environment, and the only pipeline that applies
+├── apps/backend/                   the API, the same everywhere: namespace, deployment.yaml (configuration as env keys),
+│                                   service.yaml (`api`, headless), hpa.yaml, pdb.yaml, network-policy.yaml
+├── apps/frontend/                  web.yaml, gateway.yaml (the namespace object is only in apps/backend)
+├── environments/local/             kustomization.yaml + api.yaml, gateway.yaml patches; the Secret api-secrets
+│                                   generated from generated/ (gitignored), the built image tags in generated/build
+├── environments/staging/           kustomization.yaml (both apps, the `images:` with the released tags) + api.yaml,
+├── environments/production/        gateway.yaml, registry.yaml patches and ingress.yaml
+├── infra/                          the shared infrastructure, namespace `infra`, for every service on the cluster
+│   ├── postgres.yaml               PostgreSQL 18: StatefulSet, Service, settings (postgresql.conf inline), nightly pg_dump
+│   ├── redis.yaml                  Redis 8: Deployment, Service, settings (redis.conf inline)
+│   ├── logs.yaml                   Loki, Grafana (data source, alert rules), Alloy (every pod's logs, the browser's errors)
+│   └── dashboards/                 the two Grafana dashboards (JSON), loaded by infra.sh into a ConfigMap
+├── scripts/
+│   ├── deploy.sh                   deploy.sh <local|staging|production> [infra|apps|all]   (default apps)
+│   ├── infra.sh                    infra.sh up|down|status [postgres] [redis] [logs] [--delete-data]
+│   ├── create-database.sh          one database per service, with its two users and the Secret database-credentials
+│   ├── add-node.sh                 joins a machine to a k3s cluster as a database, cache or apps node
 │   ├── local-secrets.sh            the local signing key and demo consumers, generated once per machine
-│   ├── k8s/base/                   namespace, deployment.yaml (configuration as env keys), service.yaml (`api`,
-│   │                               headless), hpa.yaml, pdb.yaml, network-policy.yaml
-│   ├── k8s/overlays/<env>/         kustomization.yaml + api.yaml (connection strings, per-environment settings);
-│   │                               local also generates the Secret api-secrets from generated/ (gitignored)
-│   └── ci/                         validate-manifests.sh, create-secrets.sh, deploy-environment.sh
-├── load-tests/, scripts/check-requirements.py
+│   ├── validate.sh                 renders and checks every environment and infra/ (the pipeline's validate job)
+│   └── smoke.sh                    the smoke check of a deployed environment, through its public URL
 └── .gitlab-ci.yml
 
-frontend/                           the web app and the gateway
-├── gateway/                        the gateway image (nginx config template, collector.sh, njs)
-├── deploy/
-│   ├── deploy.sh                   [ENVIRONMENT=...] [LOGS=off] deploy/deploy.sh
-│   ├── k8s/base/                   namespace, web.yaml, gateway.yaml
-│   ├── k8s/overlays/<env>/         kustomization.yaml + gateway.yaml (API and collector addresses);
-│   │                               staging and production add ingress.yaml
-│   └── ci/validate-manifests.sh
-└── .gitlab-ci.yml
+backend/                            gitlab.com/zeiss/backend: the API; ci/migrate.sh, ci/release.sh, .gitlab-ci.yml
+frontend/                           gitlab.com/zeiss/frontend: the web app, gateway/ (the gateway image), e2e/,
+                                    ci/release.sh, .gitlab-ci.yml
 ```
 
-Deploy them in this order; each step only needs what the one before it started:
+Locally the three sit side by side (the monorepo, or three clones), and `deploy/scripts/deploy.sh local` builds the
+images from `../backend` and `../frontend` (`BACKEND_DIR`, `FRONTEND_DIR` to point elsewhere). Deploy in this order;
+each step only needs what the one before it started:
 
 ```bash
-infra/infra.sh up                 # PostgreSQL, Redis, Loki + Grafana + Alloy in the namespace infra
-infra/create-database.sh product-management product_management pm_app pm_migrator   # once per cluster
-backend/deploy/deploy.sh          # secrets (first run), API image, migrations, rollout
-frontend/deploy/deploy.sh         # web + gateway images, rollout → http://localhost:8080
+deploy/scripts/infra.sh up        # PostgreSQL, Redis, Loki + Grafana + Alloy in the namespace infra
+deploy/scripts/deploy.sh local    # secrets (first run), the database (first run), 3 images, migrations, rollout
+                                  # → http://localhost:8080   (deploy.sh local all: both steps)
 ```
 
-**What connects the parts.** Only addresses and Secrets, written in each part's own files:
+`deploy.sh local` runs `create-database.sh` itself the first time; in staging and production that is a separate,
+deliberate step (below).
+
+**What connects the parts.** Only addresses and Secrets, written in the environment's files:
 
 | From | To | Where it is set |
 | --- | --- | --- |
-| backend (the API) | PostgreSQL, Redis | `ConnectionStrings__ProductManagement` (`postgres.infra.svc.cluster.local:5432`, user `pm_app`) and `ConnectionStrings__Redis` (`redis.infra.svc.cluster.local:6379`) in `backend/deploy/k8s/overlays/<env>/api.yaml` |
-| backend (the migration pod) | PostgreSQL, Redis | the database's host, port, name and the migrator user from the Secret `database-credentials`; Redis from `MIGRATION_REDIS` (default `redis.infra.svc.cluster.local:6379`) |
-| backend | the database and Redis passwords | the Secrets `database-credentials` (made by `infra/create-database.sh`) and `redis-credentials` (copied from `infra/redis-auth` by `backend/deploy/deploy.sh`) |
-| frontend (the gateway) | the API | `API_UPSTREAM`, `JWKS_URL` in `frontend/deploy/k8s/overlays/<env>/gateway.yaml`: the Service `api.product-management.svc.cluster.local:8080` |
-| frontend (the gateway) | the log collector (optional) | `COLLECTOR_UPSTREAM` in the same file: `alloy-faro.infra.svc.cluster.local:12347`, or `""` with `LOGS=off` |
+| the API | PostgreSQL, Redis | `ConnectionStrings__ProductManagement` (`postgres.infra.svc.cluster.local:5432`, user `pm_app`) and `ConnectionStrings__Redis` (`redis.infra.svc.cluster.local:6379`) in `deploy/environments/<env>/api.yaml` |
+| the migration pod | PostgreSQL, Redis | the database's host, port, name and the migrator user from the Secret `database-credentials`; Redis at `redis.infra.svc.cluster.local:6379` |
+| the API | the database and Redis passwords | the Secrets `database-credentials` (made by `create-database.sh`) and `redis-credentials` (copied from `infra/redis-auth` by `deploy.sh`, and by the backend's `ci/migrate.sh`) |
+| the gateway | the API | `API_UPSTREAM`, `JWKS_URL` in `deploy/environments/<env>/gateway.yaml`: the Service `api.product-management.svc.cluster.local:8080` |
+| the gateway | the log collector (optional) | `COLLECTOR_UPSTREAM` in the same file: `alloy-faro.infra.svc.cluster.local:12347`, or `""` with `LOGS=off` |
 | infra (Alloy) | Loki | the Loki in `infra` by default; `LOKI_URL` for any other Loki |
 
-Both the backend and the frontend apply the namespace `product-management` (the same object): whichever deploys
-first creates it. `create-database.sh` creates it too if it is missing, so it can run before the first deployment.
+The namespace `product-management` is one object, in `apps/backend`, and every environment includes both apps.
+`create-database.sh` creates it too if it is missing, so it can run before the first deployment.
 
-**Base and overlays.** In the backend and the frontend, `deploy/k8s/base` holds everything that runs in the cluster,
-the same in every environment; `deploy/k8s/overlays/<env>` holds only what differs, as one strategic-merge patch per
-Deployment (`api.yaml`, `gateway.yaml`) plus, in staging and production, the frontend's Ingress. `kubectl kustomize`
-is built into `kubectl`, so nothing else is installed. Each part's `deploy/ci/validate-manifests.sh` checks that every
-overlay renders, is valid against the Kubernetes schemas and sets what it must: the backend's both connection strings
-(and no Secret outside `local`), the frontend's `API_UPSTREAM`, `JWKS_URL` and `COLLECTOR_UPSTREAM` (and no Secret
-at all). The infra's manifests are plain files, the same in every environment; `infra/.gitlab-ci.yml` checks them
-with `kubeconform`.
+**Base and environments.** `deploy/apps/<app>` holds everything that runs in the cluster, the same in every
+environment; `deploy/environments/<env>` holds one `kustomization.yaml` for both apps and only what differs, as one
+strategic-merge patch per Deployment (`api.yaml`, `gateway.yaml`) plus, in staging and production, the pull Secret
+(`registry.yaml`), the Ingress and the released image tags. `kubectl kustomize` is built into `kubectl`, so nothing
+else is installed. `deploy/scripts/validate.sh` checks that every environment renders, is valid against the
+Kubernetes schemas and sets what it must: the API's both connection strings, the gateway's `API_UPSTREAM`,
+`JWKS_URL` and `COLLECTOR_UPSTREAM`, no Secret outside `local` (and there only the generated `api-secrets`), the pull
+Secret and registry images with a tag in staging and production. It checks `infra/` with `kubeconform` too.
 
 **Configuration is plain environment variables in the Deployment.** The API's settings are `env` entries in
-`backend/deploy/k8s/base/deployment.yaml` (ASP.NET Core reads `Section__Key` as `Section:Key`): token lifetime, rate
+`deploy/apps/backend/deployment.yaml` (ASP.NET Core reads `Section__Key` as `Section:Key`): token lifetime, rate
 limits, sign-in throttle, idempotency lifetimes, `Database__ApplyMigrationsOnStartup=false`, `OpenApi__Enabled`. An
-overlay's `api.yaml` sets only what differs, and always the two connection strings. Because the values are in the pod
+environment's `api.yaml` sets only what differs, and always the two connection strings. Because the values are in the pod
 template, changing one rolls the pods like a code change, and `kubectl rollout undo` restores the old configuration
-with the old code. The gateway works the same way (`GATEWAY_RATE_LIMIT_*`, `GATEWAY_TRUSTED_PROXIES`, `JWT_*` in the
-base; the addresses in the overlays).
+with the old code. The gateway works the same way (`GATEWAY_RATE_LIMIT_*`, `GATEWAY_TRUSTED_PROXIES`, `JWT_*` in
+`apps/frontend`; the addresses in the environments).
 
 **Three Secrets, no password in a connection string or a pipeline variable.** The API reads:
 
 | Secret | Key | Becomes in the API | Made by |
 | --- | --- | --- | --- |
-| `database-credentials` | `app-password` | `PGPASSWORD`: Npgsql uses it when the connection string has no password (the readiness check's own connection too) | `infra/create-database.sh`, once per environment: a random password, kept on every re-run |
-| `redis-credentials` | `password` | `Redis__Password`: the API sets it on the Redis connection, over any password in the connection string | `backend/deploy/deploy.sh`, on every deploy: a copy of `infra/redis-auth`, because a pod can only read Secrets of its own namespace |
-| `api-secrets` | `signing-key` | `Authentication__SigningKey`: the ES256 private key that signs tokens | locally `generated/signing-key.pem`; staging and production the GitLab variable `API_SIGNING_KEY` (File) |
+| `database-credentials` | `app-password` | `PGPASSWORD`: Npgsql uses it when the connection string has no password (the readiness check's own connection too) | `deploy/scripts/create-database.sh`, once per environment: a random password, kept on every re-run |
+| `redis-credentials` | `password` | `Redis__Password`: the API sets it on the Redis connection, over any password in the connection string | `deploy/scripts/deploy.sh` on every deploy (and the backend's `ci/migrate.sh`): a copy of `infra/redis-auth`, because a pod can only read Secrets of its own namespace |
+| `api-secrets` | `signing-key` | `Authentication__SigningKey`: the ES256 private key that signs tokens | locally `generated/signing-key.pem`; staging and production the deploy project's CI/CD variable `API_SIGNING_KEY` (File) |
 | `api-secrets` | `consumers.json` | the file `/app/config/consumers.json`: client ids, PBKDF2 hashes, roles | locally `generated/consumers.json`; staging and production `API_CONSUMERS` (File) |
 
 The database and Redis passwords are random, created in the cluster (`infra.sh` makes `postgres-admin` and
 `redis-auth`, `create-database.sh` the users' passwords) and never leave it: no file, no pipeline variable holds
-them. `api-secrets` holds only the API's own keys. Locally `backend/deploy/local-secrets.sh` writes the two files into
-`backend/deploy/k8s/overlays/local/generated/` (gitignored, mode 600) once per machine, and the overlay's
+them. `api-secrets` holds only the API's own keys. Locally `deploy/scripts/local-secrets.sh` writes the two files into
+`deploy/environments/local/generated/` (gitignored, mode 600) once per machine, and the environment's
 `secretGenerator` makes `api-secrets-<hash>` from them: a changed file gives the Secret a new name, which changes the
-Deployment and rolls the pods. In staging and production the overlays contain no Secret; the deploy job creates
-`api-secrets` from CI/CD variables (`backend/deploy/ci/create-secrets.sh`).
+Deployment and rolls the pods. In staging and production the repository contains no Secret; `deploy/scripts/deploy.sh`
+creates `api-secrets` from the deploy project's CI/CD variables, and the registry credential `gitlab-registry` from
+the group deploy token.
 
 **The shared infrastructure runs in the cluster.** PostgreSQL, Redis and the logs (Loki, Grafana, Alloy) run in
 Kubernetes like the application, in one namespace, `infra`, shared by every service on the cluster: one PostgreSQL
-with one database per service (`infra/create-database.sh`), one Redis (services separate their keys by prefix), and
+with one database per service (`deploy/scripts/create-database.sh`), one Redis (services separate their keys by prefix), and
 one log pipeline that collects every pod's log without the service doing anything. The same files run on Docker
-Desktop, on a single k3s machine and on a production cluster, where `infra/add-node.sh` gives PostgreSQL and Redis
+Desktop, on a single k3s machine and on a production cluster, where `deploy/scripts/add-node.sh` gives PostgreSQL and Redis
 nodes of their own ([chapter 12](12-from-zero.md)). Kubernetes restarts, schedules and passes the passwords for them
 as for any workload; their data is on PersistentVolumeClaims that `infra.sh down` never deletes
 ([ADR 0021, update](../adr/0021-deployment-layout.md)). A managed database or cache instead is a host name in the
-backend's overlay (the comments in `api.yaml` say how, with TLS).
+environment's `api.yaml` (its comments say how, with TLS).
 
 **Logs are optional.** The `logs` component (Loki, Grafana, Alloy) can be left out:
-`infra/infra.sh up postgres redis` and `LOGS=off frontend/deploy/deploy.sh`. The application works the same; the
-pods log to stdout (`kubectl logs`) and the gateway answers the browser's error reports with 204. With
-`LOKI_URL=… infra/infra.sh up logs` the logs go to another Loki instead (no Loki or Grafana in the cluster).
+`deploy/scripts/infra.sh up postgres redis` and `LOGS=off deploy/scripts/deploy.sh local` (in staging or production,
+`COLLECTOR_UPSTREAM: ""` in the environment's `gateway.yaml`). The application works the same; the pods log to stdout (`kubectl logs`) and the gateway answers the browser's error reports with 204. With
+`LOKI_URL=… deploy/scripts/infra.sh up logs` the logs go to another Loki instead (no Loki or Grafana in the cluster).
 
 ## What runs where
 
-**Namespace `infra`** (the infra repository, `infra/infra.sh up`):
+**Namespace `infra`** (the deploy repository's `infra/`, applied by `deploy/scripts/infra.sh up`):
 
 | Object | Kind | Component | What it does |
 | --- | --- | --- | --- |
-| `postgres` | StatefulSet (1 pod, `postgres-0`) + Service | postgres ([`postgres.yaml`](../../infra/postgres.yaml)) | PostgreSQL 18 at `postgres.infra.svc.cluster.local:5432`, data on the PVC `data-postgres-0` (20 GiB), 4 CPUs and 3 GiB, 1 GiB `/dev/shm`, `max_connections=200`, `shared_buffers=768MB`, `pg_stat_statements` preloaded, slow statements (> 250 ms), lock waits, checkpoints and autovacuum runs logged; sized from the measurements in [ADR 0022](../adr/0022-database-at-scale.md). The settings are the ConfigMap `postgres-config`; a `preStop` hook makes a fast shutdown |
+| `postgres` | StatefulSet (1 pod, `postgres-0`) + Service | postgres ([`postgres.yaml`](../../deploy/infra/postgres.yaml)) | PostgreSQL 18 at `postgres.infra.svc.cluster.local:5432`, data on the PVC `data-postgres-0` (20 GiB), 4 CPUs and 3 GiB, 1 GiB `/dev/shm`, `max_connections=200`, `shared_buffers=768MB`, `pg_stat_statements` preloaded, slow statements (> 250 ms), lock waits, checkpoints and autovacuum runs logged; sized from the measurements in [ADR 0022](../adr/0022-database-at-scale.md). The settings are the ConfigMap `postgres-config`; a `preStop` hook makes a fast shutdown |
 | `postgres-backup` | CronJob + PVC `postgres-backups` (20 GiB) | postgres | every night at 02:30: `pg_dumpall --globals-only` and `pg_dump -Fc` of every database into `/backups/<date-time>/`, 7 days kept (below, "Backups and restores") |
 | `postgres-admin` | Secret | postgres | the superuser `postgres`'s random password, for `create-database.sh`, the backups and people; never for a service |
-| `redis` | Deployment (1 pod, `Recreate`) + Service | redis ([`redis.yaml`](../../infra/redis.yaml)) | Redis 8 at `redis.infra.svc.cluster.local:6379`, password from the Secret `redis-auth` (`--requirepass`), memory only (no volume), `maxmemory 256mb`, `volatile-lru` (only keys with an expiry can be evicted), `FLUSHALL`/`FLUSHDB`/`DEBUG` disabled |
-| `loki` | StatefulSet + Service | logs ([`logs.yaml`](../../infra/logs.yaml)) | Loki 3.5.5 at `loki:3100`, 14 days' retention, data on the PVC `data-loki-0` (10 GiB) |
-| `grafana` | Deployment + Service | logs | Grafana 12.2.0 at `grafana:3000`, no volume: the Loki data source, the two dashboards ([`dashboards/`](../../infra/dashboards)) and the 12 alert rules are provisioned from ConfigMaps ([chapter 8](08-observability.md)); anonymous administrator, reached only through a port-forward |
+| `redis` | Deployment (1 pod, `Recreate`) + Service | redis ([`redis.yaml`](../../deploy/infra/redis.yaml)) | Redis 8 at `redis.infra.svc.cluster.local:6379`, password from the Secret `redis-auth` (`--requirepass`), memory only (no volume), `maxmemory 256mb`, `volatile-lru` (only keys with an expiry can be evicted), `FLUSHALL`/`FLUSHDB`/`DEBUG` disabled |
+| `loki` | StatefulSet + Service | logs ([`logs.yaml`](../../deploy/infra/logs.yaml)) | Loki 3.5.5 at `loki:3100`, 14 days' retention, data on the PVC `data-loki-0` (10 GiB) |
+| `grafana` | Deployment + Service | logs | Grafana 12.2.0 at `grafana:3000`, no volume: the Loki data source, the two dashboards ([`dashboards/`](../../deploy/infra/dashboards)) and the 12 alert rules are provisioned from ConfigMaps ([chapter 8](08-observability.md)); anonymous administrator, reached only through a port-forward |
 | `alloy` | Deployment + ServiceAccount, ClusterRole `infra-alloy` (read pods and their logs) | logs | Grafana Alloy: reads the log of every pod in every namespace through the Kubernetes API (PostgreSQL, Redis, Loki and Grafana included) and pushes it to Loki as `{namespace, app}`; receives the browser's error reports at the Service `alloy-faro:12347`, which a NetworkPolicy (`alloy-ingress`) reserves for the gateway pods of `product-management` |
 
 The shared infrastructure's own logs are `{namespace="infra", app="postgres"}` (or `redis`, `loki`, `grafana`,
 `postgres-backup`).
 
-**Database users** (made by [`create-database.sh`](../../infra/create-database.sh), one pair per service):
+**Database users** (made by [`create-database.sh`](../../deploy/scripts/create-database.sh), one pair per service):
 `pm_migrator` owns the schema `public` and is used only by the migration pod; `pm_app` is the API's user, with
 `CONNECT` and `USAGE` only. What `pm_app` may do on the tables is granted by the service's own migration
 `GrantAppPermissions`, which runs as `pm_migrator`: read and write rows and draw ids from the sequences, on today's
@@ -151,35 +153,37 @@ idle after 60 s. The superuser `postgres` is used by the infra scripts and by pe
 
 **Namespace `product-management`:**
 
-| Object | Kind | Part | What it does |
+| Object | Kind | App (made by) | What it does |
 | --- | --- | --- | --- |
-| `database-credentials` | Secret | infra (`create-database.sh`) | `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password`. The API reads only `app-password`; the migration pod the migrator's keys. |
-| `redis-credentials` | Secret | backend (`deploy.sh`) | The shared Redis' password, copied from `infra/redis-auth` on every deploy. |
-| `api-secrets` (locally `api-secrets-<hash>`) | Secret | backend (local overlay / pipeline) | The signing key and the consumers (above). |
+| `database-credentials` | Secret | platform (`create-database.sh`) | `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password`. The API reads only `app-password`; the migration pod the migrator's keys. |
+| `redis-credentials` | Secret | platform (`deploy.sh`, the backend's `ci/migrate.sh`) | The shared Redis' password, copied from `infra/redis-auth` on every deploy and migration. |
+| `api-secrets` (locally `api-secrets-<hash>`) | Secret | backend (local `secretGenerator` / `deploy.sh` from CI/CD variables) | The signing key and the consumers (above). |
+| `gitlab-registry` | Secret (staging, production) | platform (`deploy.sh`, the backend's `ci/migrate.sh`) | The registry credential every pod pulls with: the group deploy token `gitlab-deploy-token` (`read_registry`), which reads both projects' registries. |
 | `api` | Deployment (no fixed count) | backend | The API pods, with their configuration as env keys. Rolling update with `maxUnavailable: 0`, a 5 s `preStop` pause, startup, readiness and liveness probes, 5 old ReplicaSets kept. Pool of 10 database connections per pod, plus one for the readiness check. |
 | `api` | Service (headless, `clusterIP: None`) | backend | **The API's only Service.** `api.product-management.svc.cluster.local` lists every ready API pod; the gateway balances over them per request and downloads the public signing key from it ([chapter 2](02-request-journey.md#why-the-apis-service-is-headless)). |
 | `api` | HorizontalPodAutoscaler | backend | 2–8 pods at 60 % CPU ([chapter 6](06-scaling-and-capacity.md)). |
 | `api` | PodDisruptionBudget | backend | At least one pod stays up during node maintenance. |
 | `api-ingress` | NetworkPolicy | backend | Only the gateway may connect. |
-| `migrate-<tag>` | Pod (only while it runs) | backend (`deploy.sh`) | The migrations, once per deployment (below); deleted when it ends. |
+| `migrate-<tag>` | Pod (only while it runs) | backend (the backend pipeline's `ci/migrate.sh`; locally `deploy.sh`) | The migrations, once per deployment (below); deleted when it ends. |
 | `web` | Deployment (2 pods) + Service + PDB | frontend | nginx serving the Angular build. |
 | `web-ingress` | NetworkPolicy | frontend | Only the gateway may connect. |
 | `gateway` | Deployment (no fixed count) + PDB + HPA | frontend | The nginx gateway, 2–6 pods at 70 % CPU. |
 | `gateway` | Service | frontend | Port 8080. Locally type `LoadBalancer` (`localhost:8080` on Docker Desktop). |
-| `gateway` | Ingress | frontend (staging, production) | HTTPS for `staging.products.example.com` / `products.example.com`, certificate from cert-manager (Let's Encrypt). |
+| `gateway` | Ingress | frontend (staging, production: `environments/<env>/ingress.yaml`) | HTTPS for `staging.products.example.com` / `products.example.com`, certificate from cert-manager (Let's Encrypt). |
 
 **`kube-system`:** metrics-server, which feeds the two HPAs and `kubectl top`. k3s and most managed clusters ship
-it; where it is missing (Docker Desktop), `infra/infra.sh up` installs it (v0.8.0).
+it; where it is missing (Docker Desktop), `deploy/scripts/infra.sh up` installs it (v0.8.0).
 
 The application namespace holds no data: everything that must survive is in `infra`, on the PVCs `data-postgres-0`,
 `postgres-backups` and `data-loki-0`, and in the Secrets `postgres-admin` and `redis-auth`.
 
 ## The deploy scripts, step by step
 
-### `infra/infra.sh`
+### `deploy/scripts/infra.sh`
 
-`infra/infra.sh up|down|status [postgres] [redis] [logs] [--delete-data]`; no component means all three, in that
-order. It acts on the current `kubectl` context.
+`deploy/scripts/infra.sh up|down|status [postgres] [redis] [logs] [--delete-data]`; no component means all three, in
+that order. It applies the files in `deploy/infra/` to the current `kubectl` context. `deploy.sh <env> infra` runs
+`infra.sh up` (the deploy pipeline's manual `infra:<env>` jobs).
 
 `up` first creates the namespace `infra` and, when the cluster has no metrics API, installs metrics-server (on Docker
 Desktop with `--kubelet-insecure-tls`, because its kubelet's certificate does not name the node). Then, per component:
@@ -201,16 +205,17 @@ then name users that no longer exist, so run `create-database.sh` again for each
 its data directory. `status` lists the pods, Services and PVCs of `infra` and prints the port-forward and `exec`
 commands of "Day-2 operations" below.
 
-### `infra/create-database.sh`
+### `deploy/scripts/create-database.sh`
 
-`infra/create-database.sh <service-namespace> <database> [app-user] [migrator-user] [--rotate]`: one PostgreSQL for
+`deploy/scripts/create-database.sh <service-namespace> <database> [app-user] [migrator-user] [--rotate]`: one PostgreSQL for
 the platform, one database per service. For the product-management API:
 
 ```bash
-infra/create-database.sh product-management product_management pm_app pm_migrator
+deploy/scripts/create-database.sh product-management product_management pm_app pm_migrator
 ```
 
-Without the user names it uses `<database>_app` and `<database>_migrator`. It runs `psql` inside the PostgreSQL pod
+`deploy.sh local` runs exactly this on the first deploy (when `database-credentials` is missing); in staging and
+production nothing runs it for you: an operator with access to the cluster runs it once per environment. Without the user names it uses `<database>_app` and `<database>_migrator`. It runs `psql` inside the PostgreSQL pod
 (`kubectl -n infra exec statefulset/postgres`), so nothing but `kubectl` is needed, and passes the passwords on
 stdin. Idempotently, it:
 
@@ -229,38 +234,60 @@ The users and the database are the platform's; what the app user may do on the s
 migrations' business (here `GrantAppPermissions`). After `--rotate`, restart the service's pods so they read the new
 Secret (it prints the command).
 
-### `backend/deploy/deploy.sh`
+### `deploy/scripts/deploy.sh`
 
-`ENVIRONMENT` picks the overlay (`local` by default). It needs the shared PostgreSQL and Redis running and the
-database created. Locally:
+`deploy/scripts/deploy.sh <local|staging|production> [infra|apps|all]`; `apps` (the default) is the API, the web app
+and the gateway, `infra` runs `infra.sh up`, `all` both. It selects the cluster first (`KUBE_CONTEXT`, else the
+current context of `KUBECONFIG`), and refuses `local` on any context but `docker-desktop` and staging or production on
+`docker-desktop`. It needs the shared PostgreSQL and Redis running.
 
-1. **Local secrets** (first run only): `backend/deploy/local-secrets.sh` creates what is missing in
-   `backend/deploy/k8s/overlays/local/generated/` (signing key, demo consumers), and the API's .NET user-secrets for
-   `dotnet run`.
-2. **Image:** builds `backend/` → `product-management/api:<tag>` and publishes it to the cluster (below).
-3. **The shared Secrets:** checks that `database-credentials` exists in `product-management` (if not, it stops and
-   prints the `create-database.sh` command), and copies the password of `infra/redis-auth` into `redis-credentials`.
-4. **Migrations:** runs that image once with `migrate`, in a one-off pod in the cluster, as `pm_migrator` (below).
-5. **Rollout:** writes `backend/deploy/k8s/.build/<env>/kustomization.yaml` (not committed), which takes the overlay
-   and pins this release's image with Kustomize `images`; renders it with `kubectl kustomize`, pipes it to
-   `kubectl apply`, and waits for `deployment/api`.
+**`local`** builds and applies what is in the sibling checkouts:
+
+1. **Local secrets** (first run only): `deploy/scripts/local-secrets.sh` creates what is missing in
+   `deploy/environments/local/generated/` (signing key, demo consumers), and the API's .NET user-secrets for
+   `dotnet run` when `../backend` is there.
+2. **Images:** builds `../backend` → `product-management/api:<tag>`, `../frontend` → `product-management/web:<tag>`
+   (with `APP_VERSION=<tag>`, the release the browser reports with its errors) and `../frontend/gateway` →
+   `product-management/gateway:<tag>`, and writes their tags into `deploy/environments/local/generated/build/`
+   (not committed), so `kubectl diff -k deploy/environments/local` compares with exactly what was applied.
+3. **The shared Secrets:** creates the database the first time (`create-database.sh`, when `database-credentials` is
+   missing in `product-management`), and copies the password of `infra/redis-auth` into `redis-credentials`.
+4. **Migrations:** runs the new API image once with `migrate`, in a one-off pod in the cluster, as `pm_migrator`
+   (below).
+5. **Rollout:** `kubectl apply -k deploy/environments/local`, then waits for `api`, `web` and `gateway`; restarts the
+   API when one of its Secrets changed.
+
+**`staging`, `production`** apply what is committed, nothing else (the deploy pipeline's `deploy:<env>` jobs):
+
+1. renders `deploy/environments/<env>` and **refuses** it while an image still has `newTag: unreleased` (the
+   placeholder before the first release of that app): run the backend and frontend pipelines on `main` first;
+2. checks that `database-credentials` exists (if not, it stops and prints the `create-database.sh` command);
+3. creates the Secret `gitlab-registry` from `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD` (the group deploy token) and
+   `api-secrets` from the files `API_SIGNING_KEY` and `API_CONSUMERS`, when they are set (otherwise it keeps the
+   existing ones, and stops if there are none);
+4. copies `infra/redis-auth` into `redis-credentials`;
+5. applies the rendered environment, waits for the three rollouts and restarts the API when one of its Secrets
+   changed. The migrations are not run here: the backend pipeline ran them before it released the image.
 
 | Variable | Effect |
 | --- | --- |
-| `ENVIRONMENT` | `local` (default), `staging` or `production` |
-| `API_IMAGE` | an image already built and pushed (`registry/name:tag` or `name@sha256:…`): no local build |
-| `MIGRATIONS` | `run` (default); `skip`: the pipeline ran them in its own job; `only`: migrate, no rollout (the pipeline's migrate job) |
-| `MIGRATION_REDIS` | the Redis the migration invalidates (default `redis.infra.svc.cluster.local:6379`) |
-| `SEED_SAMPLE_DATA` | sample catalogue on an empty database (default `true`) |
+| `KUBE_CONTEXT` | the kubectl context (the GitLab agent's `<project>:<agent>`); default: the current context |
+| `BACKEND_DIR`, `FRONTEND_DIR` | local: the checkouts to build (default `../backend`, `../frontend`) |
+| `LOGS=off` | local: a patch that sets the gateway's `COLLECTOR_UPSTREAM` to `""`: its `collector.sh` then makes `/collect` answer 204 and drop the reports instead of proxying to a collector that is not there |
+| `SEED_SAMPLE_DATA` | local: sample catalogue on an empty database (default `true`) |
+| `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD`, `CI_REGISTRY` | staging, production: the registry credential (GitLab passes the group deploy token by itself) |
+| `API_SIGNING_KEY`, `API_CONSUMERS` | staging, production: files with the API's ES256 private key (PEM) and `consumers.json` |
 
-### `frontend/deploy/deploy.sh`
+### `deploy/scripts/validate.sh` and `deploy/scripts/smoke.sh`
 
-Locally: builds `frontend/` → `product-management/web:<tag>` (with `APP_VERSION=<tag>`, the release the browser
-reports with its errors) and `frontend/gateway/` → `product-management/gateway:<tag>`, publishes both, writes
-`frontend/deploy/k8s/.build/<env>/kustomization.yaml` with both images pinned, applies it and waits for both
-rollouts. Variables: `ENVIRONMENT`, `WEB_IMAGE` and `GATEWAY_IMAGE` (no local build), and `LOGS=off`, which adds a
-patch that sets the gateway's `COLLECTOR_UPSTREAM` to `""`: the gateway's `collector.sh` then makes `/collect` answer
-204 and drop the reports instead of proxying to a collector that is not there.
+`validate.sh` renders `environments/local`, `staging` and `production` and checks them (`kubeconform -strict`
+against the Kubernetes 1.34 schemas, the labels, the settings each must set, no Secret where there must be none),
+then `infra/` the same way; it never touches a cluster. `smoke.sh <base url>` checks a deployed environment from
+outside, through the gateway, retrying each step for up to a minute: `GET /healthz` 200, `GET /` 200 with the web
+app, and `POST /api/auth/token` with an unknown client, 401 `invalid_client` (the gateway reaches the API; the API's
+`/health/ready` is not routed through the gateway). With `SMOKE_CLIENT_ID` and `SMOKE_CLIENT_SECRET` (a viewer
+consumer) it also signs in and reads `GET /api/categories`. Both run on a laptop too:
+`deploy/scripts/smoke.sh http://localhost:8080`.
 
 **What a deploy does not do.** `kubectl apply` does not prune: an object removed from the manifests stays in the
 cluster until it is deleted by hand (`kubectl delete <kind> <name>`), in each environment. Locally the old
@@ -269,21 +296,22 @@ with `kubectl -n product-management get secrets` and `kubectl delete secret`.
 
 ## Image tags
 
-Each deploy script decides two things for local deployments (the pipelines tag images with the commit's short SHA
-and push them to the project's registry):
-
-* **The tag:** the commit's short hash (`git rev-parse --short HEAD`), plus `-dirty-<timestamp>` when the working tree
-  has uncommitted changes, so two different builds never share a tag.
-* **Where the image comes from:** on Docker Desktop (context `docker-desktop`) the cluster runs on the same Docker
-  engine that built the image, so nothing is pushed. Any other context pulls from a registry, so the script needs the
-  image references (`API_IMAGE`; `WEB_IMAGE` and `GATEWAY_IMAGE`), as the pipelines pass them, and stops with a
-  message when they are missing.
+* **Local:** `deploy.sh local` tags each image with its checkout's short commit hash (`git rev-parse --short HEAD`),
+  plus `-dirty-<timestamp>` when the working tree has uncommitted changes, so two different builds never share a tag.
+  On Docker Desktop (context `docker-desktop`) the cluster runs on the same Docker engine that built the images, so
+  nothing is pushed; that is why `local` runs only there.
+* **Staging and production:** the pipelines tag images with the commit's short SHA and push them to the project's
+  registry (`registry.gitlab.com/zeiss/backend/api`, `.../frontend/web`, `.../frontend/gateway`). The tag that runs is
+  the `newTag` in `deploy/environments/<env>/kustomization.yaml`, written by the app pipelines' release jobs; nothing
+  else decides it.
 
 ## Migrations run before the rollout, with the image being deployed
 
-`backend/deploy/deploy.sh` runs the API image being deployed once, with the argument `migrate`
+The API image being deployed runs once, with the argument `migrate`
 ([`ApiCommandLine.cs`](../../backend/ProductManagement.Api/Hosting/ApiCommandLine.cs)), as the schema owner, in a
-one-off pod in the namespace `product-management`:
+one-off pod in the namespace `product-management`. In staging and production the backend pipeline does it
+(`migrate:<env>`, [`backend/ci/migrate.sh`](../../backend/ci/migrate.sh)) before it releases the image; locally
+`deploy/scripts/deploy.sh local` does it before it applies:
 
 ```bash
 kubectl -n product-management run migrate-<tag> --rm --attach --restart=Never --quiet \
@@ -291,23 +319,23 @@ kubectl -n product-management run migrate-<tag> --rm --attach --restart=Never --
 #   DB_HOST, DB_PORT, DB_NAME, DB_USER   ← Secret database-credentials (host, port, database, migrator-user)
 #   PGPASSWORD                           ← Secret database-credentials (migrator-password)
 #   ConnectionStrings__ProductManagement = Host=$(DB_HOST);Port=$(DB_PORT);Database=$(DB_NAME);Username=$(DB_USER);GSS Encryption Mode=Disable
-#   ConnectionStrings__Redis = $MIGRATION_REDIS,  Redis__Password ← Secret redis-credentials (password)
+#   ConnectionStrings__Redis = redis.infra.svc.cluster.local:6379,  Redis__Password ← Secret redis-credentials (password)
 ```
 
 The kubelet assembles the connection string from the variables above it, so no password is on a command line or in
 a manifest. The pod runs as non-root, without a service account token, and in staging and production pulls the image
-with the registry Secret.
+with the Secret `gitlab-registry`.
 
 **Why a pod in the cluster.** The database is reachable only inside the cluster (its Service has no address outside
-it). `kubectl run --rm --attach` streams the migration's output into the deploy script's terminal (or the pipeline's
-job log), returns its exit code, so a failed migration stops the deployment before any API pod changes, and deletes
+it). `kubectl run --rm --attach` streams the migration's output into the script's terminal (or the pipeline's job log),
+returns its exit code, so a failed migration stops the release before any API pod changes, and deletes
 the pod when it ends: no Job manifest to keep, no port-forward, nothing left behind.
 
 The migration waits for PostgreSQL (up to 30 attempts, 2 s apart), applies the EF Core migrations, seeds the sample
 data into an empty database, and moves the Redis cache generations on (the data may have changed underneath the
-cache). Then it exits, and only then is the new API rolled out. In the backend's GitLab pipeline the same step is the
-`migrate:<environment>` job (`deploy/ci/deploy-environment.sh migrate`, which runs `deploy.sh` with
-`MIGRATIONS=only`).
+cache). Then it exits, and only then is the new image released: locally applied at once; in staging and production
+`release:<env>` writes its tag into the deploy repository, whose pipeline then rolls it out. The schema is therefore
+always at least as new as the code that runs.
 
 * **The code that migrates is exactly the code being deployed**, and it runs once per deployment, not once per pod.
   The API pods start with `ApplyMigrationsOnStartup=false` and read only `pm_app`'s password, which cannot change the
@@ -328,57 +356,82 @@ cache). Then it exits, and only then is the new API rolled out. In the backend's
 
 ## CI/CD pipelines
 
-One GitLab pipeline per repository (backend, frontend, deploy), the only CI/CD: it tests every merge request and
-delivers to staging and production. Every step it runs is a script in that repository that also runs on a laptop. The
-deploy jobs reach the clusters through the GitLab agent for Kubernetes (`KUBE_CONTEXT`), so no cluster API is exposed
-to the runners, or with a kubeconfig (a File variable `KUBECONFIG`) from a self-hosted runner next to the cluster.
-The staging and production jobs exist only once the environment is switched on (project or group variables
-`STAGING_ENABLED` / `PRODUCTION_ENABLED` = `true`); until then a pipeline on `main` stops, green, after scan (infra:
-after validate). The backend's and frontend's deploy jobs store the project's deploy token (`gitlab-deploy-token`,
-`read_registry`) as the Secret the pods pull the private images with (`imagePullSecrets` in the staging and production
-overlays).
+One GitLab pipeline per repository (backend, frontend, deploy), the only CI/CD. The flow is GitOps: the backend and
+frontend pipelines test, build and scan their images and *release* them by committing the new image tag to the deploy
+repository; they never apply anything to a cluster. The deploy repository's pipeline is the only one that changes the
+clusters: it applies what its `main` holds and smoke-checks it.
+
+```text
+backend   test → build → scan → migrate:staging → release:staging ──┐  commit "backend: api <sha>"
+frontend  test → build → scan ─────────────────→ release:staging ──┤  commit "frontend: web, gateway <sha>"
+                                                                    ▼
+deploy    main: environments/staging changed → deploy:staging → smoke:staging
+
+backend   migrate:production (manual) → release:production ──┐  merge request "Release api <sha> to production"
+frontend  release:production (manual) ───────────────────────┤  merge request "Release web, gateway <sha> to ..."
+                                                              ▼  (merged by a person)
+deploy    main: environments/production changed → deploy:production (manual) → smoke:production
+```
+
+Every step a pipeline runs is a script in that repository that also runs on a laptop. The jobs that touch a cluster
+(the backend's migrate jobs, the deploy repository's deploy and infra jobs) reach it through the GitLab agent for
+Kubernetes (`KUBE_CONTEXT`), so no cluster API is exposed to the runners, or with a kubeconfig (a File variable
+`KUBECONFIG`). The staging and production jobs exist only once the environment is switched on (project or group
+variables `STAGING_ENABLED` / `PRODUCTION_ENABLED` = `true`); until then a pipeline on `main` stops, green, after scan
+(deploy: after validate). The pods pull the private images with the Secret `gitlab-registry`, made from the zeiss
+group's deploy token `gitlab-deploy-token` (`read_registry`), which reads both registries.
 
 *Backend* ([`backend/.gitlab-ci.yml`](../../backend/.gitlab-ci.yml)):
 
 | Stage | Jobs | Runs on |
 | --- | --- | --- |
-| test | `test:backend` (`dotnet format --verify-no-changes`, Release build with warnings as errors, every test suite, the integration and acceptance tests with PostgreSQL and Redis from Testcontainers on Docker-in-Docker, JUnit), `test:manifests` (`deploy/ci/validate-manifests.sh` in the `alpine/k8s` image: render, `kubeconform -strict` against the Kubernetes 1.34 schemas, the settings each overlay must set, no Secret where there must be none), GitLab SAST and secret detection | merge requests, `main`, tags |
+| test | `test:backend` (`dotnet format --verify-no-changes`, Release build with warnings as errors, every test suite, the integration and acceptance tests with PostgreSQL and Redis from Testcontainers on Docker-in-Docker, JUnit), GitLab SAST and secret detection | merge requests, `main`, tags |
 | build | `build:api` → `$CI_REGISTRY_IMAGE/api:<short sha>`; `migrations:sql` (`dotnet restore`, then the idempotent SQL of every migration, for review in the merge request) | merge requests, `main`, tags |
 | scan | `scan:api`: Trivy, fails on fixable critical vulnerabilities | merge requests, `main`, tags |
-| staging | `migrate:staging` (`deploy/ci/deploy-environment.sh migrate` in the `alpine/k8s` image: selects the cluster, the Secret `gitlab-registry-backend` from the deploy token, then the migration pod with the release's image, as `pm_migrator`) → `deploy:staging` (`deploy/ci/deploy-environment.sh deploy`: the same, plus `api-secrets` from CI/CD variables, then `deploy/deploy.sh` with the pipeline's image and `MIGRATIONS=skip`; restarts the API when `api-secrets` changed) | `main` with `STAGING_ENABLED`, automatic |
-| verify | `verify:requirements` (`python3 scripts/check-requirements.py` against `STAGING_URL`) | `main` with `STAGING_ENABLED` |
-| production | `migrate:production` (**manual**, protected environment) → `deploy:production` | `main` with `STAGING_ENABLED` and `PRODUCTION_ENABLED` |
+| staging | `migrate:staging` (`ci/migrate.sh` in the `alpine/k8s` image: selects the cluster, the Secret `gitlab-registry` from the deploy token, `redis-credentials`, then the migration pod with the release's image, as `pm_migrator`) → `release:staging` (`ci/release.sh staging`: commits the new `api` tag to `environments/staging/kustomization.yaml` on the deploy repository's `main`, with `DEPLOY_REPO_TOKEN`; starts again from the new `main` if it moved meanwhile) | `main` with `STAGING_ENABLED`, automatic |
+| production | `migrate:production` (**manual**, protected environment) → `release:production` (pushes a branch to the deploy repository and opens the merge request "Release api <sha> to production") | `main` with `STAGING_ENABLED` and `PRODUCTION_ENABLED` |
 
 *Frontend* ([`frontend/.gitlab-ci.yml`](../../frontend/.gitlab-ci.yml)):
 
 | Stage | Jobs | Runs on |
 | --- | --- | --- |
-| test | `test:frontend` (`npm run lint`, `format:check`, `test:ci`, `build`), `test:manifests` (the same checks on the web and gateway overlays), SAST and secret detection | merge requests, `main`, tags |
+| test | `test:frontend` (`npm run lint`, `format:check`, `test:ci`, `build`), SAST and secret detection | merge requests, `main`, tags |
 | build | `build:web`, `build:gateway` → `$CI_REGISTRY_IMAGE/{web,gateway}:<short sha>` | merge requests, `main`, tags |
 | scan | `scan:web`, `scan:gateway` (Trivy) | merge requests, `main`, tags |
-| staging | `deploy:staging` (`deploy/ci/deploy-environment.sh`: selects the cluster, the Secret `gitlab-registry-frontend` from the deploy token, then `deploy/deploy.sh` with the pipeline's images) | `main` with `STAGING_ENABLED`, automatic |
-| verify | `verify:e2e` (Playwright, desktop and phone, against `STAGING_URL`; the browser-errors test is skipped, it reads Loki through a port-forward) | `main` with `STAGING_ENABLED` |
-| production | `deploy:production` (**manual**, protected environment) | `main` with `STAGING_ENABLED` and `PRODUCTION_ENABLED` |
+| staging | `release:staging` (`ci/release.sh staging`: commits the new `web` and `gateway` tags to the deploy repository) | `main` with `STAGING_ENABLED`, automatic |
+| production | `release:production` (**manual**, protected environment: opens the merge request in the deploy repository) | `main` with `STAGING_ENABLED` and `PRODUCTION_ENABLED` |
 
-*Infra* ([`infra/.gitlab-ci.yml`](../../infra/.gitlab-ci.yml)):
+The end-to-end tests (Playwright, `frontend/e2e/`) are not a pipeline job: they need the whole running system. Run
+them by hand against an environment (`BASE_URL=<environment url> npm run e2e`, [`frontend/README.md`](../../frontend/README.md)).
+
+*Deploy* ([`deploy/.gitlab-ci.yml`](../../deploy/.gitlab-ci.yml)):
 
 | Stage | Jobs | Runs on |
 | --- | --- | --- |
-| validate | `validate:manifests` (`kubeconform -strict` on `postgres.yaml`, `redis.yaml`, `logs.yaml` and on the dashboards' ConfigMap as `infra.sh` renders it; `jq` on every dashboard; extracts the inline Alloy configuration), `validate:scripts` (`shellcheck` on `infra.sh`, `create-database.sh`, `add-node.sh`), `validate:alloy` (`alloy validate` and `alloy fmt` on that configuration) | merge requests, `main` |
-| deploy | `deploy:staging`, `deploy:production` (**both manual**): select the cluster (`KUBE_CONTEXT` or `KUBECONFIG`) and run `./infra.sh up`; with the environment-scoped `LOKI_URL` (and `LOKI_USERNAME` / `LOKI_PASSWORD`) Alloy pushes to that Loki | `main` with `STAGING_ENABLED` / `PRODUCTION_ENABLED` |
+| validate | `validate:manifests` (`scripts/validate.sh`: every environment and `infra/`; extracts the inline Alloy configuration), `validate:scripts` (`shellcheck` on `scripts/*.sh`), `validate:alloy` (`alloy validate` and `alloy fmt` on that configuration) | merge requests, `main` |
+| staging | `deploy:staging` (`scripts/deploy.sh staging apps`) → `smoke:staging` (`scripts/smoke.sh $STAGING_URL`), automatic when a commit changes `environments/staging`, `apps/`, `infra/` or `scripts/deploy.sh`; `infra:staging` (**manual**, `scripts/deploy.sh staging infra`) | `main` with `STAGING_ENABLED` |
+| production | `deploy:production` (**manual**, protected environment) → `smoke:production`, when a commit changes `environments/production`, `apps/` or `scripts/deploy.sh`; `infra:production` (**manual**) | `main` with `PRODUCTION_ENABLED` |
 
-The infra pipeline never creates a database: `create-database.sh` is a separate, deliberate step, once per service
-and environment, run by an operator with access to the cluster.
+With the environment-scoped `LOKI_URL` (and `LOKI_USERNAME` / `LOKI_PASSWORD`) the infra jobs make Alloy push to that
+Loki. No pipeline creates a database: `create-database.sh` is a separate, deliberate step, once per service and
+environment, run by an operator with access to the cluster.
 
-Runners: every job of the three pipelines runs on gitlab.com's shared runners. None needs to reach the database:
-the migrations run inside the cluster, and the jobs reach the cluster only through `kubectl`. The pipelines run on
+**Releases and rollbacks are commits.** `git log environments/staging` in the deploy repository is staging's
+deployment history (one commit per release: "backend: api <sha>"); production changes only through merged merge
+requests, so merging is the release decision. A rollback is `git revert` of the release commit (or the merge) on the
+deploy repository's `main`: its pipeline applies the previous tags. Migrations are never rolled back (expand/contract,
+below).
+
+Runners: every job of the three pipelines runs on gitlab.com's shared runners. None needs to reach the database: the
+migrations run inside the cluster, and the jobs reach the cluster only through `kubectl`. The pipelines run on
 gitlab.com; the staging and production jobs have not yet run against real clusters. Setting them up (the agent or a
-kubeconfig, environments, every variable per project, or one machine of our own) is [chapter 12](12-from-zero.md).
+kubeconfig, environments, every variable per project, the tokens, or one machine of our own) is
+[chapter 12](12-from-zero.md).
 
 ## Day-2 operations
 
-All commands run from the folder that holds the three repositories (`backend/`, `frontend/`, `infra/`) and assume
-`kubectl config use-context docker-desktop`.
+All commands run from the folder that holds the three repositories (`backend/`, `frontend/`, `deploy/`) and the local
+`tools/`, and assume `kubectl config use-context docker-desktop`.
 
 **See what is running**
 
@@ -387,7 +440,7 @@ kubectl -n product-management get pods -o wide
 kubectl -n product-management get hpa
 kubectl -n product-management top pods                       # needs metrics-server
 kubectl -n product-management get events --sort-by=.lastTimestamp | tail -20
-infra/infra.sh status                                        # the shared infrastructure: pods, Services, PVCs
+deploy/scripts/infra.sh status                               # the shared infrastructure: pods, Services, PVCs
 ```
 
 **Reach the shared infrastructure from a laptop.** Nothing in `infra` is published outside the cluster; only the
@@ -410,24 +463,31 @@ kubectl -n infra logs statefulset/postgres --tail 50                            
 kubectl -n infra logs deployment/redis --tail 50
 ```
 
-**Roll out a change.** Run the part's script again; it applies what changed:
+**Roll out a change.** Locally, run the script again; it applies what changed:
 
 ```bash
-backend/deploy/deploy.sh          # after changing the API or its configuration (deployment.yaml, api.yaml)
-frontend/deploy/deploy.sh         # after changing the web app, the gateway or gateway.yaml
-infra/infra.sh up postgres        # after changing postgres.yaml (postgresql.conf): then the reload or restart it prints
-infra/infra.sh up redis           # after changing redis.yaml (restarts Redis: the cache starts empty)
-infra/infra.sh up logs            # after changing logs.yaml or a dashboard
-kubectl kustomize backend/deploy/k8s/overlays/local | less          # what would be applied
+deploy/scripts/deploy.sh local            # after changing the API, the web app, the gateway or their manifests
+deploy/scripts/infra.sh up postgres       # after changing postgres.yaml (postgresql.conf): then the reload or restart it prints
+deploy/scripts/infra.sh up redis          # after changing redis.yaml (restarts Redis: the cache starts empty)
+deploy/scripts/infra.sh up logs           # after changing logs.yaml or a dashboard
+kubectl diff -k deploy/environments/local                    # what differs from the last deploy (nothing, after one)
 kubectl -n product-management rollout status deployment/api
 ```
 
-**Change a setting.** Edit the env entry in `backend/deploy/k8s/base/deployment.yaml` (every environment) or in
-`backend/deploy/k8s/overlays/<env>/api.yaml` (one environment), then deploy. To try a value without a deploy,
+In staging and production a change is a commit: code goes through the app pipelines' release jobs, a manifest or
+setting through a merge request in the deploy repository, whose pipeline applies it (`infra/` through the manual
+`infra:<env>` jobs).
+
+**Change a setting.** Edit the env entry in `deploy/apps/backend/deployment.yaml` (every environment) or in
+`deploy/environments/<env>/api.yaml` (one environment), then deploy (locally `deploy.sh local`; elsewhere merge it
+into the deploy repository's `main`). To try a value without a deploy,
 `kubectl -n product-management set env deployment/api RateLimiting__RequestsPerSecond=100` rolls the pods with it;
 the next deploy puts the file's value back.
 
-**Roll back** (each Deployment keeps 5 old ReplicaSets, each with its own image and configuration):
+**Roll back.** In staging and production, revert in the deploy repository: `git revert <release commit>` (or the
+production merge commit) on `main`, through a merge request or directly; the pipeline applies the previous tags and
+smoke-checks them, and the repository still says what runs. Locally, or in an emergency before the revert lands (each
+Deployment keeps 5 old ReplicaSets, each with its own image and configuration):
 
 ```bash
 kubectl -n product-management rollout history deployment/api
@@ -436,22 +496,20 @@ kubectl -n product-management rollout undo deployment/gateway
 ```
 
 A rollback does not undo database migrations; that is why migrations must stay compatible with the previous version.
-In staging and production, roll back from GitLab instead: Operate → Environments → the environment → re-deploy an
-earlier successful deployment, which re-runs that pipeline's deploy job with its images and manifests (and the
-current Secrets).
+A `rollout undo` in staging or production lasts only until the next deploy job applies `main` again, so follow it
+with the revert.
 
 **Rotate a secret.** Secrets are read when a pod starts, so every rotation ends with a restart of the pods that read
 it.
 
-* *The API's own keys* (`API_SIGNING_KEY`, `API_CONSUMERS`), staging and production: change the GitLab variable and
-  re-run the backend's last deploy job. `create-secrets.sh` updates `api-secrets` and prints `api-secrets` when the
-  content changed; `deploy-environment.sh` then runs `kubectl rollout restart deployment/api`. Locally:
-  `FORCE=1 backend/deploy/local-secrets.sh` (a new signing key and consumer hashes: everyone signs in again), then
-  `backend/deploy/deploy.sh`.
+* *The API's own keys* (`API_SIGNING_KEY`, `API_CONSUMERS`), staging and production: change the deploy project's
+  CI/CD variable and re-run its last `deploy:<env>` job. `deploy.sh` updates `api-secrets` and, as its content
+  changed, runs `kubectl rollout restart deployment/api`. Locally: `FORCE=1 deploy/scripts/local-secrets.sh` (a new
+  signing key and consumer hashes: everyone signs in again), then `deploy/scripts/deploy.sh local`.
 * *The database users' passwords* (any environment, from a machine with access to the cluster):
 
   ```bash
-  infra/create-database.sh product-management product_management pm_app pm_migrator --rotate
+  deploy/scripts/create-database.sh product-management product_management pm_app pm_migrator --rotate
   kubectl -n product-management rollout restart deployment/api
   ```
 
@@ -462,17 +520,17 @@ it.
 
   ```bash
   kubectl -n infra delete secret redis-auth
-  infra/infra.sh up redis      # a new redis-auth, and restarts Redis with it (the cache starts empty)
-  backend/deploy/deploy.sh     # copies it into redis-credentials and, as it changed, restarts the API
-                               # (pipeline: re-run the migrate job, which copies it and restarts the API)
+  deploy/scripts/infra.sh up redis     # a new redis-auth, and restarts Redis with it (the cache starts empty)
+  deploy/scripts/deploy.sh local       # copies it into redis-credentials and, as it changed, restarts the API
+                                       # (staging, production: re-run the deploy repository's deploy:<env> job)
   ```
 
   Between the Redis restart and the API's, the API cannot reach Redis: the cache and the shared rate limits fall
   back, and idempotent writes answer 503 ([chapter 12](12-from-zero.md#rotate-secrets) has the order for production).
 
 **Scale.** The HPAs own the replica counts, so `kubectl scale` is undone within seconds. Change the range instead
-(for good: in `backend/deploy/k8s/base/hpa.yaml`, or `minReplicas`/`maxReplicas` of the gateway's HPA in
-`frontend/deploy/k8s/base/gateway.yaml`):
+(for good: in `deploy/apps/backend/hpa.yaml`, or `minReplicas`/`maxReplicas` of the gateway's HPA in
+`deploy/apps/frontend/gateway.yaml`):
 
 ```bash
 kubectl -n product-management patch hpa api -p '{"spec":{"minReplicas":4,"maxReplicas":8}}'
@@ -482,17 +540,18 @@ kubectl -n product-management get hpa api -w
 Keep `maxReplicas × (10 + 1)` connections (the request pool plus the readiness check's own connection) within what
 PostgreSQL can serve: 8 × 11 = 88 of its 200, which other services' databases on the same server share
 ([chapter 6](06-scaling-and-capacity.md#why-the-database-is-the-ceiling)). More machines for the pods: on k3s,
-`infra/add-node.sh <user@host> apps` ([chapter 12](12-from-zero.md)).
+`deploy/scripts/add-node.sh <user@host> apps` ([chapter 12](12-from-zero.md)).
 
-**Swagger UI** (enabled in the local and staging overlays)
+**Swagger UI** (enabled in the local and staging environments)
 
 ```bash
 kubectl -n product-management port-forward deployment/api 5080:8080   # http://localhost:5080/swagger, then Authorize with a token
 ```
 
-**Database users.** `infra/create-database.sh` is idempotent: run it again after a restore, or when in doubt, and it
+**Database users.** `deploy/scripts/create-database.sh` is idempotent: run it again after a restore, or when in doubt, and it
 re-applies the users' passwords from the Secret, their guard rails and the schema's ownership. The app user's rights on
-the tables come from the migrations: `backend/deploy/deploy.sh` re-applies them on an empty database.
+the tables come from the migrations: `deploy/scripts/deploy.sh local` (or the backend's `migrate:<env>` job)
+re-applies them on an empty database.
 
 **Backups and restores.** The CronJob `postgres-backup` dumps every database each night at 02:30 into the PVC
 `postgres-backups` (`/backups/<date-time>/globals.sql` and `<database>.dump`), keeping 7 days. The dumps sit on the
@@ -541,89 +600,93 @@ kubectl -n product-management delete hpa api && kubectl -n product-management sc
 kubectl -n infra exec postgres-restore -- \
   pg_restore -d product_management --clean --if-exists /backups/<date-time>/product_management.dump
 kubectl -n infra delete pod postgres-restore
-infra/create-database.sh product-management product_management pm_app pm_migrator   # ownership and passwords
-backend/deploy/deploy.sh                    # the migration moves the cache generations on; the HPA is back
+deploy/scripts/create-database.sh product-management product_management pm_app pm_migrator   # ownership and passwords
+deploy/scripts/deploy.sh local              # the migration moves the cache generations on; the HPA is back
 kubectl -n product-management scale deployment/api --replicas=2
 ```
 
 Restoring into a new database first (`pg_restore -d <new database>` after `CREATE DATABASE`) leaves the current one
-untouched until the dump has been checked, e.g. with `PG_DATABASE=<new database> backend/load-tests/verify-data.sh`.
+untouched until the dump has been checked, e.g. with `PG_DATABASE=<new database> tools/load-tests/verify-data.sh`.
 
 **Reset the data.** One service's database (the others on the server stay):
 
 ```bash
 kubectl -n infra exec statefulset/postgres -- psql -U postgres -c 'DROP DATABASE product_management WITH (FORCE)'
-infra/create-database.sh product-management product_management pm_app pm_migrator   # empty database, same users
-backend/deploy/deploy.sh                    # the migrations re-create the schema and the sample data
+deploy/scripts/create-database.sh product-management product_management pm_app pm_migrator   # empty database, same users
+deploy/scripts/deploy.sh local              # the migrations re-create the schema and the sample data
 ```
 
 Everything in PostgreSQL, including its backups and the administrator's password:
 
 ```bash
-infra/infra.sh down postgres --delete-data
-infra/infra.sh up postgres
-infra/create-database.sh product-management product_management pm_app pm_migrator
-backend/deploy/deploy.sh
+deploy/scripts/infra.sh down postgres --delete-data
+deploy/scripts/infra.sh up postgres
+deploy/scripts/create-database.sh product-management product_management pm_app pm_migrator
+deploy/scripts/deploy.sh local
 ```
 
 **Bulk data and load tests**
 
 ```bash
-backend/load-tests/seed-bulk.sh                   # adds 850,000 products and ~5 million movements (minutes)
-PRODUCTS=0 LEDGER_ROWS=20000000 backend/load-tests/seed-bulk.sh   # grows the ledger to 20 million rows (~20 minutes)
-backend/load-tests/verify-data.sh                 # data invariants, all must be 0
-backend/load-tests/run.sh smoke                   # any scenario: smoke, load, stress, spike, stock-consistency, rate-limit, teams, browse
+tools/load-tests/seed-bulk.sh                     # adds 850,000 products and ~5 million movements (minutes)
+PRODUCTS=0 LEDGER_ROWS=20000000 tools/load-tests/seed-bulk.sh   # grows the ledger to 20 million rows (~20 minutes)
+tools/load-tests/verify-data.sh                   # data invariants, all must be 0
+tools/load-tests/run.sh smoke                     # any scenario: smoke, load, stress, spike, stock-consistency, rate-limit, teams, browse
 ```
 
 The data scripts reach PostgreSQL with `kubectl -n infra exec -i statefulset/postgres -- psql -U postgres` and Redis
 with `kubectl -n infra exec -i deployment/redis -- redis-cli` (override with `PSQL`, `REDIS_CLI`, `PG_USER`,
 `PG_DATABASE`). `run.sh` raises the API's rate limits (and, for some scenarios, the gateway's) with `kubectl set env`
 for the run, after saving the deployed values, and always sets those values back at the end. The autoscalers need
-metrics-server, which `infra/infra.sh up` installs where it is missing.
+metrics-server, which `deploy/scripts/infra.sh up` installs where it is missing. The load tests and
+`tools/check-requirements.py` are local tools, in no GitLab repository and no pipeline.
 
 **Troubleshooting**
 
 | Symptom | Look at |
 | --- | --- |
-| API pods not ready | `kubectl -n product-management describe pod -l app.kubernetes.io/name=api`, then `kubectl -n product-management logs deployment/api`; readiness includes the database (`SELECT 1`), so check it: `infra/infra.sh status`, `kubectl -n infra logs statefulset/postgres --tail 50` |
-| `deploy.sh` stops: "No Secret database-credentials" | the database was not created in this cluster: `infra/create-database.sh product-management product_management pm_app pm_migrator` |
-| `deploy.sh` stops: "No Secret infra/redis-auth" | the shared Redis is not running: `infra/infra.sh up redis` |
+| API pods not ready | `kubectl -n product-management describe pod -l app.kubernetes.io/name=api`, then `kubectl -n product-management logs deployment/api`; readiness includes the database (`SELECT 1`), so check it: `deploy/scripts/infra.sh status`, `kubectl -n infra logs statefulset/postgres --tail 50` |
+| `deploy.sh` stops: "No Secret database-credentials" | the database was not created in this cluster: `deploy/scripts/create-database.sh product-management product_management pm_app pm_migrator` |
+| `deploy.sh` stops: "No Secret infra/redis-auth" | the shared Redis is not running: `deploy/scripts/infra.sh up redis` (or the `infra:<env>` job) |
+| `deploy.sh` stops: "images that were never released (newTag: unreleased)" | an app has not been released to that environment yet: run the backend and frontend pipelines on `main` (staging), or merge their release merge requests (production) |
+| `deploy.sh` stops: "No Secret gitlab-registry" or "No Secret api-secrets" | the deploy project's variables: the group deploy token `gitlab-deploy-token`, `API_SIGNING_KEY` / `API_CONSUMERS` for that environment ([chapter 12](12-from-zero.md)) |
+| `release:*` job fails to push | `DEPLOY_REPO_TOKEN` in that app project: a project access token of `zeiss/deploy`, Maintainer, `write_repository`, protected and masked (so only protected branches see it) |
 | The API cannot reach the database or Redis | the connection strings it runs with: `kubectl -n product-management get deployment api -o jsonpath='{.spec.template.spec.containers[0].env}'`; whether the Services answer: `kubectl -n product-management run nettest --rm -it --restart=Never --image=busybox:1.37 -- nc -zv postgres.infra.svc.cluster.local 5432` (and `redis.infra.svc.cluster.local 6379`) |
-| Password authentication failed | the users' passwords no longer match `database-credentials` (e.g. after `down postgres --delete-data`): `infra/create-database.sh …` again (it sets the Secret's passwords on the users), then `kubectl -n product-management rollout restart deployment/api`. Redis `WRONGPASS`: `backend/deploy/deploy.sh` copies `redis-auth` again, then restart the API |
-| Migration step fails | its output in the deploy script's terminal (or the `migrate:*` job log); the pod is gone afterwards. A pod that never starts: `kubectl -n product-management get events --sort-by=.lastTimestamp` (image pull, missing Secret) |
+| Password authentication failed | the users' passwords no longer match `database-credentials` (e.g. after `down postgres --delete-data`): `deploy/scripts/create-database.sh …` again (it sets the Secret's passwords on the users), then `kubectl -n product-management rollout restart deployment/api`. Redis `WRONGPASS`: `deploy/scripts/deploy.sh <env>` copies `redis-auth` again and restarts the API |
+| Migration step fails | its output in `deploy.sh local`'s terminal (or the backend's `migrate:*` job log); nothing is released; the pod is gone afterwards. A pod that never starts: `kubectl -n product-management get events --sort-by=.lastTimestamp` (image pull, missing Secret) |
 | `postgres-0` Pending | `kubectl -n infra describe pod postgres-0`: its volume lives on one node, so the pod can only start there (the node is down, or tainted for another role) |
 | `502` on `/api` | no ready API pod: `kubectl -n product-management get endpointslices -l kubernetes.io/service-name=api` |
-| `502` on `/collect` in the browser console | no log collector: `infra/infra.sh up logs`, or deploy the frontend with `LOGS=off` |
-| `ImagePullBackOff` | outside Docker Desktop, the image must be in a registry the cluster can pull from: the `API_IMAGE` / `WEB_IMAGE` / `GATEWAY_IMAGE` given to the deploy script, and the cluster's pull credentials |
-| HPA shows `<unknown>` | metrics-server: `infra/infra.sh up` installs it where missing, then `kubectl top pods` |
+| `502` on `/collect` in the browser console | no log collector: `deploy/scripts/infra.sh up logs`, or deploy with `LOGS=off` |
+| `ImagePullBackOff` | staging, production: the tag in `deploy/environments/<env>/kustomization.yaml` must exist in the registry, and the Secret `gitlab-registry` must hold the group deploy token (`read_registry`) |
+| `smoke:*` fails | its log says which step: `/healthz` (gateway, Ingress, TLS), `/` (web), the `invalid_client` 401 (the API behind the gateway), the signed-in read (`SMOKE_CLIENT_ID` / `SMOKE_CLIENT_SECRET`, the database). Run `deploy/scripts/smoke.sh <url>` from a laptop to repeat it |
+| HPA shows `<unknown>` | metrics-server: `deploy/scripts/infra.sh up` installs it where missing, then `kubectl top pods` |
 
 ## Where to look
 
-* Deploy scripts: [`infra/infra.sh`](../../infra/infra.sh), [`infra/create-database.sh`](../../infra/create-database.sh),
-  [`infra/add-node.sh`](../../infra/add-node.sh), [`backend/deploy/deploy.sh`](../../backend/deploy/deploy.sh),
-  [`backend/deploy/local-secrets.sh`](../../backend/deploy/local-secrets.sh),
-  [`frontend/deploy/deploy.sh`](../../frontend/deploy/deploy.sh)
-* Backend manifests: [`backend/deploy/k8s/base`](../../backend/deploy/k8s/base)
-  ([`deployment.yaml`](../../backend/deploy/k8s/base/deployment.yaml), [`service.yaml`](../../backend/deploy/k8s/base/service.yaml)),
-  the overlays [`local`](../../backend/deploy/k8s/overlays/local/kustomization.yaml),
-  [`staging`](../../backend/deploy/k8s/overlays/staging/api.yaml),
-  [`production`](../../backend/deploy/k8s/overlays/production/api.yaml)
-* Frontend manifests: [`frontend/deploy/k8s/base`](../../frontend/deploy/k8s/base), the overlays
-  [`local`](../../frontend/deploy/k8s/overlays/local/gateway.yaml),
-  [`staging`](../../frontend/deploy/k8s/overlays/staging/kustomization.yaml),
-  [`production`](../../frontend/deploy/k8s/overlays/production/kustomization.yaml);
+* Deploy scripts: [`deploy/scripts/deploy.sh`](../../deploy/scripts/deploy.sh),
+  [`infra.sh`](../../deploy/scripts/infra.sh), [`create-database.sh`](../../deploy/scripts/create-database.sh),
+  [`add-node.sh`](../../deploy/scripts/add-node.sh), [`local-secrets.sh`](../../deploy/scripts/local-secrets.sh),
+  [`validate.sh`](../../deploy/scripts/validate.sh), [`smoke.sh`](../../deploy/scripts/smoke.sh)
+* Application manifests: [`deploy/apps/backend`](../../deploy/apps/backend)
+  ([`deployment.yaml`](../../deploy/apps/backend/deployment.yaml), [`service.yaml`](../../deploy/apps/backend/service.yaml)),
+  [`deploy/apps/frontend`](../../deploy/apps/frontend); the environments
+  [`local`](../../deploy/environments/local/kustomization.yaml),
+  [`staging`](../../deploy/environments/staging/kustomization.yaml) ([`api.yaml`](../../deploy/environments/staging/api.yaml)),
+  [`production`](../../deploy/environments/production/kustomization.yaml);
   [`gateway/collector.sh`](../../frontend/gateway/collector.sh)
-* Shared infrastructure: [`infra/postgres.yaml`](../../infra/postgres.yaml), [`infra/redis.yaml`](../../infra/redis.yaml),
-  [`infra/logs.yaml`](../../infra/logs.yaml), [`infra/dashboards`](../../infra/dashboards)
+* Shared infrastructure: [`deploy/infra/postgres.yaml`](../../deploy/infra/postgres.yaml),
+  [`redis.yaml`](../../deploy/infra/redis.yaml), [`logs.yaml`](../../deploy/infra/logs.yaml),
+  [`dashboards`](../../deploy/infra/dashboards)
 * Migrations: [`ApiCommandLine.cs`](../../backend/ProductManagement.Api/Hosting/ApiCommandLine.cs),
   [`DatabaseInitializer.cs`](../../backend/ProductManagement.Infrastructure/Persistence/DatabaseInitializer.cs),
   [`Persistence/Migrations`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations)
-  (the app user's rights: [`GrantAppPermissions`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs))
+  (the app user's rights: [`GrantAppPermissions`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs)),
+  [`backend/ci/migrate.sh`](../../backend/ci/migrate.sh)
 * CI/CD: [`backend/.gitlab-ci.yml`](../../backend/.gitlab-ci.yml), [`frontend/.gitlab-ci.yml`](../../frontend/.gitlab-ci.yml),
-  [`infra/.gitlab-ci.yml`](../../infra/.gitlab-ci.yml), [`backend/deploy/ci`](../../backend/deploy/ci),
-  [`frontend/deploy/ci`](../../frontend/deploy/ci)
-* Each part on its own: [`backend/README.md`](../../backend/README.md), [`frontend/README.md`](../../frontend/README.md),
-  [`infra/README.md`](../../infra/README.md)
+  [`deploy/.gitlab-ci.yml`](../../deploy/.gitlab-ci.yml); the release script
+  [`backend/ci/release.sh`](../../backend/ci/release.sh) (the same in [`frontend/ci`](../../frontend/ci/release.sh))
+* Each repository on its own: [`backend/README.md`](../../backend/README.md), [`frontend/README.md`](../../frontend/README.md),
+  [`deploy/README.md`](../../deploy/README.md)
 * Decisions: [ADR 0021 deployment layout](../adr/0021-deployment-layout.md) (which supersedes most of
   [ADR 0011](../adr/0011-kubernetes-deployment.md)), [ADR 0006 PostgreSQL](../adr/0006-postgresql.md)
 * Diagrams: [flows.md §9 deployment and CI/CD](../flows.md#9-deployment-and-cicd),
@@ -632,9 +695,9 @@ metrics-server, which `infra/infra.sh up` installs where it is missing.
 ## How to verify
 
 ```bash
-infra/infra.sh up && infra/create-database.sh product-management product_management pm_app pm_migrator \
-  && backend/deploy/deploy.sh && frontend/deploy/deploy.sh
-infra/infra.sh status
+deploy/scripts/deploy.sh local all             # infra, the database (first run), images, migrations, apply
+deploy/scripts/infra.sh status
+kubectl diff -k deploy/environments/local && echo "no drift"
 kubectl -n infra get statefulset,deployment,cronjob,pvc
 kubectl -n product-management get deploy,svc,hpa,pdb,networkpolicy,secret
 kubectl -n product-management get svc api -o jsonpath='{.spec.clusterIP}'; echo      # None: headless
@@ -648,13 +711,13 @@ kubectl -n product-management get secret database-credentials -o go-template='{{
   | kubectl -n infra exec -i statefulset/postgres -- sh -c 'PGPASSWORD="$(cat)" psql -h localhost -U pm_app -d product_management \
       -c "BEGIN" -c "DROP TABLE products" -c "ROLLBACK"'          # ERROR: must be owner of table products
 
-# Every overlay renders and is valid (what CI runs)
-docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 backend/deploy/ci/validate-manifests.sh
-docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 frontend/deploy/ci/validate-manifests.sh
-docker run --rm -v "$PWD/infra:/work:ro" -w /work alpine/k8s:1.34.11 \
-  kubeconform -strict -summary -kubernetes-version 1.34.0 postgres.yaml redis.yaml logs.yaml
+# Every environment and infra/ render and are valid (what the deploy pipeline's validate job runs)
+docker run --rm -v "$PWD/deploy:/work:ro" -w /work alpine/k8s:1.34.11 scripts/validate.sh
+
+# The smoke check the pipeline runs after a deployment, here against the local one
+deploy/scripts/smoke.sh http://localhost:8080
 
 # Without logs: /collect answers 204
-infra/infra.sh down logs && LOGS=off frontend/deploy/deploy.sh
+deploy/scripts/infra.sh down logs && LOGS=off deploy/scripts/deploy.sh local
 curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/collect -H 'Content-Type: application/json' -d '{}'   # 204
 ```

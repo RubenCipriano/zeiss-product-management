@@ -71,7 +71,7 @@ Two log formats are parsed so they can be filtered without reading every line:
 
 The API logs writes (product created, updated, deleted, stock adjusted), warnings and errors; reads that succeed write
 nothing, so for them the gateway line is the whole story. PostgreSQL logs statements slower than 250 ms, lock waits
-longer than 1 s, checkpoints and errors (the `postgresql.conf` in [`infra/postgres.yaml`](../../infra/postgres.yaml)).
+longer than 1 s, checkpoints and errors (the `postgresql.conf` in [`deploy/infra/postgres.yaml`](../../deploy/infra/postgres.yaml)).
 
 ## Where the logs live, and for how long
 
@@ -85,7 +85,7 @@ application's pods or in the browser; the collector only forwards.
 | PostgreSQL, Redis, Loki, Grafana, the nightly backup | the same Alloy, through the Kubernetes API | `{namespace="infra", app="postgres"}` (or `"redis"`, `"loki"`, `"grafana"`, `"postgres-backup"`) |
 
 Loki keeps its data on the PersistentVolumeClaim `data-loki-0` (10 GiB, mounted at `/loki`: chunks, index, compactor
-state). Its configuration is the ConfigMap `loki-config` in [`infra/logs.yaml`](../../infra/logs.yaml): the image's
+state). Its configuration is the ConfigMap `loki-config` in [`deploy/infra/logs.yaml`](../../deploy/infra/logs.yaml): the image's
 default single-process configuration plus **retention of 14 days** (`limits_config.retention_period: 336h`). Loki's
 compactor looks for older data every 10 minutes and deletes it two hours after marking it. Without that setting Loki
 keeps everything until the disk is full. Fourteen days covers "what happened last week" and keeps the volume bounded; the
@@ -100,8 +100,8 @@ curl -s localhost:3100/config | grep -E 'retention_period|retention_enabled'
 
 ## Why the logs run in the cluster
 
-Loki, Grafana and Alloy are the infra's `logs` component: `infra/infra.sh up logs` applies
-[`infra/logs.yaml`](../../infra/logs.yaml) to the current `kubectl` context, in the shared namespace `infra`, next to
+Loki, Grafana and Alloy are the infra's `logs` component: `deploy/scripts/infra.sh up logs` applies
+[`deploy/infra/logs.yaml`](../../deploy/infra/logs.yaml) to the current `kubectl` context, in the shared namespace `infra`, next to
 PostgreSQL and Redis:
 
 | Workload | What | Data |
@@ -120,16 +120,16 @@ nothing for 15 minutes" is evaluated by the same cluster that may be failing. Fo
 right trade; in production the logs can go to a Loki outside the cluster (another cluster, or Grafana Cloud) with one
 setting, `LOKI_URL` ([below](#what-changes-in-production)).
 
-**The logs are optional.** Without the `logs` component (`infra/infra.sh up postgres redis`, or
-`infra/infra.sh down logs` later, which keeps Loki's volume unless given `--delete-data`) the application works the
-same: the pods still write to stdout (`kubectl -n product-management logs deployment/api`), and the frontend is
+**The logs are optional.** Without the `logs` component (`deploy/scripts/infra.sh up postgres redis`, or
+`deploy/scripts/infra.sh down logs` later, which keeps Loki's volume unless given `--delete-data`) the application works the
+same: the pods still write to stdout (`kubectl -n product-management logs deployment/api`), and the application is
 deployed with
-`LOGS=off frontend/deploy/deploy.sh`, so the gateway answers the browser's `POST /collect` with 204 and drops the
+`LOGS=off deploy/scripts/deploy.sh local`, so the gateway answers the browser's `POST /collect` with 204 and drops the
 reports instead of failing with 502 (`frontend/gateway/collector.sh` writes either the proxy or the `return 204` at
 start-up, from `COLLECTOR_UPSTREAM`). **Another Loki** (e.g. Grafana Cloud):
-`LOKI_URL=https://<host>/loki/api/v1/push LOKI_USERNAME=... LOKI_PASSWORD=... infra/infra.sh up logs` stores the three
+`LOKI_URL=https://<host>/loki/api/v1/push LOKI_USERNAME=... LOKI_PASSWORD=... deploy/scripts/infra.sh up logs` stores the three
 values in the Secret `loki-external`, removes Loki and Grafana from the cluster (Loki's volume is kept) and applies
-only Alloy, which pushes there. Running `infra/infra.sh up logs` without `LOKI_URL` switches back.
+only Alloy, which pushes there. Running `deploy/scripts/infra.sh up logs` without `LOKI_URL` switches back.
 
 ## Browser errors
 
@@ -175,7 +175,7 @@ stays `connect-src 'self'` and no CORS is involved. The gateway
 ([`default.conf.template`](../../frontend/gateway/default.conf.template), `location = /collect`) accepts POST only,
 bodies up to 64 kB, 5 requests/s per client IP (burst 20), no token (errors happen on the sign-in page too), no
 caching, and proxies to `alloy-faro.infra.svc.cluster.local:12347`. There Alloy's `faro.receiver` (the ConfigMap
-`alloy-config` in [`infra/logs.yaml`](../../infra/logs.yaml)) checks the size again, applies a global limit of
+`alloy-config` in [`deploy/infra/logs.yaml`](../../deploy/infra/logs.yaml)) checks the size again, applies a global limit of
 50 requests/s (burst 100, to protect Loki when every browser fails at once after a bad release: a sample is enough),
 keeps exceptions only (anything else posted to `/collect` is dropped), and writes one JSON line per error with the
 labels above. Who and where are **structured metadata**, not labels, so one user or page does not create a stream of
@@ -206,7 +206,7 @@ The page was `/products?search=not-sent`; the query string is in neither the pag
 ## Opening Grafana
 
 ```bash
-infra/infra.sh up logs                                   # once; infra/infra.sh up starts all of the infra
+deploy/scripts/infra.sh up logs                          # once; deploy/scripts/infra.sh up starts all of the infra
 kubectl -n infra port-forward svc/grafana 3000:3000      # Grafana is not published outside the cluster
 open http://localhost:3000                               # anonymous admin locally: no login
 ```
@@ -219,13 +219,13 @@ open http://localhost:3000                               # anonymous admin local
 * **Alerting → Alert rules**: the twelve rules below, in the folder *Product Management*.
 * **Explore** (data source *Loki*): any LogQL query.
 
-Everything in Grafana comes from files in the repository, mounted from ConfigMaps and loaded at start-up: the Loki
+Everything in Grafana comes from files in the deploy repository, mounted from ConfigMaps and loaded at start-up: the Loki
 data source (`grafana-datasources`), the dashboard provider (`grafana-dashboard-provider`) and the alert rules,
-contact point and policy (`grafana-alerting`), all in [`infra/logs.yaml`](../../infra/logs.yaml); the dashboards are
-JSON files of their own in [`infra/dashboards/`](../../infra/dashboards/)
-([`product-management.json`](../../infra/dashboards/product-management.json),
-[`logs.json`](../../infra/dashboards/logs.json)), which `infra/infra.sh up logs` loads into the ConfigMap
-`grafana-dashboards`. After changing any of them run `infra/infra.sh up logs`: it applies the ConfigMaps and restarts
+contact point and policy (`grafana-alerting`), all in [`deploy/infra/logs.yaml`](../../deploy/infra/logs.yaml); the dashboards are
+JSON files of their own in [`deploy/infra/dashboards/`](../../deploy/infra/dashboards/)
+([`product-management.json`](../../deploy/infra/dashboards/product-management.json),
+[`logs.json`](../../deploy/infra/dashboards/logs.json)), which `deploy/scripts/infra.sh up logs` loads into the ConfigMap
+`grafana-dashboards`. After changing any of them run `deploy/scripts/infra.sh up logs`: it applies the ConfigMaps and restarts
 Grafana when one changed (Grafana also re-reads the dashboard folder every 30 s).
 Changes made in the UI are not saved back to the files, and Grafana has no volume: a restart forgets them.
 
@@ -291,7 +291,7 @@ something is wrong), and the raw log.
 ## Alerts
 
 Grafana evaluates the rules every minute, all as LogQL over Loki, in four groups (*Gateway*, *Browser*, *API*,
-*Database and cache*; the ConfigMap `grafana-alerting` in [`infra/logs.yaml`](../../infra/logs.yaml)). A rule must stay
+*Database and cache*; the ConfigMap `grafana-alerting` in [`deploy/infra/logs.yaml`](../../deploy/infra/logs.yaml)). A rule must stay
 true for its *for* duration before it fires. Each alert has a `severity`, a summary, a description with the measured value, a
 link to its dashboard panel and a `runbook_url` pointing at its section below. Notifications are grouped per rule and
 go to the contact point defined there, a **placeholder** webhook to a local port where nothing listens: replace it in
@@ -339,7 +339,9 @@ sum by (status) (count_over_time({namespace="product-management", app="gateway"}
 replicas, the API down, PostgreSQL unreachable); `500`/`503` = the API failed (its error lines have the exception and
 the `trace_id`); a bad release (do the errors start at an *API replica started* mark?).
 
-**Do:** if it started with a rollout, roll back (`kubectl -n product-management rollout undo deployment/api`). If the
+**Do:** if it started with a rollout, roll back: `git revert` the release commit in the deploy repository (its
+pipeline applies the previous tag), or at once `kubectl -n product-management rollout undo deployment/api` until the
+revert is applied. If the
 database is the cause, see [DatabaseUnreachable](#databaseunreachable). Otherwise take one failing request's
 `trace_id` and read its API lines.
 
@@ -431,7 +433,7 @@ fail. PostgreSQL may be down, overloaded or refusing connections.
 ```
 
 ```bash
-infra/infra.sh status
+deploy/scripts/infra.sh status
 kubectl -n infra get pods -l app.kubernetes.io/name=postgres; kubectl -n infra describe pod postgres-0 | tail -20
 kubectl -n infra logs statefulset/postgres --tail 50       # add --previous after a crash
 ```
@@ -441,7 +443,7 @@ exhausted (`FATAL: sorry, too many clients already`); a password rotated (`creat
 restarting the API (`FATAL: password authentication failed`); a single slow check under heavy load (a few failures,
 then recovery).
 
-**Do:** if the pod is gone or stuck, `infra/infra.sh up postgres` (or
+**Do:** if the pod is gone or stuck, `deploy/scripts/infra.sh up postgres` (or
 `kubectl -n infra rollout restart statefulset/postgres`); the data is on its volume (`data-postgres-0`). Volume full:
 free space or grow the volume first. Authentication: the API reads its password from the Secret
 `database-credentials`, so restart it after a rotation (`kubectl -n product-management rollout restart
@@ -467,9 +469,10 @@ kubectl -n infra logs deployment/redis --tail 50
 ```
 
 **Likely causes:** the pod stopped or restarted (memory limit), Redis overloaded (timeouts are 500 ms), the password
-in `infra/redis-auth` changed without a backend deploy (which copies it into the API's Secret `redis-credentials`).
+in `infra/redis-auth` changed without an application deploy (`deploy/scripts/deploy.sh`, which copies it into the
+API's Secret `redis-credentials`).
 
-**Do:** `infra/infra.sh up redis` (or `kubectl -n infra rollout restart deployment/redis`). Nothing to restore: it is a
+**Do:** `deploy/scripts/infra.sh up redis` (or `kubectl -n infra rollout restart deployment/redis`). Nothing to restore: it is a
 cache. Watch the database row until it is back.
 
 #### PostgresFatal
@@ -538,7 +541,7 @@ transaction, run migrations that lock tables outside peak hours.
 Out-of-memory errors are returned to clients, not logged: they show up as `RedisUnreachable`/cache warnings in the API.
 
 **Do:** read the line; fix the configuration (the ConfigMap `redis-config` in
-[`infra/redis.yaml`](../../infra/redis.yaml)) and run `infra/infra.sh up redis`, which restarts Redis when it changed.
+[`deploy/infra/redis.yaml`](../../deploy/infra/redis.yaml)) and run `deploy/scripts/infra.sh up redis`, which restarts Redis when it changed.
 
 #### BrowserErrors
 
@@ -560,8 +563,8 @@ outdated tab) rather than everyone; `console.error: …` lines: an error the cod
 `ApiError`/`HttpErrorResponse`: an API failure the page did not handle (find the request in the gateway log at the same
 time and user).
 
-**Do:** if it started with a release and affects many users, roll the web app back
-(`kubectl -n product-management rollout undo deployment/web`) and fix it; otherwise reproduce it with the browser and
+**Do:** if it started with a release and affects many users, roll the web app back (`git revert` the release commit
+in the deploy repository, or at once `kubectl -n product-management rollout undo deployment/web`) and fix it; otherwise reproduce it with the browser and
 page from the report (the stack trace points at the minified bundle of that release).
 
 ## Following one request
@@ -572,7 +575,7 @@ header, or builds one from its random 32-hex-character request id. It writes the
 the API's logger adds its `TraceId` to every line written while handling it; Alloy lifts it into the `trace_id`
 structured metadata. So one id finds the gateway line and every API line of a request, whichever pods served it.
 
-**A real example** from Loki, a product created by `backend/scripts/check-requirements.py`:
+**A real example** from Loki, a product created by `tools/check-requirements.py`:
 
 | Where | Line |
 | --- | --- |
@@ -642,32 +645,32 @@ counting log lines to thresholds on metrics, which are cheaper to evaluate at hi
 
 ## Where to look
 
-* The logs component: [`infra/infra.sh`](../../infra/infra.sh) (`up_logs`: the dashboards ConfigMap, `LOKI_URL`,
-  restarts after a configuration change), [`infra/logs.yaml`](../../infra/logs.yaml), in three parts:
+* The logs component: [`deploy/scripts/infra.sh`](../../deploy/scripts/infra.sh) (`up_logs`: the dashboards ConfigMap, `LOKI_URL`,
+  restarts after a configuration change), [`deploy/infra/logs.yaml`](../../deploy/infra/logs.yaml), in three parts:
   * Loki: its configuration (storage, retention), Service and StatefulSet with its volume
   * Grafana: the data source, the dashboard provider, the alert rules, contact point and policy, its Deployment
   * Alloy: what it may read (ServiceAccount, ClusterRole), its configuration (labels, `LOKI_URL`, JSON parsing of the
     API and gateway lines, PostgreSQL's multi-line statements, the browser errors' `faro.receiver`), its Deployment,
     the Service `alloy-faro` and the NetworkPolicy `alloy-ingress`
-* The dashboards: [`infra/dashboards/`](../../infra/dashboards/)
-  ([`product-management.json`](../../infra/dashboards/product-management.json), [`logs.json`](../../infra/dashboards/logs.json))
+* The dashboards: [`deploy/infra/dashboards/`](../../deploy/infra/dashboards/)
+  ([`product-management.json`](../../deploy/infra/dashboards/product-management.json), [`logs.json`](../../deploy/infra/dashboards/logs.json))
 * Gateway: [`trace.js`](../../frontend/gateway/trace.js) (trace context), [`default.conf.template`](../../frontend/gateway/default.conf.template)
   (`log_format json`, `location = /collect`), [`collector.sh`](../../frontend/gateway/collector.sh) (`/collect` with or without a collector)
 * Web app: [`core/observability`](../../frontend/src/app/core/observability) (`BrowserErrors`, `ReportingErrorHandler`)
 * API: [`LoggingExtensions.cs`](../../backend/ProductManagement.Api/Observability/LoggingExtensions.cs)
   (JSON logs with the trace id in their scope)
-* What PostgreSQL and Redis log: their configuration ConfigMaps in [`infra/postgres.yaml`](../../infra/postgres.yaml)
+* What PostgreSQL and Redis log: their configuration ConfigMaps in [`deploy/infra/postgres.yaml`](../../deploy/infra/postgres.yaml)
   (`log_min_duration_statement`, `log_lock_waits`, `log_checkpoints`, `log_line_prefix`) and
-  [`infra/redis.yaml`](../../infra/redis.yaml)
+  [`deploy/infra/redis.yaml`](../../deploy/infra/redis.yaml)
 
 ## How to verify
 
 ```bash
-infra/infra.sh status                                # loki-0, grafana and alloy running in the namespace infra
+deploy/scripts/infra.sh status                       # loki-0, grafana and alloy running in the namespace infra
 kubectl -n infra port-forward svc/grafana 3000:3000 & # Grafana and Loki on this machine, for the commands below
 kubectl -n infra port-forward svc/loki 3100:3100 &
 curl -s localhost:3000/api/health                    # Grafana up
-python3 backend/scripts/check-requirements.py        # some traffic
+python3 tools/check-requirements.py                  # some traffic
 
 # Both dashboards and the twelve alert rules are provisioned and healthy
 curl -s 'localhost:3000/api/search?tag=product-management' | python3 -m json.tool | grep '"title"'
