@@ -1,12 +1,17 @@
 # Load test results
 
-Runs made on 2026-10-09 with the k6 scenarios in [`load-tests/`](../load-tests), executed **inside** the cluster
-(`load-tests/run.sh`), so they include the gateway, the API, PostgreSQL, Redis and token validation.
+Runs made on 2026-10-09 with the k6 scenarios in [`backend/load-tests/`](../backend/load-tests), executed **inside** the cluster
+(`backend/load-tests/run.sh`), so they include the gateway, the API, PostgreSQL, Redis and token validation.
 
 **Environment:** MicroK8s 1.34 in a single Multipass VM with **4 vCPU / 6 GB RAM** on an Apple Silicon laptop. k6
 itself (about 0.5 CPU at peak), the gateway, PostgreSQL and every API replica share those 4 vCPU, so the absolute
 numbers are a lower bound for a real cluster. Comparisons between runs, and the correctness checks, are the
 point.
+
+**Accounts.** The runs below signed in as ten dedicated load-test consumers. Those were removed: only the three demo
+accounts (viewer, clerk, manager) exist now, so `run.sh` lifts the API's per-user limits for the duration of every
+scenario except `rate-limit` (which checks the real limits) and restores them afterwards. The tests measure capacity
+with a few accounts; they no longer simulate many distinct users.
 
 ## Docker Desktop cluster (final setup)
 
@@ -26,7 +31,7 @@ limit, and the API throttled them as designed. The scenario now behaves like a w
 ## Many teams on 850,000 products (Docker Desktop, autoscaling)
 
 The `teams` scenario ([ADR 0018](adr/0018-autoscaling-and-scale-testing.md)) on the bulk dataset
-(`load-tests/seed-bulk.sh`: **850,024 products, 5.1 million stock movements, 1 GB**). Ten consumers act as ten
+(`backend/load-tests/seed-bulk.sh`: **850,024 products, 5.1 million stock movements, 1 GB**). Ten consumers act as ten
 teams: browsing (20 % of list views go up to page 2,000), searching, reading products and histories, and changing
 stock (half on 50 hot products all teams touch). **30 % of the stock changes are sent twice with the same
 `Idempotency-Key`**, one after the other or at the same instant. The API autoscales (HPA, 2–8 replicas).
@@ -61,7 +66,7 @@ Run 3 per endpoint (p95): list 16 ms, product 5 ms, search 5 ms, stock level 17 
 3. **Within targets with headroom.** PostgreSQL at 15–20 % of its CPU; API pods at 70–250 m each.
 
 **Correctness, every run** (`run.sh` compares the changes k6 saw applied with the rows the ledger gained, then
-runs `load-tests/verify-data.sh`):
+runs `backend/load-tests/verify-data.sh`):
 
 | Run | Applied (k6) | Outcome unknown to k6 | Ledger rows added | Replayed copies | Simultaneous copies refused (in progress) | Invariants |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
@@ -160,6 +165,58 @@ products, load generator included.
 
 The runs below were made earlier on MicroK8s (Multipass VM, 4 vCPU / 6 GB), before the API issued its own tokens.
 
+## The database at 20 million ledger rows (dedicated PostgreSQL server)
+
+The catalogue is capped at 900,000 products (six-digit ids), so the table that grows is the stock ledger. It was
+grown from 5.55 to **20 million movements** on the PostgreSQL server outside the cluster
+(`PRODUCTS=0 LEDGER_ROWS=20000000 backend/load-tests/seed-bulk.sh`: +N/−N pairs in time order, 5 products with ~100,000
+movements each, 1,000 with ~2,000; 14.4 million rows in 19.5 minutes). `backend/load-tests/verify-data.sh` passes on the
+result: 20,010,066 movements, every invariant 0, in 53 s. Decisions and the full index inventory:
+[ADR 0022](adr/0022-database-at-scale.md).
+
+**SQL** (`EXPLAIN ANALYZE`, ms, repeated run; the server's cache was cold for the busy product's history at first):
+
+| Query | 5.5 M movements | 20 M, before | 20 M, after |
+| --- | ---: | ---: | ---: |
+| Full list count (850,000 products) | 82 | 115 | 46–59 |
+| List page 20,000 (ids) | 111 | 137 | 65–99 |
+| Search "lens" count (312,000 matches) | 164 | 325 | 210–297 |
+| Stock-level 0..10, count / page 1 | 3.8 / 0.06 | 4.3 / 0.03 | 2.7–3.6 / 0.04 |
+| Product by id | 0.1 | 0.3 | 0.1–0.2 |
+| History count, busiest product (3,468 → 100,944 movements) | 0.9 | 10 warm, 206–259 cold | 10–24 |
+| History page 1, busiest product | 0.07 | 0.6 | 0.2 |
+| **History last page, busiest product** | 8.8 | **1,288–6,284** (44,000 table pages, sort on disk) | **8–22** |
+| Stock change (UPDATE + ledger INSERT) | 1.2 | 3.8–10 | 1.2–3.0 |
+
+"Before" runs on the 1 GiB server, "after" with the [ADR 0022](adr/0022-database-at-scale.md) changes (late row
+lookup for the history, per-table autovacuum) and the server resized to 3 GiB with a 768 MB buffer cache. A busy
+product's deep history page is the one query that grew with the ledger, and the only one that needed a change.
+Everything else depends on the capped products table.
+
+**Visibility map** (why the autovacuum settings): 11,400 stock changes without a vacuum (the default waits for
+~170,000) took the full-list count from 64 ms to **1,536 ms**, list page 20,000 from 122 to **2,517 ms** and a
+stock-level count from 56 to **512 ms**, all from table reads that index-only scans normally skip. VACUUM brought
+them back to 82, 99 and 36 ms.
+
+**Through the gateway** (median of 5–7 requests; "Redis miss" = cache generations bumped before each request,
+`Cache-Control: no-cache` past the microcache; "Redis hit" = the same request repeated):
+
+| Request | 5.5 M, miss / hit | 20 M before (1 GiB), miss / hit | 20 M after (3 GiB), miss / hit |
+| --- | ---: | ---: | ---: |
+| List page 1 | 36 / 8 | 32 / 7 | 40 / 10 |
+| List last page (42,502) | 105 / 24 | 86 / 8 | 100–130 / 12 |
+| Search "lens" page 1 | 181 / 12 | 144 / 7 | 242–296 / 11–21 |
+| Stock-level 0..10 page 1 | 12 / 7 | 11 / 5 | 19 / 6 |
+| Product by id | 8 / 6 | 7 / 5 | 7 / 5 |
+| History of the busiest product, page 1 | 24 / 49 | 20 / 7 | 19 / 5 |
+| **History of the busiest product, last page** | 138 / 39 (174 pages) | **630** / 6 (5,048 pages) | **30–99** / 6 (5,049 pages) |
+| Add / remove stock | 52 / 59 | 20 / 18 | 13–30 / 15–29 |
+
+The gateway numbers are noisy (the cluster shared the laptop with other work, and the "after" runs came right after a
+server restart and a rollout). The SQL table is the reliable comparison. The miss on the busiest product's last
+history page went from 630 ms to 30–99 ms, and the first request for such a page from 1.3–6.3 s in SQL to under
+10 ms.
+
 ## Summary
 
 | Run | API replicas | Target | Requests | Errors | p50 | p95 | Result |
@@ -219,19 +276,20 @@ In order of expected impact for a write-heavy peak:
 ## Reproduce
 
 ```bash
-load-tests/run.sh smoke
-load-tests/run.sh stock-consistency
-RATE=150 load-tests/run.sh load
-PEAK=2000 load-tests/run.sh stress
+backend/load-tests/run.sh smoke
+backend/load-tests/run.sh stock-consistency
+RATE=150 backend/load-tests/run.sh load
+PEAK=2000 backend/load-tests/run.sh stress
 kubectl -n product-management patch hpa api -p '{"spec":{"minReplicas":4}}'   # the HPA owns the count
-PEAK=2000 load-tests/run.sh stress
-load-tests/run.sh rate-limit
+PEAK=2000 backend/load-tests/run.sh stress
+backend/load-tests/run.sh rate-limit
 
-scripts/cluster-addons.sh                 # metrics-server, for the autoscaler
-load-tests/seed-bulk.sh                   # 850,000 products, 5 million movements (~2 minutes)
-RATE=300 load-tests/run.sh teams          # many teams + duplicate retries, then verifies the data
-PEAK=6000 K6_CPU=3 load-tests/run.sh teams  # the same as a capacity staircase (limits lifted)
-PEAK=12000 K6_CPU=4 load-tests/run.sh browse   # read capacity with a hot set
-RATE=10000 K6_CPU=4 load-tests/run.sh browse   # hold a constant rate for a minute
+infra/cluster-addons.sh                   # metrics-server, for the autoscaler
+backend/load-tests/seed-bulk.sh                   # 850,000 products, 5 million movements (~2 minutes)
+PRODUCTS=0 LEDGER_ROWS=20000000 backend/load-tests/seed-bulk.sh   # grow the ledger to 20 million movements (~20 minutes)
+RATE=300 backend/load-tests/run.sh teams          # many teams + duplicate retries, then verifies the data
+PEAK=6000 K6_CPU=3 backend/load-tests/run.sh teams  # the same as a capacity staircase (limits lifted)
+PEAK=12000 K6_CPU=4 backend/load-tests/run.sh browse   # read capacity with a hot set
+RATE=10000 K6_CPU=4 backend/load-tests/run.sh browse   # hold a constant rate for a minute
 kubectl -n product-management get hpa api -w   # in another terminal: watch it scale
 ```

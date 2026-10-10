@@ -1,6 +1,15 @@
 # 0011 — Kubernetes deployment (Docker Desktop or MicroK8s locally), one manifest per project
 
-**Status:** accepted (supersedes the Docker Compose setup)
+**Status:** superseded in part by [0021](0021-deployment-layout.md) (supersedes the Docker Compose setup)
+
+> **Update (2026-10-10):** the per-project manifests and deploy scripts, PostgreSQL and Redis in the cluster, the
+> migration Job and the `api` ClusterIP Service are gone: see [0021](0021-deployment-layout.md) (Kustomize overlays,
+> servers outside the cluster, migrations run by the pipeline with the API image). Still valid: Kubernetes on Docker
+> Desktop or MicroK8s, one Dockerfile per image, pod hardening, zero-downtime rollouts, NetworkPolicies between the
+> gateway and the applications; the HorizontalPodAutoscalers were added later ([0018](0018-autoscaling-and-scale-testing.md)).
+> `scripts/cluster-up.sh` and `cluster-down.sh` (MicroK8s in a Multipass VM) were removed as well: MicroK8s is used
+> natively on Linux, by the CI job. Later the deployment was split into three parts (infra, backend, frontend) and the
+> headless Service `api-headless` renamed to `api` ([0021, update](0021-deployment-layout.md#update-2026-10-10)).
 
 ## Context
 

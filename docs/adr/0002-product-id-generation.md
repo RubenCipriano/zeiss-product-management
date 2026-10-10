@@ -2,6 +2,11 @@
 
 **Status:** accepted
 
+> **Update (2026-10-10):** when the sequence is used up (`NO CYCLE`, after 999999), creating a product answers
+> **`503 product.ids_exhausted`** instead of an unhandled error. A 503 rather than a 409: nothing in the request can fix
+> it (only widening the range, a migration), it must alert as a server-side failure, and a retry with the same
+> `Idempotency-Key` stays allowed once the range is widened.
+
 ## Context
 
 Requirement: *"The product identifier should be auto-generated as a unique 6-digit number. Even when using multiple

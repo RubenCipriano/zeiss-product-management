@@ -14,13 +14,15 @@ Short records of the decisions that shape this codebase: the context, the decisi
 | 0008 | [Redis read cache with generation-based invalidation](0008-redis-cache.md)  |
 | 0009 | [API-issued JWTs for registered consumers, permission-based RBAC](0009-authentication-authorization.md) |
 | 0010 | [Rate limiting in two layers](0010-rate-limiting.md)                         |
-| 0011 | [Kubernetes deployment, one manifest per project](0011-kubernetes-deployment.md) |
+| 0011 | [Kubernetes deployment, one manifest per project](0011-kubernetes-deployment.md) (superseded in part by 0021) |
 | 0012 | [nginx gateway in front of the application](0012-gateway.md)                 |
 | 0013 | [UI with Tailwind CSS and Angular CDK](0013-ui-tailwind-cdk.md)              |
-| 0014 | [MCP server for AI assistants](0014-mcp-server.md)                          |
+| 0014 | [MCP server for AI assistants](0014-mcp-server.md) (removed on 2026-10-10)  |
 | 0015 | [Load testing with k6, inside the cluster](0015-load-testing.md)            |
 | 0016 | [Stock ledger written in the same statement as the stock change](0016-stock-ledger.md) |
 | 0017 | [Idempotency keys for create and stock changes](0017-idempotency-keys.md)   |
 | 0018 | [Autoscaling and testing at scale](0018-autoscaling-and-scale-testing.md)   |
 | 0019 | [Content Security Policy and no third-party assets](0019-content-security-policy.md) |
 | 0020 | [Token verification at the gateway and a microcache shared per role](0020-edge-token-verification.md) |
+| 0021 | [Deployment layout: Kustomize overlays, servers outside the cluster, migrations in the pipeline](0021-deployment-layout.md) |
+| 0022 | [The database at scale: indexes, vacuum and the ledger beyond 20 million rows](0022-database-at-scale.md) |

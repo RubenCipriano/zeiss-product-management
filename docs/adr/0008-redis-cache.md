@@ -2,6 +2,13 @@
 
 **Status:** accepted
 
+> **Update (2026-10-10):** Redis is now a server outside the cluster (locally the container `pm-redis`), reached
+> by the API's connection string (first through an ExternalName Service `redis`, removed later the same day:
+> [0021, update](0021-deployment-layout.md#update-2026-10-10)); "in-cluster" round trips below mean
+> round trips on the private network, still well under a millisecond locally. A Redis command that times out or is
+> cancelled is treated like a Redis outage: the cache falls back to the database. The MCP server mentioned below was
+> removed ([0014](0014-mcp-server.md)); the read load it stood for (other clients issuing many lookups) is unchanged.
+
 ## Context
 
 Reads dominate: the UI polls every 15 s per open tab, the dashboard cards add three list queries per refresh, and AI

@@ -2,6 +2,9 @@
 
 **Status:** accepted
 
+> **Update (2026-10-10):** the MCP server named below as one of the callers was removed
+> ([0014](0014-mcp-server.md)); nothing in this decision depended on it.
+
 ## Context
 
 A stock quantity alone answers "how many are there?" but not "why?", "who changed it?" or "was this request applied
@@ -46,7 +49,7 @@ Every stock change is recorded in an append-only **`stock_movements`** table:
   `(product_id, occurred_at DESC, id DESC)`. Readers see it in the UI's *Stock history* dialog.
 * The migration backfills one `InitialStock` movement per existing product, so the invariant holds from day one.
 
-**Invariants** (checked by `load-tests/data/verify.sql` and by integration tests):
+**Invariants** (checked by `backend/load-tests/data/verify.sql` and by integration tests):
 
 1. `products.stock_quantity = SUM(stock_movements.quantity_change)` for every product.
 2. Each `stock_after` equals the running total of the movements before it (by `id`).

@@ -2,6 +2,9 @@
 
 **Status:** accepted (supersedes an earlier version that used Keycloak as an external identity provider)
 
+> **Update (2026-10-10):** the MCP server was removed ([0014](0014-mcp-server.md)), and with it the `mcp-server`
+> consumer. The callers are now the web app's users, the load tests and other services; the decision is unchanged.
+
 ## Context
 
 The API must know who calls it and what they may do. A full identity provider (Keycloak, Entra ID) is the right tool
@@ -14,7 +17,8 @@ component to run, secure and explain, without solving a problem this system has.
 **The API issues and verifies its own JWT access tokens.**
 
 * **Consumers.** Every caller is a registered *API consumer* with a client id, a secret and roles. Consumers live in
-  configuration: a Kubernetes Secret mounted as `config/consumers.json`, or `appsettings.Development.json` locally.
+  configuration: a Kubernetes Secret mounted as `config/consumers.json`, or the .NET user-secrets for `dotnet run`
+  (both generated locally by `backend/deploy/local-secrets.sh`, never committed).
   Only **PBKDF2-SHA256 hashes** of the secrets are stored (salted, 100,000 iterations). The
   `dotnet ProductManagement.Api.dll hash-secret <secret>` command generates them.
 * **Token endpoint:** `POST /api/auth/token` with `{ "clientId", "clientSecret" }` returns

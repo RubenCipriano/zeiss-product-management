@@ -2,6 +2,12 @@
 
 **Status:** accepted
 
+> **Update (2026-10-10):** PostgreSQL no longer runs in Kubernetes. It is a server outside the cluster (locally the
+> container `pm-postgres` started by `infra/infra.sh up database`), reached by the API's connection string (first
+> through an ExternalName Service `postgres`, removed later the same day: [0021, update](0021-deployment-layout.md#update-2026-10-10)),
+> with least-privilege users `pm_migrator` and `pm_app` ([0021](0021-deployment-layout.md)) and settings sized from
+> measurements ([0022](0022-database-at-scale.md)). Tests still use Testcontainers.
+
 ## Context
 
 The assessment requires EF Core code-first migrations and seeding, and does not prescribe a database. The solution must

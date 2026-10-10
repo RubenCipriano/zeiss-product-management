@@ -9,7 +9,7 @@ point, behaviour under sudden spikes, and, as important, *correctness* under con
 
 ## Decision
 
-[k6](https://k6.io) scripts in `load-tests/`, run **as a Kubernetes Job inside the cluster** (`load-tests/run.sh`), so
+[k6](https://k6.io) scripts in `backend/load-tests/`, run **as a Kubernetes Job inside the cluster** (`backend/load-tests/run.sh`), so
 results measure gateway + API + PostgreSQL + Redis (and token issuance) rather than a laptop's port-forward tunnel.
 
 | Scenario            | Shape                                               | Pass criteria (thresholds)                      |
@@ -21,8 +21,11 @@ results measure gateway + API + PostgreSQL + Redis (and token issuance) rather t
 | `stock-consistency` | 300 concurrent orders for 100 units, all replicas   | exactly 100 succeed, 200 get 409, final stock 0 |
 | `rate-limit`        | one user at 300 req/s                               | 429s with `Retry-After`, nothing else fails     |
 
-* Traffic is split over 10 load-test consumers (tokens from `POST /api/auth/token`), so per-user rate limits behave
-  realistically. Like a well-behaved client, the consistency test waits for `Retry-After` and retries when it is
+* The virtual users sign in as the three demo accounts (tokens from `POST /api/auth/token`): reads as viewer, clerk
+  or manager, stock changes as clerk or manager. Many virtual users share one account, so `run.sh` raises the API's
+  per-user limits for every scenario except `rate-limit` and restores them afterwards: the tests measure capacity with
+  a few accounts, not many distinct users. (Earlier runs used ten dedicated load-test consumers, since removed.)
+  Like a well-behaved client, the consistency test waits for `Retry-After` and retries when it is
   rate limited. Setup creates dedicated products and teardown deletes them.
 * `smoke` and `stock-consistency` also run in CI after deploying to MicroK8s on the runner.
 

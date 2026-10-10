@@ -2,6 +2,11 @@
 
 **Status:** accepted
 
+> **Update (2026-10-10):** two error types were added to `ErrorType`: `Unprocessable` → 422 (a well-formed request
+> that cannot be processed, e.g. `idempotency_key_reused` found by the database) and `Unavailable` → 503 (e.g.
+> `product.ids_exhausted`). Validation error keys follow the request's JSON names in camelCase (`min`, `clientId`),
+> including model-binding errors and the token endpoint, which is now validated with FluentValidation too.
+
 ## Context
 
 Error behaviour must be predictable for clients, and the code must make expected failures (validation, not found,

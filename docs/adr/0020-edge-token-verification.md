@@ -39,7 +39,8 @@ If the gateway could verify tokens itself, it could share entries between caller
   Beyond that the load generator itself runs out of CPU ([load-test-results.md](../load-test-results.md)).
 * Forged, expired or malformed tokens cost the API nothing.
 * The frontend and backend deployments now share three settings (JWKS URL, issuer, audience), set as environment
-  variables on the gateway, next to the existing `api-headless` contract.
+  variables on the gateway, next to the existing `api-headless` contract (the headless Service is named `api` since
+  [0021's update](0021-deployment-layout.md#update-2026-10-10)).
 * Revocation is unchanged: tokens stay valid until they expire. A deny-list would have to be checked at the gateway
   too.
 * A cached response can be up to 1 s old for everyone with the role, not only for one user; the web app still

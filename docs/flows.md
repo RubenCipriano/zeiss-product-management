@@ -15,13 +15,14 @@ the decision record (ADR) that explains why. The static picture (topology, compo
 | 6 | [Create a product, update with If-Match](#6-create-a-product-update-with-if-match) | sequences | `ProductCommandService`, `UnitOfWork` |
 | 7 | [Rate limiting](#7-rate-limiting) | flowchart | `SharedTokenBucketRateLimiter`, `RedisDistributedRateLimiter` |
 | 8 | [Frontend: the product list screen](#8-frontend-the-product-list-screen) | flowchart | `products-store.ts`, `products-api.ts` |
-| 9 | [Deployment and CI](#9-deployment-and-ci) | flowcharts | `deploy-all.sh`, `deploy.sh`, `ci.yml` |
-| 10 | [Autoscaling](#10-autoscaling) | flowchart | `kubernetes.yaml` (both) |
-| 11 | [Load test and verification](#11-load-test-and-verification) | flowcharts | `load-tests/`, `check-requirements.py` |
+| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `infra.sh`, `deploy.sh` (backend, frontend), `.gitlab-ci.yml` (×3), `ci.yml` |
+| 10 | [Autoscaling](#10-autoscaling) | flowchart | `hpa.yaml`, `gateway.yaml`, `default.conf.template` |
+| 11 | [Load test and verification](#11-load-test-and-verification) | flowcharts | `backend/load-tests/`, `check-requirements.py` |
+| 12 | [Logs, from a request to Grafana](#12-logs-from-a-request-to-grafana) | flowchart | `trace.js`, `config.alloy`, `server-agent.alloy`, `browser-errors.ts` |
 
 Names used in the diagrams: **gateway** is the nginx Deployment in front of everything (`frontend/gateway/`),
 **API** is any replica of the ASP.NET Core Deployment, reached per request through the headless Service
-`api-headless`. Paths are relative to the repository root.
+`api`. Paths are relative to the repository root.
 
 ---
 
@@ -82,7 +83,7 @@ Entries under an old generation are simply never read again and expire on their 
 flowchart LR
     stock["stock change<br/>add-to-stock, decrement-stock<br/>CatalogChange.Stock"]
     edit["create, update, delete<br/>CatalogChange.Products"]
-    mig["db-migrate Job"]
+    mig["migrate command<br/>(before each rollout)"]
 
     dg["data generation"]
     lg["listing generation"]
@@ -252,7 +253,7 @@ sequenceDiagram
     participant J as jwt.js
     participant D as njs shared dicts
     participant S as API via Service api
-    participant A as API via api-headless
+    participant A as API pod (headless Service api)
 
     C->>N: GET /api/products, Authorization: Bearer token
     N->>N: limit_req per client IP (429 when over)
@@ -284,8 +285,8 @@ sequenceDiagram
     end
 ```
 
-The gateway holds no secret: it can verify tokens, never issue them. The JWKS is fetched over the in-cluster Service
-`api` (`JWKS_URL` in `frontend/deploy/kubernetes.yaml`); `/.well-known/jwks.json` is not routed to the API by the
+The gateway holds no secret: it can verify tokens, never issue them. The JWKS is fetched over the in-cluster headless
+Service `api` (`JWKS_URL` in `frontend/deploy/k8s/overlays/<environment>/gateway.yaml`); `/.well-known/jwks.json` is not routed to the API by the
 gateway, so it is not exposed outside the cluster. Code: [`jwt.js`](../frontend/gateway/jwt.js),
 [`default.conf.template`](../frontend/gateway/default.conf.template),
 [`SecurityServiceCollectionExtensions.cs`](../backend/ProductManagement.Api/Security/SecurityServiceCollectionExtensions.cs),
@@ -417,7 +418,7 @@ sequenceDiagram
 
 * **No overselling, no lost updates.** Check and change are one statement; PostgreSQL row-locks the product and
   re-evaluates `WHERE stock BETWEEN min AND max` against the latest committed row. The range is computed in C#
-  (`Product.StockRangeAllowingAdjustment`), so the SQL never overflows ([ADR 0003](adr/0003-atomic-stock-updates.md)).
+  (`StockAdjustment.Plan`: `MinCurrentStock`, `MaxCurrentStock`), so the SQL never overflows ([ADR 0003](adr/0003-atomic-stock-updates.md)).
 * **Ledger always matches stock.** The movement is inserted by the same statement (a data-modifying CTE)
   ([ADR 0016](adr/0016-stock-ledger.md)).
 * **Exactly once.** A retry is replayed from Redis; if the Redis claim was lost (expired, evicted, or released after
@@ -430,7 +431,7 @@ sequenceDiagram
 
 Code: [`IdempotencyFilter.cs`](../backend/ProductManagement.Api/Idempotency/IdempotencyFilter.cs),
 [`RedisIdempotencyStore.cs`](../backend/ProductManagement.Infrastructure/Idempotency/RedisIdempotencyStore.cs),
-[`ProductCommandService.cs`](../backend/ProductManagement.Application/Products/ProductCommandService.cs),
+[`ProductCommandService.cs`](../backend/ProductManagement.Core/Products/ProductCommandService.cs),
 [`ProductRepository.cs`](../backend/ProductManagement.Infrastructure/Products/ProductRepository.cs),
 [`StockMovementConfiguration.cs`](../backend/ProductManagement.Infrastructure/Persistence/Configurations/StockMovementConfiguration.cs),
 [`stock-adjust-dialog.ts`](../frontend/src/app/features/products/feature/stock-adjust-dialog/stock-adjust-dialog.ts).
@@ -525,7 +526,7 @@ sequenceDiagram
 Delete follows the update path (optional `If-Match`, 412/409, then 204; the history goes with the product by cascade).
 Code: [`ProductsController.cs`](../backend/ProductManagement.Api/Controllers/ProductsController.cs),
 [`EntityTag.cs`](../backend/ProductManagement.Api/Http/EntityTag.cs),
-[`ProductCommandService.cs`](../backend/ProductManagement.Application/Products/ProductCommandService.cs),
+[`ProductCommandService.cs`](../backend/ProductManagement.Core/Products/ProductCommandService.cs),
 [`UnitOfWork.cs`](../backend/ProductManagement.Infrastructure/Persistence/UnitOfWork.cs),
 [`PostgresProductIdGenerator.cs`](../backend/ProductManagement.Infrastructure/Products/PostgresProductIdGenerator.cs),
 [`product-form-dialog.ts`](../frontend/src/app/features/products/feature/product-form-dialog/product-form-dialog.ts).
@@ -571,7 +572,7 @@ the address in `X-Forwarded-For`, which the API trusts because a NetworkPolicy l
 [`RateLimitingServiceCollectionExtensions.cs`](../backend/ProductManagement.Api/RateLimiting/RateLimitingServiceCollectionExtensions.cs),
 [`SharedTokenBucketRateLimiter.cs`](../backend/ProductManagement.Api/RateLimiting/SharedTokenBucketRateLimiter.cs),
 [`RedisDistributedRateLimiter.cs`](../backend/ProductManagement.Infrastructure/Security/RedisDistributedRateLimiter.cs);
-values in the `api-config` ConfigMap and the gateway Deployment. Decision: [ADR 0010](adr/0010-rate-limiting.md).
+values as env entries in the API's Deployment (`backend/deploy/k8s/base/deployment.yaml`) and the gateway's. Decision: [ADR 0010](adr/0010-rate-limiting.md).
 
 ---
 
@@ -627,85 +628,138 @@ fresh, so a crowd of open screens is answered by the microcache. An empty name f
 
 ---
 
-## 9. Deployment and CI
+## 9. Deployment and CI/CD
 
 ### Deploy to the current kubectl context
 
-`scripts/deploy-all.sh` runs the backend's and then the frontend's own deploy script, exactly as each repository
-would on its own. Images get an immutable tag (the commit, plus a timestamp when the working tree is dirty). On Docker
-Desktop the locally built image is used directly; on MicroK8s it is pushed to the node's registry at
-`localhost:32000`. Once per cluster, `scripts/cluster-addons.sh` installs metrics-server (needed by the autoscalers);
-`scripts/cluster-up.sh` creates the MicroK8s VM.
+Three parts, three scripts, run in this order: `infra/infra.sh up` starts the servers outside the cluster (Docker
+Compose, one file per component) and applies the cluster's log collector; `backend/deploy/deploy.sh` deploys the API;
+`frontend/deploy/deploy.sh` deploys the web app and the gateway. Each deploy script renders its environment's
+Kustomize overlay with this release's images pinned and applies it with `kubectl apply`. Locally they also build the
+images, with an immutable tag (the commit, plus a timestamp when the working tree is dirty). On Docker Desktop the
+locally built image is used directly; on any other context (MicroK8s) it is pushed to the node's registry at
+`localhost:32000`. Once per cluster, `infra/cluster-addons.sh` installs metrics-server.
 
 ```mermaid
 flowchart TD
-    all["scripts/deploy-all.sh<br/>prints the kubectl context"] --> b1
-
-    subgraph be["backend/deploy/deploy.sh"]
-        b1["tag = git short SHA<br/>+ dirty timestamp"] --> b2["docker build<br/>product-management/api:tag"]
-        b2 --> b3{"cluster?"}
-        b3 -->|"docker-desktop"| b4["use the local image"]
-        b3 -->|"MicroK8s"| b5["push to localhost:32000<br/>crane via the VM, or docker push"]
-        b4 --> b6["delete the old Job db-migrate"]
-        b5 --> b6
-        b6 --> b7["sed the image into kubernetes.yaml<br/>kubectl apply"]
-        b7 --> b8["rollout status postgres, redis"]
-        b8 --> b9["CREATE EXTENSION pg_stat_statements"]
-        b9 --> b10["wait for Job db-migrate to complete"]
-        b10 --> b11["rollout status api"]
+    subgraph infra["infra/infra.sh up [database] [redis] [logs]"]
+        i1["database: volume pm-postgres-data,<br/>compose up pm-postgres"] --> i2["roles service:<br/>pg_stat_statements, roles.sql<br/>pm_migrator, pm_app"]
+        i3["redis: compose up pm-redis<br/>--requirepass"]
+        i4{"logs: LOKI_URL set?"}
+        i4 -->|"no"| i5["compose --profile storage:<br/>Loki, Grafana, server agent"]
+        i4 -->|"yes"| i6["compose: server agent only,<br/>shipping to LOKI_URL"]
+        i5 & i6 --> i7["kubectl apply -k logs/k8s<br/>Alloy in observability"]
     end
 
-    b7 -.->|"creates"| job["Job db-migrate, api image, args migrate:<br/>wait for PostgreSQL, EF Core migrations + seeding,<br/>move the Redis generations on"]
-    job -.->|"complete"| b10
-
-    b11 --> f1
-
-    subgraph fe["frontend/deploy/deploy.sh"]
-        f1["docker build web and gateway"] --> f2["publish both images"]
-        f2 --> f3["sed the images into kubernetes.yaml<br/>kubectl apply"]
-        f3 --> f4["rollout status web, gateway"]
-        f4 --> f5["print the URL, localhost:8080"]
+    subgraph backend["backend/deploy/deploy.sh"]
+        b0["local-secrets.sh, first run:<br/>signing key, consumers, passwords.env"] --> b1["docker build backend/<br/>tag = short SHA + dirty timestamp"]
+        b1 --> b2["publish to the cluster"]
+        b2 --> b3["docker run API image migrate<br/>as pm_migrator, PGPASSWORD:<br/>migrations, seed, cache generations"]
+        b3 --> b4["render overlays/local + images<br/>secretGenerator api-secrets-hash"]
+        b4 --> b5["kubectl apply<br/>rollout status api"]
     end
+
+    subgraph frontend["frontend/deploy/deploy.sh"]
+        f1["docker build frontend/<br/>and frontend/gateway/"] --> f2["publish both"]
+        f2 --> f3{"LOGS=off?"}
+        f3 -->|"no"| f4["render overlays/local + images"]
+        f3 -->|"yes"| f5["render + patch<br/>COLLECTOR_UPSTREAM empty"]
+        f4 & f5 --> f6["kubectl apply<br/>rollout status web, gateway"]
+    end
+
+    i2 & i3 --> b0
+    b5 --> f1
+    f6 --> done["http://localhost:8080"]
 ```
 
-Code: [`deploy-all.sh`](../scripts/deploy-all.sh), [`backend/deploy/deploy.sh`](../backend/deploy/deploy.sh),
-[`frontend/deploy/deploy.sh`](../frontend/deploy/deploy.sh), [`images.sh`](../scripts/lib/images.sh),
+The rendered kustomization goes to `<part>/deploy/k8s/.build/<environment>/kustomization.yaml` (not committed). The
+API never migrates at start-up; its database user `pm_app` could not. Code: [`infra.sh`](../infra/infra.sh),
+[`database.yaml`](../infra/database.yaml), [`roles.sql`](../infra/postgres/roles.sql),
+[`backend/deploy/deploy.sh`](../backend/deploy/deploy.sh), [`local-secrets.sh`](../backend/deploy/local-secrets.sh),
+[`frontend/deploy/deploy.sh`](../frontend/deploy/deploy.sh), [`collector.sh`](../frontend/gateway/collector.sh),
 [`DatabaseInitializer.cs`](../backend/ProductManagement.Infrastructure/Persistence/DatabaseInitializer.cs).
-Decision: [ADR 0011](adr/0011-kubernetes-deployment.md).
+Decision: [ADR 0021](adr/0021-deployment-layout.md).
 
-### CI pipeline
+### CI/CD pipelines (GitLab)
 
-On every push to `main` and every pull request, three jobs run in parallel; the end-to-end job runs only when all
-three pass, and deploys to a real MicroK8s cluster on the runner with the same scripts as above.
+One pipeline per repository. The backend and the frontend take a commit to staging automatically and to production
+after a manual, protected step; the infra only validates automatically, and every deployment of a server is a manual
+job. They have not run on a GitLab instance.
+
+```mermaid
+flowchart TB
+    subgraph be["backend/.gitlab-ci.yml"]
+        direction LR
+        bt["<b>test</b><br/>unit, integration,<br/>format, manifests, SAST"] --> bb["<b>build</b><br/>api image,<br/>migrations.sql"]
+        bb --> bs["<b>scan</b><br/>Trivy"]
+        bs --> bms["migrate:staging<br/>private runner,<br/>pm_migrator"]
+        bms --> bds["deploy:staging<br/>Secret api-secrets,<br/>deploy.sh, MIGRATIONS=skip"]
+        bds --> bv["verify:requirements<br/>check-requirements.py"]
+        bv --> bmp["migrate:production<br/>manual, protected"]
+        bmp --> bdp["deploy:production"]
+    end
+
+    subgraph fe["frontend/.gitlab-ci.yml"]
+        direction LR
+        ft["<b>test</b><br/>lint, unit, build,<br/>manifests, SAST"] --> fb["<b>build</b><br/>web, gateway images"]
+        fb --> fs["<b>scan</b><br/>Trivy"]
+        fs --> fds["deploy:staging<br/>deploy.sh"]
+        fds --> fv["verify:e2e<br/>Playwright"]
+        fv --> fdp["deploy:production<br/>manual, protected"]
+    end
+
+    subgraph inf["infra/.gitlab-ci.yml"]
+        direction LR
+        iv["<b>validate</b><br/>compose config,<br/>logs/k8s, alloy fmt"] --> isrv["servers:env, manual<br/>database, redis, logs<br/>shell runner on each server"]
+        iv --> icl["cluster-logs:env, manual<br/>collector via the agent"]
+    end
+
+    be ~~~ fe ~~~ inf
+```
+
+Merge requests stop after scan (validate for infra). The deploy jobs reach the cluster through the GitLab agent for
+Kubernetes; only the backend's migrate jobs need the runner inside the private network, and only the infra's server
+jobs run on the servers. Code: [`backend/.gitlab-ci.yml`](../backend/.gitlab-ci.yml),
+[`deploy-environment.sh`](../backend/deploy/ci/deploy-environment.sh),
+[`create-secrets.sh`](../backend/deploy/ci/create-secrets.sh), [`frontend/.gitlab-ci.yml`](../frontend/.gitlab-ci.yml),
+[`infra/.gitlab-ci.yml`](../infra/.gitlab-ci.yml). Setup: [guide chapter 12](guide/12-from-zero.md).
+
+### CI (GitHub Actions)
+
+On every push to `main` and every pull request, three jobs run in parallel for the whole repository; the end-to-end
+job runs only when all three pass, and deploys the three parts to a real MicroK8s cluster on the runner with the same
+scripts as above.
 
 ```mermaid
 flowchart LR
     trig(["push to main,<br/>pull request"]) --> jb & jf & jm
 
-    jb["<b>backend</b><br/>restore<br/>build Release, warnings as errors<br/>dotnet test, Testcontainers:<br/>PostgreSQL + Redis"]
+    jb["<b>backend</b><br/>build Release, warnings as errors<br/>dotnet format, dotnet test<br/>Testcontainers: PostgreSQL + Redis"]
     jf["<b>frontend</b><br/>npm ci, lint, format:check<br/>test:ci, build"]
-    jm["<b>manifests</b><br/>kubeconform -strict<br/>both kubernetes.yaml"]
+    jm["<b>manifests</b><br/>backend and frontend<br/>validate-manifests.sh,<br/>infra compose + logs/k8s"]
 
     jb & jf & jm --> e1
 
-    subgraph e2e["e2e: deploy to MicroK8s + smoke test"]
-        e1["install MicroK8s 1.34<br/>dns, hostpath-storage, registry"] --> e2["backend/deploy/deploy.sh"]
-        e2 --> e3["frontend/deploy/deploy.sh"]
-        e3 --> e4["load-tests/run.sh smoke"]
-        e4 --> e5["load-tests/run.sh stock-consistency"]
+    subgraph e2e["e2e: deploy to MicroK8s"]
+        e1["MicroK8s 1.34<br/>infra.sh up database redis"] --> e2["CoreDNS: host.docker.internal"]
+        e2 --> e3["backend/deploy/deploy.sh<br/>LOGS=off frontend/deploy/deploy.sh"]
+        e3 --> e4["k6 smoke,<br/>stock-consistency"]
+        e4 --> e5["check-requirements.py<br/>Playwright"]
     end
 
-    e5 -.->|"on failure"| diag["pods, events, API logs"]
+    e5 -.->|"on failure"| diag["report, pods, events,<br/>API logs, servers"]
 ```
 
-Code: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+Code: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml),
+[`backend/deploy/ci/validate-manifests.sh`](../backend/deploy/ci/validate-manifests.sh),
+[`frontend/deploy/ci/validate-manifests.sh`](../frontend/deploy/ci/validate-manifests.sh).
 
 ---
 
 ## 10. Autoscaling
 
 Both the API and the gateway have a HorizontalPodAutoscaler fed by metrics-server. A new API pod gets traffic as
-soon as it is ready: the gateway balances over the headless Service `api-headless`, whose DNS lists every ready pod,
+soon as it is ready: the gateway balances over the headless Service `api`, whose DNS lists every ready pod,
 and re-resolves it every 5 s. A new gateway pod joins the `gateway` LoadBalancer Service.
 
 ```mermaid
@@ -718,7 +772,7 @@ flowchart LR
     hapi -->|"yes"| upapi["add up to 2 pods per 30 s<br/>max 8"]
     hapi -->|"below for 3 min"| downapi["remove 1 pod per min<br/>min 2"]
     upapi --> ready["new API pod passes /health/ready<br/>PostgreSQL + Redis reachable"]
-    ready --> dns["api-headless DNS lists its IP"]
+    ready --> dns["Service api DNS lists its IP"]
     dns --> lb["each gateway pod re-resolves within 5 s<br/>least_conn sends it requests"]
 
     hgw -->|"yes"| upgw["add gateway pods<br/>max 6, default scale-up"]
@@ -726,17 +780,17 @@ flowchart LR
     upgw --> svc["gateway Service adds the pod<br/>own microcache, token and key caches, empty at start"]
 ```
 
-* **The database is the ceiling.** One PostgreSQL pod; each API replica has at most 10 connections, so 8 replicas
-  give PostgreSQL at most 80. Beyond that, capacity comes from the database (read replicas, a bigger instance, a
+* **The database is the ceiling.** One PostgreSQL server; each API replica has at most 10 pooled connections plus
+  one for its readiness check, so 8 replicas give PostgreSQL at most 88 (of `max_connections = 200`). Beyond that, capacity comes from the database (read replicas, a bigger instance, a
   pooler).
 * Rate limits per user are shared in Redis (flow 7), so they do not grow with the number of replicas.
 * Change a range without touching the other project:
   `kubectl -n product-management patch hpa api -p '{"spec":{"minReplicas":4}}'`.
 
-Code: [`backend/deploy/kubernetes.yaml`](../backend/deploy/kubernetes.yaml) (HPA `api`, Service `api-headless`),
-[`frontend/deploy/kubernetes.yaml`](../frontend/deploy/kubernetes.yaml) (HPA `gateway`),
+Code: [`hpa.yaml`](../backend/deploy/k8s/base/hpa.yaml) (HPA `api`), [`service.yaml`](../backend/deploy/k8s/base/service.yaml)
+(Service `api`), [`gateway.yaml`](../frontend/deploy/k8s/base/gateway.yaml) (HPA `gateway`),
 [`default.conf.template`](../frontend/gateway/default.conf.template) (`resolver valid=5s`, `resolve`, `least_conn`),
-[`cluster-addons.sh`](../scripts/cluster-addons.sh). Decision:
+[`cluster-addons.sh`](../infra/cluster-addons.sh). Decision:
 [ADR 0018](adr/0018-autoscaling-and-scale-testing.md).
 
 ---
@@ -746,19 +800,19 @@ Code: [`backend/deploy/kubernetes.yaml`](../backend/deploy/kubernetes.yaml) (HPA
 ### The teams run: concurrency, retries and the ledger
 
 `seed-bulk.sh` loads the large catalogue; `run.sh teams` runs k6 *inside* the cluster (a Job hitting the gateway
-Service) with ten API consumers browsing, searching and changing stock, a share of the changes sent twice with the
-same `Idempotency-Key`. Afterwards the script compares the number of changes k6 saw applied with the rows the ledger
+Service) with many virtual users, signed in as the demo accounts, browsing, searching and changing stock, a share of
+the changes sent twice with the same `Idempotency-Key`. Afterwards the script compares the number of changes k6 saw applied with the rows the ledger
 gained: one applied change must mean exactly one ledger row. Then `verify-data.sh` checks the data invariants.
 
 ```mermaid
 flowchart TD
-    seed["load-tests/seed-bulk.sh<br/>PRODUCTS=850000 by default"] --> s1["psql data/bulk-seed.sql<br/>products + about 5 million movements"]
+    seed["backend/load-tests/seed-bulk.sh<br/>PRODUCTS=850000 by default"] --> s1["psql data/bulk-seed.sql<br/>products + about 5 million movements"]
     s1 --> s2["redis-cli INCR catalog:generation"]
     s2 --> s3["verify-data.sh"]
     s3 --> r1
 
-    subgraph run["load-tests/run.sh teams"]
-        r1["raise the gateway per-IP limit<br/>and the API limits too when PEAK is set"] --> r2["SQL: id range, ledger rows<br/>by load-tester-NN before"]
+    subgraph run["backend/load-tests/run.sh teams"]
+        r1["raise the gateway per-IP limit<br/>and the API's per-user limits"] --> r2["SQL: id range,<br/>highest ledger id before"]
         r2 --> r3["ConfigMaps k6-scripts, k6-lib<br/>Job k6-teams, grafana/k6"]
         r3 --> k6
         k6 --> r4["Job complete?<br/>a crossed k6 threshold marks the run failed"]
@@ -766,11 +820,11 @@ flowchart TD
         r5 -->|"no"| mm["MISMATCH: applied twice or lost"]
         r5 -->|"yes"| r6["verify-data.sh"]
         mm --> r6
-        r6 --> r7["restore limits on exit<br/>PASSED or FAILED"]
+        r6 --> r7["restore the saved limits on exit<br/>PASSED or FAILED"]
     end
 
     subgraph k6["teams.js, in the cluster"]
-        t1["setup: tokens for 10 load-tester consumers + manager<br/>50 hot products from stock-level"] --> t2["mix: 30 % list, 25 % get, 15 % search,<br/>5 % stock-level, 5 % history, 20 % stock change"]
+        t1["setup: tokens for viewer, clerk, manager<br/>50 hot products from stock-level"] --> t2["mix: 30 % list, 25 % get, 15 % search,<br/>5 % stock-level, 5 % history, 20 % stock change"]
         t2 --> t3["stock change, new Idempotency-Key<br/>10 % double click, 30 % retry after the answer<br/>same key again while the outcome is unknown"]
         t3 --> t4["handleSummary: TEAMS_RESULT applied, unknown"]
     end
@@ -781,15 +835,17 @@ flowchart TD
 ```
 
 Other scenarios (`smoke`, `load`, `stress`, `spike`, `stock-consistency`, `rate-limit`, `browse`) use the same
-`run.sh` Job without the ledger comparison; `stress`, `spike` and `browse` lift the rate limits for the run. Code:
-[`seed-bulk.sh`](../load-tests/seed-bulk.sh), [`run.sh`](../load-tests/run.sh), [`teams.js`](../load-tests/teams.js),
-[`verify-data.sh`](../load-tests/verify-data.sh), [`verify.sql`](../load-tests/data/verify.sql). Results:
+`run.sh` Job without the ledger comparison. Every scenario except `rate-limit` raises the API's per-user limits for
+the run, and `stress`, `spike`, `browse` and `teams` also the gateway's per-IP limit; the deployed values are saved
+first and set back on exit, so no override is left behind. Code:
+[`seed-bulk.sh`](../backend/load-tests/seed-bulk.sh), [`run.sh`](../backend/load-tests/run.sh), [`teams.js`](../backend/load-tests/teams.js),
+[`verify-data.sh`](../backend/load-tests/verify-data.sh), [`verify.sql`](../backend/load-tests/data/verify.sql). Results:
 [load-test-results.md](load-test-results.md). Decisions: [ADR 0015](adr/0015-load-testing.md),
 [ADR 0018](adr/0018-autoscaling-and-scale-testing.md).
 
 ### The assessment, checked against the running system
 
-`scripts/check-requirements.py` walks the assessment PDF requirement by requirement through the gateway (so the
+`backend/scripts/check-requirements.py` walks the assessment PDF requirement by requirement through the gateway (so the
 requests spread over the replicas), with `Cache-Control: no-cache` on every call and retrying on 429.
 
 ```mermaid
@@ -803,4 +859,35 @@ flowchart LR
     c6 --> c7["delete its products<br/>print passed of 14<br/>exit 1 on any failure"]
 ```
 
-Code: [`check-requirements.py`](../scripts/check-requirements.py).
+Code: [`check-requirements.py`](../backend/scripts/check-requirements.py).
+
+---
+
+## 12. Logs, from a request to Grafana
+
+The system is observed through its logs alone ([guide chapter 8](guide/08-observability.md)). The gateway keeps a
+valid incoming `traceparent` or builds one from its request id, logs the `trace_id`, and passes the header on; the
+API's log lines carry the same id. Both write JSON to stdout; collectors push everything to Loki on the log server,
+outside the cluster (`LOKI_URL`), which keeps it for 14 days. The whole chain is optional (the infra's `logs`
+component): without it the pods still log to stdout and the gateway answers `/collect` with 204. The browser has no stdout anyone can read, so the web app
+reports its errors (errors only) with the Grafana Faro SDK to the gateway's `/collect`, which forwards them to Alloy's
+`faro.receiver`.
+
+```mermaid
+flowchart LR
+    br(["browser<br/>errors (Faro SDK)"]) -->|"POST /collect"| gw
+    req(["request"]) --> gw["gateway<br/>traceparent, access log<br/>with trace_id"]
+    gw -->|"traceparent"| api["API<br/>TraceId in every line"]
+
+    gw & api -. stdout .-> alloy["Alloy (cluster)<br/>trace_id, level<br/>+ faro.receiver"]
+    gw -->|"proxy /collect"| alloy
+    pg[("PostgreSQL")] & rd[("Redis")] -. logs .-> agent["server agent"]
+
+    alloy -->|"LOKI_URL"| loki["Loki"]
+    agent --> loki
+    loki --> graf["Grafana<br/>2 dashboards, 12 alerts,<br/>logs of one trace_id"]
+```
+
+Code: [`browser-errors.ts`](../frontend/src/app/core/observability/browser-errors.ts), [`trace.js`](../frontend/gateway/trace.js), [`LoggingExtensions.cs`](../backend/ProductManagement.Api/Observability/LoggingExtensions.cs),
+[`config.alloy`](../infra/logs/k8s/config.alloy), [`server-agent.alloy`](../infra/logs/server-agent.alloy),
+[`rules.yaml`](../infra/logs/grafana/provisioning/alerting/rules.yaml).

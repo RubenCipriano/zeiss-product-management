@@ -2,6 +2,11 @@
 
 **Status:** accepted
 
+> **Update (2026-10-10):** each API replica also holds one connection for its readiness check (`SELECT 1` on its
+> own pool, 2 s timeouts), so a saturated request pool cannot fail readiness on every replica at once. At the maximum
+> the database sees 8 × (10 + 1) = 88 connections, within `max_connections = 200`. PostgreSQL now runs on its own
+> server outside the cluster ([0021](0021-deployment-layout.md), [0022](0022-database-at-scale.md)).
+
 ## Context
 
 Two questions the earlier load tests left open: does the system still behave with a realistic amount of data
@@ -20,18 +25,18 @@ duplicated or lost?
 * Fast scale-up (up to 2 pods every 30 s, no stabilisation window) and slow scale-down (3 minutes of lower load,
   then 1 pod a minute): adding capacity late costs errors, removing it late costs only a little CPU.
 * The Deployment has no `replicas` field, so `kubectl apply` never fights the autoscaler.
-* Needs metrics-server: `scripts/cluster-addons.sh` installs it on Docker Desktop (MicroK8s has it as an add-on).
+* Needs metrics-server: `infra/cluster-addons.sh` installs it on Docker Desktop (MicroK8s has it as an add-on).
 
-**Data at scale.** `load-tests/seed-bulk.sh` loads 850,000 products (most of the 900,000 six-digit ids, leaving
+**Data at scale.** `backend/load-tests/seed-bulk.sh` loads 850,000 products (most of the 900,000 six-digit ids, leaving
 room for new ones) with 5 million stock movements, generated in SQL in about two minutes:
 
 * ids from `product_id_seq`, exactly like the API, so later inserts never collide;
 * realistic names, categories, prices and dates, and per product 1–11 movements by eight teams (stores, warehouses,
   the online shop, returns);
 * consistent by construction: each product's stock is the sum of its movements and the running stock never goes
-  below zero. `load-tests/verify-data.sh` checks those invariants (and id uniqueness) in a few seconds.
+  below zero. `backend/load-tests/verify-data.sh` checks those invariants (and id uniqueness) in a few seconds.
 
-**The `teams` scenario** (`load-tests/run.sh teams`): ten consumers act as ten teams on the big catalogue. They
+**The `teams` scenario** (`backend/load-tests/run.sh teams`): virtual users act as teams on the big catalogue. They
 browse (including deep pages), search, read products and histories, and change stock, half of the changes on 50
 "hot" products that every team touches. 30 % of the stock changes are sent twice with the same `Idempotency-Key`,
 one after the other or at the same instant. After the run, the script compares the number of changes the API

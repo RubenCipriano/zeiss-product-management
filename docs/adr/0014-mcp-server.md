@@ -1,6 +1,12 @@
 # 0014 — MCP server for AI assistants
 
-**Status:** accepted
+**Status:** Removed (2026-10-10)
+
+> **Update (2026-10-10):** the MCP server (`backend/ProductManagement.Mcp`), its unit tests, its API consumer
+> `mcp-server` and the local secret for it were removed. It was not required by the assessment, it was never deployed
+> (it ran only on a developer machine), and removing it leaves fewer moving parts to build, test, secure and explain.
+> Nothing else depended on it: it was a client of the public HTTP API. The record is kept as history; re-adding the
+> server would follow the same decision.
 
 ## Context
 
