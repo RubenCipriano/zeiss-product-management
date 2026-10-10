@@ -25,7 +25,7 @@ duplicated or lost?
 * Fast scale-up (up to 2 pods every 30 s, no stabilisation window) and slow scale-down (3 minutes of lower load,
   then 1 pod a minute): adding capacity late costs errors, removing it late costs only a little CPU.
 * The Deployment has no `replicas` field, so `kubectl apply` never fights the autoscaler.
-* Needs metrics-server: `infra/cluster-addons.sh` installs it on Docker Desktop (MicroK8s has it as an add-on).
+* Needs metrics-server: `infra/cluster-addons.sh` installs it on Docker Desktop (k3s and most managed clusters ship it).
 
 **Data at scale.** `backend/load-tests/seed-bulk.sh` loads 850,000 products (most of the 900,000 six-digit ids, leaving
 room for new ones) with 5 million stock movements, generated in SQL in about two minutes:

@@ -283,8 +283,8 @@ Without it, deploy the frontend without a collector (a CI/CD variable `LOGS=off`
 ## 5. The Kubernetes cluster (k3s)
 
 **Tested here:** the manifests render and validate for staging and production
-(`backend/deploy/ci/validate-manifests.sh` and `frontend/deploy/ci/validate-manifests.sh`, in CI), and the same bases
-run on Docker Desktop and on MicroK8s in CI. **Procedure:** k3s itself.
+(`backend/deploy/ci/validate-manifests.sh` and `frontend/deploy/ci/validate-manifests.sh`, in each pipeline's test
+stage), and the same bases run on Docker Desktop. **Procedure:** k3s itself.
 
 ```bash
 # First server (pin the version: the manifests are validated against Kubernetes 1.34)
@@ -362,14 +362,15 @@ cluster. Traffic that leaves the cluster (to PostgreSQL and Redis) crosses the p
 
 ## 7. GitLab
 
-**Tested here:** the scripts the pipelines call run locally and in GitHub Actions (below). **Procedure:** the GitLab
-configuration itself; the pipelines have not run on a GitLab instance as part of this assessment.
+**Tested here:** the scripts the pipelines call run locally, and each `.gitlab-ci.yml` is validated against GitLab's
+CI schema. **Procedure:** the GitLab configuration itself; the pipelines have not run on a GitLab instance as part of
+this assessment.
 
 ### Group, projects and branch protection
 
-1. Create a group (e.g. `product-management`) and three projects in it: `infra`, `backend`, `frontend`. Push each
-   part's folder as the root of its project (`infra/` → `infra`, and so on); each has its own `.gitlab-ci.yml`,
-   `.gitignore` and README.
+1. Create a group (here `zeiss`) and three projects in it: `backend` (`backend/`, with `docs/` and the main README),
+   `frontend` (`frontend/`) and `deploy` (`infra/`, called infra in this guide). Each part's folder is the root of its
+   project, with its own `.gitlab-ci.yml`, `.gitignore` and README.
 2. In each project, **protected branch `main`:** allowed to merge: Maintainers; allowed to push: no one; force push
    off.
 3. **Merge requests:** pipelines must succeed; all threads resolved; at least one approval (Premium: code owners for
@@ -418,19 +419,19 @@ sudo gitlab-runner register --url https://gitlab.com --token "$RUNNER_TOKEN" --e
 The deploy jobs use `kubectl` through the agent: a pod in each cluster that connects **out** to GitLab, so the
 clusters' API servers are never exposed. One agent per cluster, shared by the three projects:
 
-1. In the infra project (or a separate "cluster management" project), add `.gitlab/agents/production/config.yaml`
-   (and `staging/config.yaml` for the staging cluster):
+1. In the infra project, `zeiss/deploy` (or a separate "cluster management" project), add
+   `.gitlab/agents/production/config.yaml` (and `staging/config.yaml` for the staging cluster):
 
    ```yaml
    ci_access:
      projects:
-       - id: product-management/backend
+       - id: zeiss/backend
          access_as:
            ci_job: {}    # act as the CI job's identity: grant it rights with RBAC (below)
-       - id: product-management/frontend
+       - id: zeiss/frontend
          access_as:
            ci_job: {}
-       - id: product-management/infra
+       - id: zeiss/deploy
          access_as:
            ci_job: {}
    ```
@@ -449,7 +450,7 @@ clusters' API servers are never exposed. One agent per cluster, shared by the th
    The simplest correct start is `cluster-admin` bound to `gitlab:project_env:<project id>:production` for each of the
    three projects; tighten it to a Role per namespace (and the one ClusterRole for infra) afterwards.
 4. The jobs select the cluster with `KUBE_CONTEXT=<agent configuration project path>:<agent name>`, e.g.
-   `product-management/infra:production`.
+   `zeiss/deploy:production`.
 
 ### Environments
 
@@ -484,7 +485,7 @@ backend gives them to the migration and the API):
 | `PM_MIGRATOR_PASSWORD` | Variable | ✔ | ✔ (hidden) | staging, production | `openssl rand -hex 32`: `pm_migrator`, the schema owner |
 | `PM_APP_PASSWORD` | Variable | ✔ | ✔ (hidden) | staging, production | `openssl rand -hex 32`: `pm_app`, the API's database user |
 | `REDIS_PASSWORD` | Variable | ✔ | ✔ (hidden) | staging, production | `openssl rand -hex 32`: the Redis password |
-| `KUBE_CONTEXT` | Variable | ✔ | | staging, production | `product-management/infra:<agent>`; the same agent for the three projects (or set it in each project) |
+| `KUBE_CONTEXT` | Variable | ✔ | | staging, production | `zeiss/deploy:<agent>`; the same agent for the three projects (or set it in each project) |
 
 Environment-scoped group variables need GitLab Premium; on the Free tier, set the three passwords in both the infra
 and the backend project, with the same values.
@@ -560,7 +561,7 @@ Merge request pipelines test, build and scan; pipelines on `main` also deploy. D
 [chapter 9](09-deployment-and-operations.md#cicd-pipelines).
 
 The k6 smoke test is not in the GitLab pipelines: its scripts sign in with the local demo secrets, so it would need
-those consumers in staging. It runs in GitHub Actions against the MicroK8s deployment instead.
+those consumers in staging. Run it by hand after a local deployment (`backend/load-tests/run.sh smoke`).
 
 ## 8. The first deployment, in order
 
@@ -695,8 +696,7 @@ log; the servers' logs under `{namespace="servers"}` ([chapter 8](08-observabili
 ## Where to look
 
 * Pipelines: [`infra/.gitlab-ci.yml`](../../infra/.gitlab-ci.yml), [`backend/.gitlab-ci.yml`](../../backend/.gitlab-ci.yml),
-  [`frontend/.gitlab-ci.yml`](../../frontend/.gitlab-ci.yml); GitHub Actions:
-  [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
+  [`frontend/.gitlab-ci.yml`](../../frontend/.gitlab-ci.yml)
 * Pipeline scripts: [`backend/deploy/ci/create-secrets.sh`](../../backend/deploy/ci/create-secrets.sh),
   [`backend/deploy/ci/deploy-environment.sh`](../../backend/deploy/ci/deploy-environment.sh),
   [`backend/deploy/ci/validate-manifests.sh`](../../backend/deploy/ci/validate-manifests.sh),

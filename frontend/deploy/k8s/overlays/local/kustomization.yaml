@@ -1,4 +1,4 @@
-# Local environment: Docker Desktop's Kubernetes (or MicroK8s) on this machine.
+# Local environment: Docker Desktop's Kubernetes on this machine.
 #   deploy/deploy.sh        # builds the web and gateway images, applies this overlay
 #
 # The gateway is a LoadBalancer Service: Docker Desktop publishes it on http://localhost:8080.

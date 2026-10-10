@@ -18,7 +18,7 @@ prove, one real example of each, how to run every one of them, and the project a
 | Acceptance (BDD) | `Api.AcceptanceTests` | 16 | Gherkin scenarios (Reqnroll) against the same real stack |
 | **Back end total** | | **381** | `dotnet test` |
 | Unit / component | front end (Vitest) | **185** (34 spec files) | Angular components, services and the store, in a simulated DOM |
-| End-to-end | Playwright | **22** | the running system (gateway, API, Redis, PostgreSQL) in a real browser: 11 scenarios × desktop and phone; the browser-errors scenario also reads Loki and is skipped where no Loki answers (the GitHub CI cluster, which runs without logs) |
+| End-to-end | Playwright | **22** | the running system (gateway, API, Redis, PostgreSQL) in a real browser: 11 scenarios × desktop and phone; the browser-errors scenario also reads Loki and is skipped when no Loki is reachable (e.g. `LOGS=off`) |
 | Requirements | `backend/scripts/check-requirements.py` | 14 checks | the running system, through the gateway |
 | Audit | Lighthouse user flow | 5 steps × 2 form factors | the running system, signed in |
 | Load | k6 scenarios | 8 | the running cluster, from inside it ([chapter 6](06-scaling-and-capacity.md)) |

@@ -1,14 +1,14 @@
-# 0011 — Kubernetes deployment (Docker Desktop or MicroK8s locally), one manifest per project
+# 0011 — Kubernetes deployment (Docker Desktop locally), one manifest per project
 
 **Status:** superseded in part by [0021](0021-deployment-layout.md) (supersedes the Docker Compose setup)
 
 > **Update (2026-10-10):** the per-project manifests and deploy scripts, PostgreSQL and Redis in the cluster, the
 > migration Job and the `api` ClusterIP Service are gone: see [0021](0021-deployment-layout.md) (Kustomize overlays,
 > servers outside the cluster, migrations run by the pipeline with the API image). Still valid: Kubernetes on Docker
-> Desktop or MicroK8s, one Dockerfile per image, pod hardening, zero-downtime rollouts, NetworkPolicies between the
+> Desktop locally, one Dockerfile per image, pod hardening, zero-downtime rollouts, NetworkPolicies between the
 > gateway and the applications; the HorizontalPodAutoscalers were added later ([0018](0018-autoscaling-and-scale-testing.md)).
-> `scripts/cluster-up.sh` and `cluster-down.sh` (MicroK8s in a Multipass VM) were removed as well: MicroK8s is used
-> natively on Linux, by the CI job. Later the deployment was split into three parts (infra, backend, frontend) and the
+> The second local cluster option and its VM scripts (`scripts/cluster-up.sh`, `cluster-down.sh`) were removed:
+> Docker Desktop is the only local cluster, and any other cluster takes images from a registry. Later the deployment was split into three parts (infra, backend, frontend) and the
 > headless Service `api-headless` renamed to `api` ([0021, update](0021-deployment-layout.md#update-2026-10-10)).
 
 ## Context
@@ -20,10 +20,9 @@ deployments.
 ## Decision
 
 * **Kubernetes**, run locally on **Docker Desktop's built-in cluster** (everything is visible in Docker Desktop, and
-  the gateway is published on `localhost:8080`) or on **MicroK8s** (`scripts/cluster-up.sh` creates a Multipass VM
-  on macOS/Windows; native on Linux; also used in CI). The manifests are plain Kubernetes and also work on AKS, EKS
+  the gateway is published on `localhost:8080`). The manifests are plain Kubernetes and also work on k3s, AKS, EKS
   or GKE. The deploy scripts target the current `kubectl` context. On Docker Desktop, images built locally are used
-  directly; on MicroK8s they are pushed to its registry.
+  directly; other clusters pull them from a registry.
 * **One self-contained YAML per project**, each with its own deploy script:
   * `backend/deploy/kubernetes.yaml`: PostgreSQL (StatefulSet + PVC), Redis, the API's signing key and consumers
     (Secrets), the migration Job, the API (Deployment, `api` and headless `api-headless` Services,
@@ -41,7 +40,7 @@ deployments.
 * **Zero-downtime rollouts:** `maxUnavailable: 0`, startup/readiness/liveness probes (readiness includes PostgreSQL;
   Redis only degrades it), and a `preStop` delay so in-flight requests finish before a pod leaves the endpoints.
 * **NetworkPolicies:** PostgreSQL accepts only the API and the migration Job; Redis accepts only those two; the API and
-  the web app accept only the gateway. They are enforced by CNIs that support them (MicroK8s' Calico, cloud CNIs);
+  the web app accept only the gateway. They are enforced by CNIs that support them (Calico, Cilium, cloud CNIs);
   Docker Desktop's single-node cluster accepts but does not enforce them.
 
 ## Consequences

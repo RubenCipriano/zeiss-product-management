@@ -4,8 +4,8 @@
 #   ./cluster-addons.sh
 #
 # metrics-server: reports pod CPU and memory. The API's HorizontalPodAutoscaler needs it to decide how many replicas
-# to run, and `kubectl top pods` uses it. MicroK8s ships it as an add-on (`microk8s enable metrics-server`, as the
-# CI job does); on Docker Desktop it is installed from the official release manifest, pinned to a version.
+# to run, and `kubectl top pods` uses it. k3s and most managed clusters ship it already; on Docker Desktop it is
+# installed from the official release manifest, pinned to a version.
 set -euo pipefail
 METRICS_SERVER_VERSION="${METRICS_SERVER_VERSION:-v0.8.0}"
 context="$(kubectl config current-context)"

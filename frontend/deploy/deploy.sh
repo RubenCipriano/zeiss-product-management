@@ -10,7 +10,9 @@
 #
 # Variables:
 #   ENVIRONMENT                  local | staging | production (default: local)
-#   WEB_IMAGE, GATEWAY_IMAGE     the images to deploy (registry/name:tag or name@sha256:digest); no local build
+#   WEB_IMAGE, GATEWAY_IMAGE     the images to deploy (registry/name:tag or name@sha256:digest); no local build.
+#                                Without them both images are built here, which only Docker Desktop's Kubernetes
+#                                can use (it runs on the same Docker engine); any other context needs them
 #   LOGS=off                     no log collector: COLLECTOR_UPSTREAM becomes "", so the gateway answers /collect
 #                                with 204 and drops the reports (instead of 502 errors in the browser's console)
 set -euo pipefail
@@ -35,20 +37,6 @@ image_tag() {
   echo "$tag"
 }
 
-# Makes a locally built image available to the cluster and prints the reference the cluster should use.
-# Docker Desktop's Kubernetes runs on the same Docker engine that built it: nothing to do. MicroK8s (the GitHub
-# Actions job) pulls from its built-in registry at localhost:32000.
-publish_image() {
-  local image="$1"
-  if [[ "$(kubectl config current-context)" == docker-desktop ]]; then
-    echo "$image"
-  else
-    docker tag "$image" "localhost:32000/$image"
-    docker push -q "localhost:32000/$image" >/dev/null
-    echo "localhost:32000/$image"
-  fi
-}
-
 # One Kustomize `images` entry: name → reference (registry/name:tag or name@sha256:digest).
 pin_image() {
   local name="$1" ref="$2"
@@ -59,7 +47,17 @@ pin_image() {
   fi
 }
 
-echo "Deploying the web app and the gateway ($ENVIRONMENT) to Kubernetes context: $(kubectl config current-context)"
+CONTEXT="$(kubectl config current-context)"
+echo "Deploying the web app and the gateway ($ENVIRONMENT) to Kubernetes context: $CONTEXT"
+
+# Without WEB_IMAGE and GATEWAY_IMAGE the images are built here, and only Docker Desktop's Kubernetes can run them as
+# is: it shares the Docker engine that built them. Any other cluster (staging, production) pulls from a registry.
+if [[ ( -z "${WEB_IMAGE:-}" || -z "${GATEWAY_IMAGE:-}" ) && "$CONTEXT" != docker-desktop ]]; then
+  echo "WEB_IMAGE and GATEWAY_IMAGE not given and the context is $CONTEXT, not docker-desktop: locally built images" >&2
+  echo "would not reach this cluster. Push them to a registry and pass both, e.g." >&2
+  echo "WEB_IMAGE=registry.example.com/web:1.2.3 GATEWAY_IMAGE=registry.example.com/gateway:1.2.3" >&2
+  exit 1
+fi
 
 if [[ -z "${WEB_IMAGE:-}" || -z "${GATEWAY_IMAGE:-}" ]]; then
   tag="$(image_tag)"
@@ -69,8 +67,8 @@ if [[ -z "${WEB_IMAGE:-}" || -z "${GATEWAY_IMAGE:-}" ]]; then
   # APP_VERSION: the release the web app reports with its browser errors.
   docker build --quiet --tag "$web" --build-arg APP_VERSION="$tag" "$FRONTEND" >/dev/null
   docker build --quiet --tag "$gateway" "$FRONTEND/gateway" >/dev/null
-  WEB_IMAGE="$(publish_image "$web")"
-  GATEWAY_IMAGE="$(publish_image "$gateway")"
+  WEB_IMAGE="$web"
+  GATEWAY_IMAGE="$gateway"
 fi
 
 # The overlay with this release's images pinned (Kustomize `images`): the manifests are never edited by text.
@@ -112,7 +110,7 @@ kubectl -n "$NAMESPACE" rollout status deployment/gateway --timeout=300s
 echo
 kubectl -n "$NAMESPACE" get pods -l 'app.kubernetes.io/name in (web, gateway)'
 if [[ "$ENVIRONMENT" == local ]]; then
-  if [[ "$(kubectl config current-context)" == docker-desktop ]]; then
+  if [[ "$CONTEXT" == docker-desktop ]]; then
     echo "Application: http://localhost:8080   (the gateway is a LoadBalancer Service on localhost)"
   else
     echo "Application: kubectl -n $NAMESPACE port-forward service/gateway 8080:8080   →   http://localhost:8080"

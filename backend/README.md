@@ -2,8 +2,9 @@
 
 The backend of the Product Management system: a .NET 10 / ASP.NET Core Web API with EF Core and PostgreSQL, a Redis
 read cache, JWT authentication (tokens issued by the API to registered consumers), role-based authorization, rate
-limiting and idempotency keys. This folder is self-contained, meant to be its own repository: the code, the tests,
-the image, the Kubernetes manifests, the deploy script, the load tests and the GitLab pipeline.
+limiting and idempotency keys. This folder is self-contained, its own repository
+([gitlab.com/zeiss/backend](https://gitlab.com/zeiss/backend)): the code, the tests, the image, the Kubernetes
+manifests, the deploy script, the load tests and the GitLab pipeline.
 
 The system as a whole (the web app, the gateway, the servers) is described in the [guide](../docs/README.md);
 deployment and operations in [chapter 9](../docs/guide/09-deployment-and-operations.md).
@@ -86,8 +87,8 @@ Locally it:
    key, the demo consumers' hashes and `passwords.env` with the local database and Redis passwords, all in
    `deploy/k8s/overlays/local/generated/`, gitignored, readable only by you);
 2. builds the image from this folder, tagged with the commit (plus `-dirty-<timestamp>` with uncommitted changes),
-   and makes it available to the cluster (Docker Desktop uses it directly; another context, such as MicroK8s, gets it
-   pushed to `localhost:32000`);
+   which Docker Desktop's Kubernetes uses straight from the local Docker engine (any other context needs `API_IMAGE`,
+   an image from a registry, and the script stops without it);
 3. runs the database migrations with that image (`migrate`), as the schema owner `pm_migrator`, and seeds the sample
    data into an empty database;
 4. renders the overlay with the image pinned (`deploy/k8s/.build/<environment>/`, not committed), applies it and

@@ -6,7 +6,8 @@
 #
 # Locally (ENVIRONMENT=local, the default) it:
 #   1. creates the local secrets if they are missing (deploy/local-secrets.sh);
-#   2. builds the API image from this folder and makes it available to the cluster;
+#   2. builds the API image from this folder (Docker Desktop's Kubernetes uses it straight from the local Docker
+#      engine; any other cluster needs API_IMAGE, an image from a registry);
 #   3. applies the database migrations (and, on an empty database, the sample data) with that image;
 #   4. applies the overlay with the image pinned, and waits for the rollout.
 # The database and Redis must be running (the infra repository: `infra.sh up database redis`).
@@ -42,20 +43,6 @@ image_tag() {
   echo "$tag"
 }
 
-# Makes a locally built image available to the cluster and prints the reference the cluster should use.
-# Docker Desktop's Kubernetes runs on the same Docker engine that built it: nothing to do. MicroK8s (the GitHub
-# Actions job) pulls from its built-in registry at localhost:32000.
-publish_image() {
-  local image="$1"
-  if [[ "$(kubectl config current-context)" == docker-desktop ]]; then
-    echo "$image"
-  else
-    docker tag "$image" "localhost:32000/$image"
-    docker push -q "localhost:32000/$image" >/dev/null
-    echo "localhost:32000/$image"
-  fi
-}
-
 # One Kustomize `images` entry: name → reference (registry/name:tag or name@sha256:digest).
 pin_image() {
   local name="$1" ref="$2"
@@ -81,7 +68,16 @@ run_migrations() {
     "$API_IMAGE" migrate
 }
 
-echo "Deploying the API ($ENVIRONMENT) to Kubernetes context: $(kubectl config current-context)"
+CONTEXT="$(kubectl config current-context)"
+echo "Deploying the API ($ENVIRONMENT) to Kubernetes context: $CONTEXT"
+
+# Without API_IMAGE the image is built here, and only Docker Desktop's Kubernetes can run it as is: it shares the
+# Docker engine that built it. Any other cluster (staging, production) pulls from a registry, so it needs API_IMAGE.
+if [[ -z "${API_IMAGE:-}" && "$CONTEXT" != docker-desktop ]]; then
+  echo "No API_IMAGE given and the context is $CONTEXT, not docker-desktop: a locally built image would not reach" >&2
+  echo "this cluster. Push the image to a registry and pass it, e.g. API_IMAGE=registry.example.com/api:1.2.3" >&2
+  exit 1
+fi
 
 if [[ "$ENVIRONMENT" == local ]]; then
   "$DEPLOY/local-secrets.sh"
@@ -91,7 +87,7 @@ if [[ -z "${API_IMAGE:-}" ]]; then
   image="product-management/api:$(image_tag)"
   echo "==> Building $image"
   docker build --quiet --tag "$image" "$BACKEND" >/dev/null
-  API_IMAGE="$(publish_image "$image")"
+  API_IMAGE="$image"
 fi
 
 if [[ "${MIGRATIONS:-run}" == skip ]]; then

@@ -23,7 +23,7 @@ whose network plugin enforces NetworkPolicies); none of them requires applicatio
 
 ## 1. The assessment PDF
 
-Checked against the running system by `backend/scripts/check-requirements.py` (14 checks, all passing; also in CI).
+Checked against the running system by `backend/scripts/check-requirements.py` (14 checks, all passing; also in the backend pipeline, against staging).
 
 | Requirement | Status | Evidence |
 | --- | :---: | --- |
@@ -66,7 +66,7 @@ Checked against the running system by `backend/scripts/check-requirements.py` (1
 | Browser security | ✅ | strict CSP, no third-party requests, COOP/CORP, Permissions-Policy ([ADR 0019](../adr/0019-content-security-policy.md)) |
 | Fail fast on bad configuration | ✅ | signing key, consumers and every options section validated at start-up; no Redis outside Development → the API does not start |
 | Database privileges | ✅ | the API's user `pm_app` reads and writes rows only (`CREATE`, `ALTER`, `DROP` refused), 30 s statement timeout; only the migration step uses the schema owner `pm_migrator`, outside the cluster ([`roles.sql`](../../infra/postgres/roles.sql)) |
-| Network | ⚠️ | NetworkPolicies: the API and the web pods accept connections only from the gateway. **Not enforced on Docker Desktop** (its network plugin ignores them; verified: a web pod reaches an API pod). Enforced on MicroK8s (Calico) and on production clusters with Calico or Cilium. PostgreSQL and Redis are outside the cluster and protected by credentials; production adds TLS and a firewall ([chapter 12](12-from-zero.md)). |
+| Network | ⚠️ | NetworkPolicies: the API and the web pods accept connections only from the gateway. **Not enforced on Docker Desktop** (its network plugin ignores them; verified: a web pod reaches an API pod). Enforced on k3s and on production clusters with Calico or Cilium. PostgreSQL and Redis are outside the cluster and protected by credentials; production adds TLS and a firewall ([chapter 12](12-from-zero.md)). |
 | Containers | ⚠️ | api, web: non-root, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp. gateway: the same, but with a writable root filesystem (nginx renders its configuration at start-up). |
 | Secrets | ⚠️ | one Secret, `api-secrets`, and no password in any YAML or connection string; locally generated on each machine (`backend/deploy/local-secrets.sh`, gitignored), staging and production from protected, masked CI/CD variables (`backend/deploy/ci/create-secrets.sh`; CI fails if a Secret appears in their overlays). Next: a secret manager (External Secrets / Vault) |
 | TLS | ⚠️ | at the edge: the staging and production overlays have an Ingress with a Let's Encrypt certificate from cert-manager (then add HSTS). To the servers: `SSL Mode=Require` encrypts but does not verify; `VerifyFull` needs the internal CA in the API pods ([chapter 12](12-from-zero.md#6-tls-inside-the-private-network)) |
@@ -111,7 +111,7 @@ Checked against the running system by `backend/scripts/check-requirements.py` (1
 
 | Item | Status | Notes |
 | --- | :---: | --- |
-| CI | ✅ | GitHub Actions: build with warnings as errors, `dotnet format`, all test suites, lint, every overlay validated, deploy to a real cluster, k6, the PDF check and Playwright ([chapter 9](09-deployment-and-operations.md#cicd-pipelines)) |
+| CI | ⚠️ | one GitLab pipeline per part: build with warnings as errors, `dotnet format`, all test suites, lint, every overlay validated, image scan, then the PDF check and Playwright against staging; defined and validated against GitLab's CI schema, **not yet run on a GitLab instance** ([chapter 9](09-deployment-and-operations.md#cicd-pipelines)) |
 | CD to staging and production | ⚠️ | one GitLab pipeline per part: backend (test → build → scan → migrate and deploy staging → verify → manual production), frontend (test → build → scan → deploy staging → Playwright → manual production), infra (validate → manual deploys per server); **not yet run on a GitLab instance** ([chapter 12](12-from-zero.md)) |
 | Database migrations | ✅ | run once per deployment, before the rollout, by the image being deployed, as `pm_migrator`; large indexes built concurrently; expand/contract, never rolled back |
 | Independent deployment of each part | ✅ | three self-contained parts, each with its own deploy script and pipeline: `infra/infra.sh up [database] [redis] [logs]`, `backend/deploy/deploy.sh`, `frontend/deploy/deploy.sh` ([chapter 9](09-deployment-and-operations.md#the-layout-three-parts)) |

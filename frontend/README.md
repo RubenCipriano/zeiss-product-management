@@ -1,9 +1,10 @@
 # Product Management — Web
 
 Angular 22 frontend for the Product Management API: Tailwind CSS + Angular CDK for the UI, sign-in against the
-API's token endpoint, role-aware screens. Generated with Angular CLI 22. This folder is self-contained, meant to be
-its own repository: the web app, the nginx **gateway** in front of the whole application, their Kubernetes manifests,
-the deploy script, the end-to-end tests and the GitLab pipeline. Architecture and decisions are in the
+API's token endpoint, role-aware screens. Generated with Angular CLI 22. This folder is self-contained, its own
+repository ([gitlab.com/zeiss/frontend](https://gitlab.com/zeiss/frontend)): the web app, the nginx **gateway** in
+front of the whole application, their Kubernetes manifests, the deploy script, the end-to-end tests and the GitLab
+pipeline. Architecture and decisions are in the
 [guide](../docs/README.md) ([chapter 7](../docs/guide/07-frontend.md)) and [ADR 0007](../docs/adr/0007-frontend-state.md).
 
 ## Run
@@ -102,8 +103,8 @@ LOGS=off deploy/deploy.sh         # the same, without a log collector: /collect 
 
 [`deploy/deploy.sh`](deploy/deploy.sh) deploys to the current `kubectl` context from
 `deploy/k8s/overlays/$ENVIRONMENT` (`local` by default). Locally it builds both images, tagged with the commit (plus
-`-dirty-<timestamp>` with uncommitted changes), makes them available to the cluster (Docker Desktop uses them
-directly; another context, such as MicroK8s, gets them pushed to `localhost:32000`), renders the overlay with the
+`-dirty-<timestamp>` with uncommitted changes), which Docker Desktop's Kubernetes uses straight from the local
+Docker engine (any other context needs `WEB_IMAGE` and `GATEWAY_IMAGE`, images from a registry), renders the overlay with the
 images pinned into `deploy/k8s/.build/<environment>/` (not committed), applies it and waits for both rollouts. On
 Docker Desktop the gateway is a `LoadBalancer` Service on http://localhost:8080; elsewhere
 `kubectl -n product-management port-forward service/gateway 8080:8080`.

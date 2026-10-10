@@ -1,6 +1,6 @@
 # Flows
 
-Every important flow of the system, end to end, as Mermaid diagrams (rendered by GitHub, GitLab and VS Code). Each
+Every important flow of the system, end to end, as Mermaid diagrams (rendered by GitLab and VS Code). Each
 diagram was drawn from the code as it is now; the links under each one point to the files that implement it and to
 the decision record (ADR) that explains why. The static picture (topology, components, data model) is in
 [architecture.md](architecture.md).
@@ -15,7 +15,7 @@ the decision record (ADR) that explains why. The static picture (topology, compo
 | 6 | [Create a product, update with If-Match](#6-create-a-product-update-with-if-match) | sequences | `ProductCommandService`, `UnitOfWork` |
 | 7 | [Rate limiting](#7-rate-limiting) | flowchart | `SharedTokenBucketRateLimiter`, `RedisDistributedRateLimiter` |
 | 8 | [Frontend: the product list screen](#8-frontend-the-product-list-screen) | flowchart | `products-store.ts`, `products-api.ts` |
-| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `infra.sh`, `deploy.sh` (backend, frontend), `.gitlab-ci.yml` (×3), `ci.yml` |
+| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `infra.sh`, `deploy.sh` (backend, frontend), `.gitlab-ci.yml` (×3) |
 | 10 | [Autoscaling](#10-autoscaling) | flowchart | `hpa.yaml`, `gateway.yaml`, `default.conf.template` |
 | 11 | [Load test and verification](#11-load-test-and-verification) | flowcharts | `backend/load-tests/`, `check-requirements.py` |
 | 12 | [Logs, from a request to Grafana](#12-logs-from-a-request-to-grafana) | flowchart | `trace.js`, `config.alloy`, `server-agent.alloy`, `browser-errors.ts` |
@@ -636,9 +636,10 @@ Three parts, three scripts, run in this order: `infra/infra.sh up` starts the se
 Compose, one file per component) and applies the cluster's log collector; `backend/deploy/deploy.sh` deploys the API;
 `frontend/deploy/deploy.sh` deploys the web app and the gateway. Each deploy script renders its environment's
 Kustomize overlay with this release's images pinned and applies it with `kubectl apply`. Locally they also build the
-images, with an immutable tag (the commit, plus a timestamp when the working tree is dirty). On Docker Desktop the
-locally built image is used directly; on any other context (MicroK8s) it is pushed to the node's registry at
-`localhost:32000`. Once per cluster, `infra/cluster-addons.sh` installs metrics-server.
+images, with an immutable tag (the commit, plus a timestamp when the working tree is dirty). Docker Desktop's
+Kubernetes uses the locally built images straight from the local Docker engine; any other context needs the images
+from a registry (`API_IMAGE`, `WEB_IMAGE`, `GATEWAY_IMAGE`, as the pipelines pass them), and the scripts stop without
+them. Once per cluster, `infra/cluster-addons.sh` installs metrics-server.
 
 ```mermaid
 flowchart TD
@@ -652,15 +653,15 @@ flowchart TD
     end
 
     subgraph backend["backend/deploy/deploy.sh"]
-        b0["local-secrets.sh, first run:<br/>signing key, consumers, passwords.env"] --> b1["docker build backend/<br/>tag = short SHA + dirty timestamp"]
-        b1 --> b2["publish to the cluster"]
+        b0["local-secrets.sh, first run:<br/>signing key, consumers, passwords.env"] --> b1["docker build backend/<br/>tag = short SHA + dirty timestamp<br/>(docker-desktop; else API_IMAGE)"]
+        b1 --> b2["image used from<br/>the local Docker engine"]
         b2 --> b3["docker run API image migrate<br/>as pm_migrator, PGPASSWORD:<br/>migrations, seed, cache generations"]
         b3 --> b4["render overlays/local + images<br/>secretGenerator api-secrets-hash"]
         b4 --> b5["kubectl apply<br/>rollout status api"]
     end
 
     subgraph frontend["frontend/deploy/deploy.sh"]
-        f1["docker build frontend/<br/>and frontend/gateway/"] --> f2["publish both"]
+        f1["docker build frontend/<br/>and frontend/gateway/<br/>(docker-desktop; else WEB_IMAGE, GATEWAY_IMAGE)"] --> f2["images used from<br/>the local Docker engine"]
         f2 --> f3{"LOGS=off?"}
         f3 -->|"no"| f4["render overlays/local + images"]
         f3 -->|"yes"| f5["render + patch<br/>COLLECTOR_UPSTREAM empty"]
@@ -722,37 +723,9 @@ Kubernetes; only the backend's migrate jobs need the runner inside the private n
 jobs run on the servers. Code: [`backend/.gitlab-ci.yml`](../backend/.gitlab-ci.yml),
 [`deploy-environment.sh`](../backend/deploy/ci/deploy-environment.sh),
 [`create-secrets.sh`](../backend/deploy/ci/create-secrets.sh), [`frontend/.gitlab-ci.yml`](../frontend/.gitlab-ci.yml),
-[`infra/.gitlab-ci.yml`](../infra/.gitlab-ci.yml). Setup: [guide chapter 12](guide/12-from-zero.md).
-
-### CI (GitHub Actions)
-
-On every push to `main` and every pull request, three jobs run in parallel for the whole repository; the end-to-end
-job runs only when all three pass, and deploys the three parts to a real MicroK8s cluster on the runner with the same
-scripts as above.
-
-```mermaid
-flowchart LR
-    trig(["push to main,<br/>pull request"]) --> jb & jf & jm
-
-    jb["<b>backend</b><br/>build Release, warnings as errors<br/>dotnet format, dotnet test<br/>Testcontainers: PostgreSQL + Redis"]
-    jf["<b>frontend</b><br/>npm ci, lint, format:check<br/>test:ci, build"]
-    jm["<b>manifests</b><br/>backend and frontend<br/>validate-manifests.sh,<br/>infra compose + logs/k8s"]
-
-    jb & jf & jm --> e1
-
-    subgraph e2e["e2e: deploy to MicroK8s"]
-        e1["MicroK8s 1.34<br/>infra.sh up database redis"] --> e2["CoreDNS: host.docker.internal"]
-        e2 --> e3["backend/deploy/deploy.sh<br/>LOGS=off frontend/deploy/deploy.sh"]
-        e3 --> e4["k6 smoke,<br/>stock-consistency"]
-        e4 --> e5["check-requirements.py<br/>Playwright"]
-    end
-
-    e5 -.->|"on failure"| diag["report, pods, events,<br/>API logs, servers"]
-```
-
-Code: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml),
+[`infra/.gitlab-ci.yml`](../infra/.gitlab-ci.yml); the manifests checks:
 [`backend/deploy/ci/validate-manifests.sh`](../backend/deploy/ci/validate-manifests.sh),
-[`frontend/deploy/ci/validate-manifests.sh`](../frontend/deploy/ci/validate-manifests.sh).
+[`frontend/deploy/ci/validate-manifests.sh`](../frontend/deploy/ci/validate-manifests.sh). Setup: [guide chapter 12](guide/12-from-zero.md).
 
 ---
 

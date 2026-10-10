@@ -155,7 +155,7 @@ the logs.
 
 **Important:** a NetworkPolicy is only enforced if the cluster's network plugin supports it. **Docker Desktop's
 built-in Kubernetes does not enforce them**: from a `web` pod, `nc -z <api pod IP> 8080` succeeds although
-`api-ingress` admits only the gateway. MicroK8s (Calico, used in CI) and production clusters with Calico or Cilium do
+`api-ingress` admits only the gateway. Production clusters with Calico or Cilium (k3s ships a policy controller too) do
 enforce them. On Docker Desktop the policies document the intended isolation but do not provide it.
 
 PostgreSQL and Redis run outside the cluster ([chapter 9](09-deployment-and-operations.md#what-runs-where)), so their

@@ -27,7 +27,7 @@ results measure gateway + API + PostgreSQL + Redis (and token issuance) rather t
   a few accounts, not many distinct users. (Earlier runs used ten dedicated load-test consumers, since removed.)
   Like a well-behaved client, the consistency test waits for `Retry-After` and retries when it is
   rate limited. Setup creates dedicated products and teardown deletes them.
-* `smoke` and `stock-consistency` also run in CI after deploying to MicroK8s on the runner.
+* `smoke` and `stock-consistency` are the quick checks after a deployment (`backend/load-tests/run.sh smoke`).
 
 ## Consequences
 

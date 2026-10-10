@@ -1,9 +1,9 @@
 # Product Management — Infra
 
 The servers the Product Management system needs outside its Kubernetes cluster, and the cluster's log collector.
-This folder is self-contained, meant to be its own repository. Locally every server is a Docker Compose container on
-this machine; on real machines the same configuration files run on each server, or a managed service (Amazon RDS,
-ElastiCache, Grafana Cloud) replaces it.
+This folder is self-contained, its own repository ([gitlab.com/zeiss/deploy](https://gitlab.com/zeiss/deploy)).
+Locally every server is a Docker Compose container on this machine; on real machines the same configuration files run
+on each server, or a managed service (Amazon RDS, ElastiCache, Grafana Cloud) replaces it.
 
 | Component | What | Files |
 | --- | --- | --- |
@@ -98,8 +98,7 @@ that sets `LOKI_URL` in [`logs/k8s/alloy.yaml`](logs/k8s/alloy.yaml) (default
 | frontend | the log collector's Service `alloy-faro.observability.svc.cluster.local:12347` (optional) | `COLLECTOR_UPSTREAM` in `deploy/k8s/overlays/<environment>/gateway.yaml`, or `LOGS=off` |
 
 Cluster add-on: [`cluster-addons.sh`](cluster-addons.sh) installs metrics-server into the current context (needed by
-the API's and the gateway's autoscalers; built into k3s and most managed clusters, `microk8s enable metrics-server`
-on MicroK8s).
+the API's and the gateway's autoscalers; built into k3s and most managed clusters).
 
 ## CI/CD (GitLab)
 

@@ -44,7 +44,7 @@ Two kinds of client use these accounts:
 ## The building blocks
 
 The application runs in one Kubernetes namespace, `product-management`, on Docker Desktop's single-node cluster
-(MicroK8s works too; k3s is the target for staging and production). Only stateless workloads and a log collector run
+(k3s is the target for staging and production). Only stateless workloads and a log collector run
 in the cluster. PostgreSQL, Redis and the log server (Grafana and Loki, logs only, optional) run outside it, as such
 servers usually do (locally: Docker Compose containers on the same machine), so the cluster can be rebuilt from Git at any time
 without touching the data ([chapter 8](08-observability.md) for the logs, [chapter 9](09-deployment-and-operations.md)
@@ -68,8 +68,8 @@ feature, no EF Core and no HTTP) ← `Infrastructure` (EF Core, Redis) ← `Api`
 
 ## Three parts, each deployed on its own
 
-The repository holds three self-contained parts that would be three repositories in real life. Each has its code (or
-configuration), its deploy script, its Kubernetes manifests and its own GitLab pipeline:
+The system is in three self-contained GitLab repositories: backend, frontend and deploy (the folder `infra/`). Each
+has its code (or configuration), its deploy script, its Kubernetes manifests and its own GitLab pipeline:
 
 | Part | What it holds | Deployed by |
 | --- | --- | --- |

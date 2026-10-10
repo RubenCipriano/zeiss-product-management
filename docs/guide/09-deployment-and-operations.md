@@ -13,8 +13,8 @@ and running load tests.
 
 ## The layout: three parts
 
-The repository holds three self-contained parts, each meant to become its own GitLab repository with its own
-pipeline ([ADR 0021](../adr/0021-deployment-layout.md)). Each one has its code (or configuration), its deploy script
+The system is in three self-contained parts, each its own GitLab repository with its own pipeline: backend,
+frontend and deploy (the folder `infra/`) ([ADR 0021](../adr/0021-deployment-layout.md)). Each one has its code (or configuration), its deploy script
 and its manifests together:
 
 ```text
@@ -162,7 +162,7 @@ Loki in the Secret `loki-credentials`). It also receives the browser's error rep
 gateway. [Chapter 8](08-observability.md) describes what it collects and how.
 
 **`kube-system`:** metrics-server, installed once per cluster by `infra/cluster-addons.sh` (built into k3s and most
-managed clusters; `microk8s enable metrics-server` on MicroK8s), which feeds the two HPAs and `kubectl top`.
+managed clusters), which feeds the two HPAs and `kubectl top`.
 
 Nothing in the cluster holds data: no StatefulSet, no volume, no database credential that can change the schema.
 
@@ -225,9 +225,10 @@ and push them to the project's registry):
 
 * **The tag:** the commit's short hash (`git rev-parse --short HEAD`), plus `-dirty-<timestamp>` when the working tree
   has uncommitted changes, so two different builds never share a tag.
-* **Where the image goes:** on Docker Desktop (context `docker-desktop`) the cluster runs on the same Docker engine
-  that built the image, so nothing is pushed. On any other context (MicroK8s in the CI job, on Linux) the image is
-  pushed to the node's registry at `localhost:32000`.
+* **Where the image comes from:** on Docker Desktop (context `docker-desktop`) the cluster runs on the same Docker
+  engine that built the image, so nothing is pushed. Any other context pulls from a registry, so the script needs the
+  image references (`API_IMAGE`; `WEB_IMAGE` and `GATEWAY_IMAGE`), as the pipelines pass them, and stops with a
+  message when they are missing.
 
 ## Migrations run before the rollout, with the image being deployed
 
@@ -264,26 +265,16 @@ exits, and only then is the new API rolled out. In the backend's GitLab pipeline
 
 ## CI/CD pipelines
 
-Every step the pipelines run is a script in the repository that also runs on a laptop.
-
-**GitHub Actions** ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)), for the whole repository, on every
-push to `main` and every pull request. Three jobs run in parallel; the fourth runs when all three pass.
-
-| Job | Runs |
-| --- | --- |
-| **backend** | `dotnet restore` → `dotnet format --verify-no-changes` → `dotnet build` in Release with warnings as errors → `dotnet test` on the whole solution (integration and acceptance tests start PostgreSQL and Redis with Testcontainers) |
-| **frontend** | `npm ci` → `npm run lint` → `npm run format:check` → `npm run test:ci` → `npm run build` |
-| **manifests** | `backend/deploy/ci/validate-manifests.sh` and `frontend/deploy/ci/validate-manifests.sh` in the `alpine/k8s` image (render, `kubeconform -strict` against the Kubernetes 1.34 schemas, the settings each overlay must set, no Secret where there must be none); `docker compose config` on the infra's three Compose files; the log collector's manifests rendered and validated |
-| **e2e** | installs MicroK8s 1.34 (dns, hostpath-storage, registry, metrics-server) → `infra/infra.sh up database redis` on the runner → maps `host.docker.internal` in CoreDNS → `backend/deploy/deploy.sh` → `LOGS=off frontend/deploy/deploy.sh` → k6 `smoke` → k6 `stock-consistency` → port-forward the gateway → `backend/scripts/check-requirements.py` → Playwright, desktop and mobile. On failure: the Playwright report is uploaded, and pods, events, API logs and the servers' status are printed. |
-
-**GitLab CI/CD**, one pipeline per part, the delivery pipelines for staging and production. The deploy jobs reach
-the clusters through the GitLab agent for Kubernetes (`KUBE_CONTEXT`), so no cluster API is exposed to the runners.
+One GitLab pipeline per repository (backend, frontend, deploy), the only CI/CD: it tests every merge request and
+delivers to staging and production. Every step it runs is a script in that repository that also runs on a laptop. The
+deploy jobs reach the clusters through the GitLab agent for Kubernetes (`KUBE_CONTEXT`), so no cluster API is exposed
+to the runners.
 
 *Backend* ([`backend/.gitlab-ci.yml`](../../backend/.gitlab-ci.yml)):
 
 | Stage | Jobs | Runs on |
 | --- | --- | --- |
-| test | `test:backend` (format, build, every test suite on Docker-in-Docker, JUnit), `test:manifests`, GitLab SAST and secret detection | merge requests, `main`, tags |
+| test | `test:backend` (`dotnet format --verify-no-changes`, Release build with warnings as errors, every test suite, the integration and acceptance tests with PostgreSQL and Redis from Testcontainers on Docker-in-Docker, JUnit), `test:manifests` (`deploy/ci/validate-manifests.sh` in the `alpine/k8s` image: render, `kubeconform -strict` against the Kubernetes 1.34 schemas, the settings each overlay must set, no Secret where there must be none), GitLab SAST and secret detection | merge requests, `main`, tags |
 | build | `build:api` → `$CI_REGISTRY_IMAGE/api:<short sha>`; `migrations:sql` (the idempotent SQL of every migration, for review in the merge request) | merge requests, `main`, tags |
 | scan | `scan:api`: Trivy, fails on fixable critical vulnerabilities | merge requests, `main`, tags |
 | staging | `migrate:staging` (API image, `pm_migrator`, private runner) → `deploy:staging` (`deploy/ci/deploy-environment.sh`: the Secret `api-secrets` from CI/CD variables, then `deploy/deploy.sh` with the pipeline's image and `MIGRATIONS=skip`; restarts the API when the Secret changed) | `main`, automatic |
@@ -294,7 +285,7 @@ the clusters through the GitLab agent for Kubernetes (`KUBE_CONTEXT`), so no clu
 
 | Stage | Jobs | Runs on |
 | --- | --- | --- |
-| test | `test:frontend` (lint, format, unit tests, build), `test:manifests`, SAST and secret detection | merge requests, `main`, tags |
+| test | `test:frontend` (`npm run lint`, `format:check`, `test:ci`, `build`), `test:manifests` (the same checks on the web and gateway overlays), SAST and secret detection | merge requests, `main`, tags |
 | build | `build:web`, `build:gateway` → `$CI_REGISTRY_IMAGE/{web,gateway}:<short sha>` | merge requests, `main`, tags |
 | scan | `scan:web`, `scan:gateway` (Trivy) | merge requests, `main`, tags |
 | staging | `deploy:staging` (`kubectl config use-context "$KUBE_CONTEXT"` → `deploy/deploy.sh` with the pipeline's images) | `main`, automatic |
@@ -313,8 +304,8 @@ environments, every variable per project) is [chapter 12](12-from-zero.md).
 
 ## Day-2 operations
 
-All commands run from the repository root and assume `kubectl config use-context docker-desktop` (or
-`KUBECONFIG=.kube/microk8s`).
+All commands run from the folder that holds the three repositories (`backend/`, `frontend/`, `infra/`) and assume
+`kubectl config use-context docker-desktop`.
 
 **See what is running**
 
@@ -430,12 +421,8 @@ after saving the deployed values, and always sets those values back at the end.
 | Migration step fails | its output in the deploy script's terminal (or the `migrate:*` job log); `PM_MIGRATOR_PASSWORD` must match the infra's |
 | `502` on `/api` | no ready API pod: `kubectl -n product-management get endpointslices -l kubernetes.io/service-name=api` |
 | `502` on `/collect` in the browser console | no log collector: `infra/infra.sh up logs`, or deploy the frontend with `LOGS=off` |
-| `ImagePullBackOff` on MicroK8s | the registry add-on (`microk8s enable registry`) and that the deploy script pushed to `localhost:32000` |
+| `ImagePullBackOff` | outside Docker Desktop, the image must be in a registry the cluster can pull from: the `API_IMAGE` / `WEB_IMAGE` / `GATEWAY_IMAGE` given to the deploy script, and the cluster's pull credentials |
 | HPA shows `<unknown>` | metrics-server: `infra/cluster-addons.sh`, then `kubectl top pods` |
-
-**MicroK8s instead of Docker Desktop.** The CI job deploys the same manifests to MicroK8s on Linux. The pods must
-resolve `host.docker.internal` to the machine that runs the server containers; the GitHub Actions e2e job adds it to
-CoreDNS (step *Resolve host.docker.internal inside the cluster*).
 
 ## Where to look
 
@@ -460,8 +447,7 @@ CoreDNS (step *Resolve host.docker.internal inside the cluster*).
   [`DatabaseInitializer.cs`](../../backend/ProductManagement.Infrastructure/Persistence/DatabaseInitializer.cs),
   [`Persistence/Migrations`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations)
 * Cluster helper: [`infra/cluster-addons.sh`](../../infra/cluster-addons.sh) (metrics-server)
-* CI/CD: [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml),
-  [`backend/.gitlab-ci.yml`](../../backend/.gitlab-ci.yml), [`frontend/.gitlab-ci.yml`](../../frontend/.gitlab-ci.yml),
+* CI/CD: [`backend/.gitlab-ci.yml`](../../backend/.gitlab-ci.yml), [`frontend/.gitlab-ci.yml`](../../frontend/.gitlab-ci.yml),
   [`infra/.gitlab-ci.yml`](../../infra/.gitlab-ci.yml), [`backend/deploy/ci`](../../backend/deploy/ci),
   [`frontend/deploy/ci`](../../frontend/deploy/ci)
 * Each part on its own: [`backend/README.md`](../../backend/README.md), [`frontend/README.md`](../../frontend/README.md),

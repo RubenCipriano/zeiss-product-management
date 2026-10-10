@@ -69,8 +69,7 @@ that.
 
 **GitLab pipeline** (`.gitlab-ci.yml`): test → build → scan → staging (migrate, deploy) → verify (the assessment
 check and Playwright against staging) → production (manual migrate, then deploy). It reaches the clusters through
-the GitLab agent for Kubernetes, so no cluster API is exposed to the runners. GitHub Actions keeps the same checks
-plus a full deployment to MicroK8s on every change.
+the GitLab agent for Kubernetes, so no cluster API is exposed to the runners.
 
 ## Alternatives considered
 
@@ -122,9 +121,12 @@ The decisions above still hold (Kustomize overlays, servers outside the cluster,
 API image, least-privilege users, secrets from CI/CD variables). How they are laid out changed: the paths, part
 labels, ExternalName Services, ConfigMap and Secrets described above are history.
 
-**Three self-contained parts, each a future GitLab repository.** The single `deploy/` folder and its one script with
+**Three self-contained parts, each its own GitLab repository**
+([backend](https://gitlab.com/zeiss/backend), [frontend](https://gitlab.com/zeiss/frontend) and
+[deploy](https://gitlab.com/zeiss/deploy), the `infra/` folder). The single `deploy/` folder and its one script with
 parts (`deploy/deploy.sh infra|observability|api|web`, selected by the `app.kubernetes.io/component` label) are
-replaced by three folders that each hold their code or configuration, deploy script, manifests and pipeline:
+replaced by three folders that each hold their code or configuration, deploy script, manifests and pipeline. CI/CD
+is GitLab only: each part's `.gitlab-ci.yml`, and no workflow that builds or deploys the three together.
 
 * **`infra/`**: the servers outside the cluster and the cluster's log collector. `infra/infra.sh up|down|status
   [database] [redis] [logs]`; `infra/.gitlab-ci.yml` validates every change and deploys only through manual jobs,
@@ -178,7 +180,7 @@ in-cluster name is now `api.product-management.svc.cluster.local:8080`.
 ### Consequences of the update
 
 * Each part can be cloned, run and deployed on its own, with its own README, pipeline, registry and variables. The
-  price is some duplication: both deploy scripts have the same image helpers (tag, publish, pin), the namespace is
+  price is some duplication: both deploy scripts have the same image helpers (tag, pin), the namespace is
   declared twice, and the three database and Redis passwords must be the same in the infra and the backend projects
   (group-level variables in GitLab).
 * Deploy order matters across repositories: infra, then backend, then frontend. Nothing enforces it; a frontend
@@ -189,4 +191,5 @@ in-cluster name is now `api.product-management.svc.cluster.local:8080`.
   from the manifests must be deleted by hand), and locally old `api-secrets-<hash>` Secrets accumulate.
 * A setting changed in the Deployment is visible in `kubectl get deployment api -o yaml` and in Git, but a
   `kubectl set env` (as the load tests do for the rate limits, restoring them afterwards) is undone by the next deploy.
-* The GitHub Actions workflow still tests and deploys all three parts together, in order, as the end-to-end check.
+* No pipeline deploys the three parts together: each one verifies its own part against staging (the requirements
+  check for the backend, Playwright for the frontend), which assumes the other parts are already there.

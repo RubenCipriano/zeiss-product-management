@@ -8,7 +8,7 @@ Thumbs.db
 # Local environment overrides
 .env
 
-# Local cluster credentials (MicroK8s kubeconfig)
+# Local cluster credentials (kubeconfig files)
 .kube/
 
 # Local tools and personal notes (kept on the developer's machine, never committed)

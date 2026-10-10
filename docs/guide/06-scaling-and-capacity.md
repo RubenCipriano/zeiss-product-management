@@ -11,7 +11,7 @@ fixed, how far one laptop goes, and which levers come next.
 ## Autoscaling
 
 Two HorizontalPodAutoscalers (HPAs) watch CPU through **metrics-server** (installed by `infra/cluster-addons.sh`;
-MicroK8s has it as an add-on).
+k3s and most managed clusters ship it).
 
 | | API | Gateway |
 | --- | --- | --- |
@@ -70,7 +70,7 @@ gateway, the API, Redis, PostgreSQL and token verification, not a port-forward t
 
 | Scenario | What it does | What it checks |
 | --- | --- | --- |
-| `smoke` | one virtual user calls every endpoint | everything answers; run after every deployment (and in CI) |
+| `smoke` | one virtual user calls every endpoint | everything answers; run after every deployment |
 | `load` | realistic mix at a steady rate (`RATE=150`) | the SLO: p95 below 300 ms, no errors |
 | `stress` | steps up the rate (`PEAK=2000`) | where latency and errors start to degrade |
 | `spike` | 20 → 500 requests/s in 10 s, reads | absorbed without errors |

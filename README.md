@@ -7,10 +7,11 @@ A product and stock management system:
 * **Frontend:** Angular 22 with Tailwind CSS, served behind an nginx gateway that also caches API reads.
 * **Deployment:** the stateless parts (gateway, web app, API autoscaled 2–8 replicas) on Kubernetes, with Kustomize
   overlays for local, staging and production; PostgreSQL, Redis and the log servers (Grafana and Loki, optional) on
-  their own servers outside the cluster, as in production (locally: Docker Compose containers). The repository is in
-  three self-contained parts, each meant to be its own GitLab repository with its own pipeline: `backend/` (the API),
-  `frontend/` (the web app and the gateway) and `infra/` (the servers outside the cluster). A GitHub Actions workflow
-  builds, tests and deploys all three.
+  their own servers outside the cluster, as in production (locally: Docker Compose containers). The system lives in
+  three GitLab repositories, each with its own pipeline: **[backend](https://gitlab.com/zeiss/backend)** (the API and
+  the documentation; this README), **[frontend](https://gitlab.com/zeiss/frontend)** (the web app and the gateway) and
+  **[deploy](https://gitlab.com/zeiss/deploy)** (the servers outside the cluster and the logs). Commands here use them
+  as the folders `backend/`, `frontend/` and `infra/` ([Repository layout](#repository-layout)).
 * **At scale:** k6 load tests run inside the cluster, including ten teams on 850,000 products; the stock ledger
   measured at 20 million rows.
 * **Stock ledger and idempotency:** every stock change is recorded with who made it; retried requests
@@ -76,7 +77,8 @@ Needs Docker and `kubectl`. The system is deployed in three parts, each with its
 | [`backend/`](backend/README.md) | [`backend/deploy/deploy.sh`](backend/deploy/deploy.sh) | the API: image, database migrations, rollout |
 | [`frontend/`](frontend/README.md) | [`frontend/deploy/deploy.sh`](frontend/deploy/deploy.sh) | the web app and the gateway: images, rollout |
 
-Each script deploys to the current `kubectl` context. All commands below run from the repository root.
+Each script deploys to the current `kubectl` context. All commands below run from a folder that holds the three
+repositories cloned as `backend/`, `frontend/` and `infra/` ([Repository layout](#repository-layout)).
 
 ### On Docker Desktop's Kubernetes (recommended; everything visible in Docker Desktop)
 
@@ -123,26 +125,6 @@ After changing the API, run `backend/deploy/deploy.sh` again; after changing the
 
 Stop the servers with `infra/infra.sh down` (data volumes are kept); delete the application with
 `kubectl delete namespace product-management` (`infra/infra.sh down logs` removes the `observability` namespace).
-
-### On MicroK8s
-
-The manifests and scripts are the same; the GitHub Actions job deploys them to MicroK8s on Linux on every change.
-Two differences:
-
-* The deploy scripts push the images they build to MicroK8s' registry at `localhost:32000` (any context other than
-  `docker-desktop` is treated this way): `microk8s enable dns registry metrics-server` (metrics-server replaces
-  `infra/cluster-addons.sh`).
-* The pods must resolve `host.docker.internal` to the machine running the server containers: Docker Desktop does that
-  by itself, on MicroK8s add a CoreDNS `hosts` entry as the CI job does ([`.github/workflows/ci.yml`](.github/workflows/ci.yml),
-  step *Resolve host.docker.internal inside the cluster*).
-
-```bash
-export KUBECONFIG=$PWD/.kube/microk8s          # sudo microk8s config > .kube/microk8s
-infra/infra.sh up database redis               # the CI job leaves the logs out
-backend/deploy/deploy.sh
-LOGS=off frontend/deploy/deploy.sh             # no log collector: /collect answers 204
-kubectl -n product-management port-forward service/gateway 8080:8080
-```
 
 ### Sign in
 
@@ -199,7 +181,9 @@ this way belong to the administrator; run `infra/infra.sh up database` again bef
 
 ## Deploy each part
 
-The three parts only meet at a few addresses, so each one deploys on its own:
+The three parts only meet at a few addresses, so each one deploys on its own. The commands below use the folder
+names (`infra/infra.sh`, `backend/deploy/deploy.sh`, `frontend/deploy/deploy.sh`); in a separate clone of one
+repository, run its command from that repository's root (`./infra.sh up`, `./deploy/deploy.sh`).
 
 * the **backend** needs a PostgreSQL with the users `pm_migrator` and `pm_app` and a Redis
   ([`infra/postgres/roles.sql`](infra/postgres/roles.sql)); it finds them through the two connection strings in its
@@ -212,7 +196,7 @@ The three parts only meet at a few addresses, so each one deploys on its own:
 
 | Tool | For |
 | --- | --- |
-| Docker Desktop with Kubernetes enabled, `kubectl` context `docker-desktop` | everything (MicroK8s works too: [above](#on-microk8s)) |
+| Docker Desktop with Kubernetes enabled, `kubectl` context `docker-desktop` | everything (the deploy scripts use the images they build straight from the local Docker engine; any other cluster takes registry images: `API_IMAGE`, `WEB_IMAGE`, `GATEWAY_IMAGE`) |
 | `openssl` and `python3` | `backend/deploy/local-secrets.sh` (the local signing key, consumers and passwords); `python3` also for the requirements check |
 | .NET 10 SDK | only for `dotnet run` and the backend tests (the deploy script builds in Docker) |
 | Node.js 24 | only for the frontend's dev server, unit tests and Playwright (the deploy script builds in Docker) |
@@ -450,30 +434,23 @@ backend/load-tests/run.sh smoke                                  # against the r
 | `Api.IntegrationTests`                | 153 | Real HTTP against **real PostgreSQL and Redis** (Testcontainers). Every endpoint and the problem-details contract. **Concurrency:** 60 parallel orders on 25 units → exactly 25 succeed; no lost updates; two API instances never produce a duplicate id. **Ledger:** every kind of change recorded, ledger sum = stock under concurrency. **Idempotency:** 20 simultaneous copies over two replicas run once; a retry on the other replica is replayed; a retry after Redis lost the claim is still not applied twice (database guard), for stock changes and creates; reused or invalid keys refused, also when Redis has forgotten the key (`422` from the ledger); no Redis → refused rather than risk a duplicate. **Ids:** an exhausted sequence answers `503 product.ids_exhausted`. **Conditional GET:** `If-None-Match` with the current `ETag` → `304`. **Readiness:** stays ready while the request pool is saturated. **Cache:** hits, invalidation visible across replicas, lists kept across stock changes yet showing current stock, 404s not cached, works with Redis down. **Security:** token endpoint (valid, invalid, missing, throttled, failed attempts adding up across two replicas); 30-case role × operation matrix; missing, expired, foreign and forged tokens, `alg: none`, HS256 signed with the public key; the published JWKS has no private part and matches the tokens' `kid`; anonymous probes. **Rate limiting:** per user, shared by two replicas, stricter for writes, `Retry-After`. |
 | `Api.AcceptanceTests` (BDD, Reqnroll) | 16 | Gherkin scenarios from the user's point of view (`Features/*.feature`): create, browse with stock, search, low stock, update, delete, conflicting edits, invalid details naming each problem, stock in and out, no overselling, unknown products → not found. |
 | Frontend (Vitest)                     | 185 | API client contract (URLs, `If-Match`, `Idempotency-Key`, cache bypass after own changes), **browser cache** (fresh hit without a request, stale-while-revalidate, bypass, cleared after writes, LRU eviction), store (next-page prefetch, page change vs background refresh), pipes, progress bar, stock history dialog, a retried stock change reuses its key, login opened without `returnUrl`, error normalisation, store (no duplicate requests, no flicker, background refresh paused in hidden tabs), auth (login against the token endpoint, session restore and expiry, role → permission mapping, guard, interceptor never leaks the token to other origins), login page (safe `returnUrl`, 401/429 messages), dialogs (validation, server field errors, 412 conflict + reload of the latest version past the gateway's microcache), role-specific UI, paginator, toasts, the product table's caption for screen readers, **browser error reporting** (errors only, queued until the SDK loads, no query string or token sent, never throws, off in dev mode). 34 spec files. |
-| End-to-end (Playwright)               | 22 | 11 scenarios on a desktop and a phone viewport against the running system: sign-in per role, the manager's full journey, paging served by the browser cache, security headers, `401` at the gateway, missing files are `404`, a real error thrown in the page read back from Loki (skipped where no Loki answers, e.g. the GitHub CI cluster, which runs without logs); any CSP violation or uncaught error fails the test. |
+| End-to-end (Playwright)               | 22 | 11 scenarios on a desktop and a phone viewport against the running system: sign-in per role, the manager's full journey, paging served by the browser cache, security headers, `401` at the gateway, missing files are `404`, a real error thrown in the page read back from Loki (skipped when no Loki is reachable, e.g. with `LOGS=off`); any CSP violation or uncaught error fails the test. |
 | Load (k6, in cluster)                 | 8 scenarios | smoke, load (SLO thresholds), stress, spike, **stock consistency across replicas**, rate limiting, **teams** (many teams on 850,000 products, 30 % duplicate retries, then ledger = applied changes; `PEAK=` turns it into a capacity staircase), **browse** (read capacity with a hot set). See the [results](docs/load-test-results.md). |
 
-Two pipelines run the same scripts:
+The GitLab pipelines run the same scripts, one per repository:
 
-* **GitHub Actions** (`.github/workflows/ci.yml`, on every push and pull request, for the whole repository): build
-  with warnings as errors, `dotnet format --verify-no-changes`, every test suite, ESLint and Prettier (application and
-  `e2e/` code); each part's manifests rendered and validated (`backend/deploy/ci/validate-manifests.sh` and
-  `frontend/deploy/ci/validate-manifests.sh`: kubeconform, the settings each overlay must set, no Secret where there
-  must be none; the infra's Compose files and log collector); and an **end-to-end job that deploys to MicroK8s on the
-  runner** (`infra/infra.sh up database redis`, `backend/deploy/deploy.sh`, `LOGS=off frontend/deploy/deploy.sh`),
-  runs the k6 smoke and stock-consistency scenarios inside the cluster, then `backend/scripts/check-requirements.py`
-  and the Playwright suite (desktop and mobile).
-* **GitLab CI/CD**, one pipeline per part, as separate repositories would have:
-  * `backend/.gitlab-ci.yml`: test (unit, integration, format, manifests) → build (API image, migration SQL) → scan
-    (Trivy) → staging (migrate, then deploy) → verify (the PDF check against staging) → production (manual migrate,
-    then deploy);
-  * `frontend/.gitlab-ci.yml`: test (lint, unit, build, manifests) → build (web and gateway images) → scan → staging
-    (deploy) → verify (Playwright against staging) → production (manual deploy);
-  * `infra/.gitlab-ci.yml`: validate (Compose files, the log collector's manifests, Alloy configuration) → manual
-    deploy jobs per environment and component.
+* `backend/.gitlab-ci.yml`: test (build with warnings as errors, `dotnet format --verify-no-changes`, unit,
+  integration and acceptance tests, manifests) → build (API image, migration SQL) → scan (Trivy) → staging (migrate,
+  then deploy) → verify (the PDF check against staging) → production (manual migrate, then deploy);
+* `frontend/.gitlab-ci.yml`: test (ESLint and Prettier, unit, build, manifests) → build (web and gateway images) →
+  scan → staging (deploy) → verify (Playwright against staging) → production (manual deploy);
+* `infra/.gitlab-ci.yml`: validate (Compose files, the log collector's manifests, Alloy configuration) → manual
+  deploy jobs per environment and component.
 
-  They are **not yet run on a GitLab instance**: each file is validated against GitLab's CI schema and its job graph
-  checked with `npx gitlab-ci-local@4 --list` from inside the part. The setup is [chapter 12](docs/guide/12-from-zero.md).
+The manifests step is each part's `deploy/ci/validate-manifests.sh` (kubeconform, the settings each overlay must set,
+no Secret where there must be none). The pipelines are **not yet run on a GitLab instance**: each file is validated
+against GitLab's CI schema and its job graph checked with `npx gitlab-ci-local@4 --list` from inside the part. The
+setup is [chapter 12](docs/guide/12-from-zero.md).
 
 What each kind of test proves, with examples: [docs/guide/10-testing-and-quality.md](docs/guide/10-testing-and-quality.md).
 
@@ -802,12 +779,28 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 
 ## Repository layout
 
-Three self-contained parts, each meant to become its own GitLab repository (with its own README, `.gitignore` and
-pipeline), plus the documentation and the GitHub Actions workflow that tests and deploys all three together.
+Three GitLab repositories, each self-contained (its own README, `.gitignore` and `.gitlab-ci.yml`) and deployed on
+its own:
+
+| Repository | Contents | Folder used in this README |
+| --- | --- | --- |
+| [gitlab.com/zeiss/backend](https://gitlab.com/zeiss/backend) | the API, its tests, load tests and deploy scripts; the documentation (`docs/`) and this README | `backend/`, `docs/` |
+| [gitlab.com/zeiss/frontend](https://gitlab.com/zeiss/frontend) | the web app, the gateway, the Playwright tests and their deploy script | `frontend/` |
+| [gitlab.com/zeiss/deploy](https://gitlab.com/zeiss/deploy) | the servers outside the cluster (PostgreSQL, Redis) and the logs (Loki, Grafana, the collectors) | `infra/` |
+
+To run the commands as written, clone them side by side:
+
+```bash
+git clone https://gitlab.com/zeiss/backend.git backend
+git clone https://gitlab.com/zeiss/frontend.git frontend
+git clone https://gitlab.com/zeiss/deploy.git infra
+```
+
+The tree below uses those folder names:
 
 ```
 .
-├── backend/                                  # the API (its own repository in real life)
+├── backend/                                  # the API (repository backend)
 │   ├── ProductManagement.sln                 # solution folders: Source, Tests
 │   ├── Dockerfile                            # API image (also runs the migrate, hash-secret, generate-signing-key commands)
 │   ├── global.json · Directory.Build.props · Directory.Packages.props · dotnet-tools.json · .editorconfig
@@ -826,7 +819,7 @@ pipeline), plus the documentation and the GitHub Actions workflow that tests and
 │   ├── load-tests/                           # k6 scenarios + run.sh (runs them as a Kubernetes Job), bulk seed, data checks
 │   ├── scripts/check-requirements.py         # the assessment's requirements, checked against the running system
 │   └── .gitlab-ci.yml                        # test → build → scan → staging → verify → production
-├── frontend/                                 # the web app and the gateway (its own repository in real life)
+├── frontend/                                 # the web app and the gateway (repository frontend)
 │   ├── src/ · e2e/                           # Angular app, Playwright tests
 │   ├── Dockerfile · nginx.conf               # web image (static files)
 │   ├── gateway/                              # nginx gateway image (Dockerfile, config template, collector.sh, njs: jwt.js, trace.js)
@@ -836,7 +829,7 @@ pipeline), plus the documentation and the GitHub Actions workflow that tests and
 │   │   ├── k8s/overlays/{local,staging,production}/   # gateway.yaml (API and collector addresses), ingress.yaml
 │   │   └── ci/validate-manifests.sh
 │   └── .gitlab-ci.yml                        # test → build → scan → staging → verify → production
-├── infra/                                    # the servers outside the cluster (its own repository in real life)
+├── infra/                                    # the servers outside the cluster and the logs (repository deploy)
 │   ├── infra.sh                              # infra.sh up|down|status [database] [redis] [logs]
 │   ├── database.yaml · redis.yaml · logs.yaml   # one Docker Compose file per component
 │   ├── postgres/                             # postgresql.conf, roles.sql (the least-privilege users)
@@ -845,8 +838,7 @@ pipeline), plus the documentation and the GitHub Actions workflow that tests and
 │   │                                         # k8s/ (the cluster's log collector: Alloy)
 │   ├── cluster-addons.sh                     # metrics-server
 │   └── .gitlab-ci.yml                        # validate → manual deploy per environment and component
-├── docs/                                     # guide, ADRs, flows, architecture, load test results
-└── .github/workflows/ci.yml                  # GitHub Actions: tests, manifests, deployment of all three parts to MicroK8s
+└── docs/                                     # guide, ADRs, flows, architecture, load test results (repository backend)
 ```
 
 ### Tech stack
@@ -858,5 +850,5 @@ pipeline), plus the documentation and the GitHub Actions workflow that tests and
 | Security | JWT (ES256) issued by the API and verified at the gateway (nginx njs), PBKDF2 secret hashes, ASP.NET Core authorization and rate limiting |
 | Frontend | Angular 22 (standalone, zoneless, signals), Tailwind CSS 4, Angular CDK, Vitest, ESLint, Prettier |
 | Testing  | xUnit v3 (Microsoft Testing Platform), Shouldly, NSubstitute, Testcontainers, Respawn, Reqnroll, k6 |
-| Delivery | Docker, Docker Compose (the servers), Kubernetes (Docker Desktop / MicroK8s; k3s as the production target), Kustomize, nginx, GitLab CI/CD, GitHub Actions, Trivy |
+| Delivery | Docker, Docker Compose (the servers), Kubernetes (Docker Desktop locally; k3s as the production target), Kustomize, nginx, GitLab CI/CD, Trivy |
 | Operations | Grafana 12, Loki 3, Grafana Alloy (logs only), Grafana Faro (browser errors) |

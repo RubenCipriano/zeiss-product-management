@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Renders the web app's and the gateway's Kustomize base and every overlay and checks the result. Run by CI (GitLab
-# and GitHub Actions) in the alpine/k8s image, which has kubectl (with Kustomize), kubeconform and yq; works anywhere
-# those three are installed.
+# Renders the web app's and the gateway's Kustomize base and every overlay and checks the result. Run by the GitLab
+# pipeline in the alpine/k8s image, which has kubectl (with Kustomize), kubeconform and yq; works anywhere those three
+# are installed.
 #
 #   deploy/ci/validate-manifests.sh
 #

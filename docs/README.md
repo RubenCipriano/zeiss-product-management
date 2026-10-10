@@ -3,9 +3,10 @@
 This is the documentation of the Product Management system: a .NET 10 API (clean architecture, EF Core, PostgreSQL,
 Redis), an Angular 22 front end and an nginx gateway that verifies tokens and caches reads. The stateless parts run on
 Kubernetes; PostgreSQL, Redis and the log server (Grafana and Loki, optional) run on their own servers outside the
-cluster. The repository is in three self-contained parts, each meant to be its own repository: `backend/` (the API),
-`frontend/` (the web app and the gateway) and `infra/` (the servers). With load tests, end-to-end tests and CI/CD
-pipelines.
+cluster. The system is in three GitLab repositories: [backend](https://gitlab.com/zeiss/backend) (the API and
+this documentation), [frontend](https://gitlab.com/zeiss/frontend) (the web app and the gateway) and
+[deploy](https://gitlab.com/zeiss/deploy) (the servers and the logs), used here as the folders `backend/`, `frontend/`
+and `infra/`. With load tests, end-to-end tests and a CI/CD pipeline per repository.
 
 It is organised as a **guide in thirteen chapters**, meant to be read calmly, one at a time. Each chapter stands on its
 own, takes 5 to 10 minutes, starts with what it will explain and an illustration, and ends with the source files to
@@ -41,7 +42,7 @@ than read.
 | 6 | [Scaling and capacity](guide/06-scaling-and-capacity.md) | Autoscaling, why the database is the ceiling, the eight load-test scenarios, what each run found and fixed. |
 | 7 | [Front end](guide/07-frontend.md) | Angular layers and rules, the product page's data flow, loading UX, accessibility, what Lighthouse and Playwright found. |
 | 8 | [Logs, dashboards and alerts](guide/08-observability.md) | Logs only, and why: what is collected (the browser's errors included) and how it reaches Grafana, where it is kept and for how long, the two dashboards, twelve alerts with runbooks, one request followed by its trace id. |
-| 9 | [Deployment and operations](guide/09-deployment-and-operations.md) | What runs where (cluster and servers), the three parts and their deploy scripts, the Kustomize overlays, configuration as env keys and the one Secret, migrations as `pm_migrator` before the rollout, logs as an option, the GitLab and GitHub pipelines, day-2 commands. |
+| 9 | [Deployment and operations](guide/09-deployment-and-operations.md) | What runs where (cluster and servers), the three parts and their deploy scripts, the Kustomize overlays, configuration as env keys and the one Secret, migrations as `pm_migrator` before the rollout, logs as an option, the GitLab pipelines, day-2 commands. |
 | 10 | [Testing and quality](guide/10-testing-and-quality.md) | The test pyramid with counts (381 back end, 185 front end, 22 E2E), what each kind proves, the project agents. |
 | 11 | [Production readiness](guide/11-production-readiness.md) | An honest ✅ / ⚠️ / ❌ assessment and the work left for go-live. |
 | 12 | [From zero to production](guide/12-from-zero.md) | A runbook from an empty GitLab group and fresh servers: machines, firewall, TLS, backups, one GitLab project per part, runners, the agent, environments, every CI/CD variable per project, first deployment, day 2, go-live checklist. |

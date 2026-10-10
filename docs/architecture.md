@@ -1,7 +1,7 @@
 # Architecture
 
-How the system is put together and what every running piece does. The diagrams are Mermaid (rendered by GitHub,
-GitLab and VS Code). How requests travel through it, step by step, is in [flows.md](flows.md); decisions and their
+How the system is put together and what every running piece does. The diagrams are Mermaid (rendered by GitLab
+and VS Code). How requests travel through it, step by step, is in [flows.md](flows.md); decisions and their
 reasons are in the [ADRs](adr/README.md).
 
 - [Deployment topology](#deployment-topology)
@@ -16,7 +16,7 @@ reasons are in the [ADRs](adr/README.md).
 
 The cluster runs only stateless workloads and a log collector; the data and the logs live on servers outside it
 (locally: Docker Compose containers started by `infra/infra.sh`). The deployment is in three parts, each its own
-repository in real life, each with its own deploy script ([ADR 0021](adr/0021-deployment-layout.md)):
+GitLab repository with its own deploy script ([ADR 0021](adr/0021-deployment-layout.md)):
 
 * **infra** (`infra/`): the servers (PostgreSQL, Redis, Loki and Grafana, the server agent) and the cluster's log
   collector (`infra/logs/k8s`, namespace `observability`);
