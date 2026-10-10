@@ -1,4 +1,4 @@
-# OS / editor noise (backend/ and frontend/ have their own tool-specific .gitignore files)
+# OS / editor noise (backend/, frontend/ and infra/ have their own .gitignore files, as separate repositories would)
 .DS_Store
 Thumbs.db
 .idea/
@@ -8,5 +8,13 @@ Thumbs.db
 # Local environment overrides
 .env
 
-# Local cluster credentials (scripts/cluster-up.sh)
+# Local cluster credentials (MicroK8s kubeconfig)
 .kube/
+
+# Local tools and personal notes (kept on the developer's machine, never committed)
+/.claude/
+/.mcp.json
+/.vscode/
+/frontend/.vscode/
+/docs/guia-apresentacao.md
+/docs/scaffolding.md
