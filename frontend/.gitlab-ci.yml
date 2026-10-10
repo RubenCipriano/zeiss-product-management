@@ -133,13 +133,16 @@ test:manifests:
   services:
     - name: $DIND_IMAGE
       alias: docker
-      command: ["--tls=false"]
+      # gitlab.com's runners use an MTU of 1460; Docker-in-Docker defaults to 1500, which silently drops large
+      # packets (TLS handshakes to api.nuget.org / registry.npmjs.org time out). Match the runner's network.
+      command: ["--tls=false", "--mtu=1460"]
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
   before_script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login --username "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-    - docker buildx create --use --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE"
+    # BuildKit shares dind's network (network=host): no second bridge, so the MTU above applies to the build too.
+    - docker buildx create --use --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE" --driver-opt network=host
   script:
     - repository="${IMAGE%:*}"
     - docker buildx build --pull --push
