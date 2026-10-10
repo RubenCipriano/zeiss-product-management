@@ -5,7 +5,10 @@ import { Auth } from '../../../core/auth/auth';
 import { ApiError } from '../../../core/http/api-error';
 import { Icon } from '../../../shared/ui';
 
-/** Sign-in with the credentials of a registered API consumer. */
+/**
+ * The sign-in page: a username/password form that calls {@link Auth.login}, then goes back to the page the user was
+ * trying to open (or to the products page). The demo accounts are listed under the form.
+ */
 @Component({
   selector: 'app-login',
   imports: [ReactiveFormsModule, Icon],
@@ -15,10 +18,14 @@ export class Login {
   private readonly auth = inject(Auth);
   private readonly router = inject(Router);
 
-  /** Where to go after signing in (set by the auth guard; bound from the query string). */
-  /** From the `returnUrl` query parameter. The router binds a missing parameter as undefined, not as a default. */
+  /**
+   * Where to go after signing in: the `?returnUrl=` query parameter set by the auth guard. An `input()` is a value the
+   * component receives from outside; here the router fills it from the URL (`withComponentInputBinding`, app.config.ts).
+   * A missing parameter arrives as undefined.
+   */
   readonly returnUrl = input<string | undefined>();
 
+  // Signals: values the template re-reads automatically when they change.
   protected readonly signingIn = signal(false);
   protected readonly errorMessage = signal<string | null>(null);
 
@@ -41,13 +48,7 @@ export class Login {
       next: () => void this.router.navigateByUrl(this.safeReturnUrl()),
       error: (error: ApiError) => {
         this.signingIn.set(false);
-        this.errorMessage.set(
-          error.status === 401
-            ? 'Invalid username or password.'
-            : error.status === 429
-              ? 'Too many sign-in attempts. Please wait a minute and try again.'
-              : error.message,
-        );
+        this.errorMessage.set(signInErrorMessage(error));
       },
     });
   }
@@ -56,5 +57,16 @@ export class Login {
   private safeReturnUrl(): string {
     const url = this.returnUrl();
     return url?.startsWith('/') && !url.startsWith('//') ? url : '/products';
+  }
+}
+
+function signInErrorMessage(error: ApiError): string {
+  switch (error.status) {
+    case 401:
+      return 'Invalid username or password.';
+    case 429:
+      return 'Too many sign-in attempts. Please wait a minute and try again.';
+    default:
+      return error.message;
   }
 }

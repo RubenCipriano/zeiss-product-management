@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { ApplicationRef } from '@angular/core';
-import { Observable, of, Subject, throwError } from 'rxjs';
+import { firstValueFrom, Observable, of, Subject, throwError } from 'rxjs';
 import { aPage, aProduct } from '../../../../testing/product-fixtures';
 import { PagedResponse } from '../../../shared/models/paged-response';
 import { Product, ProductQuery } from './product-models';
@@ -11,13 +11,18 @@ import { PRODUCTS_AUTO_REFRESH_MS, ProductsStore } from './products-store';
 describe('ProductsStore', () => {
   const lens = aProduct({ id: 100001, stockQuantity: 5 });
   const frame = aProduct({ id: 100002, name: 'Frame', stockQuantity: 9 });
-  let api: { query: ReturnType<typeof vi.fn>; adjustStock: ReturnType<typeof vi.fn> };
+  let api: {
+    query: ReturnType<typeof vi.fn>;
+    adjustStock: ReturnType<typeof vi.fn>;
+    getById: ReturnType<typeof vi.fn>;
+  };
   let store: ProductsStore;
 
   beforeEach(() => {
     api = {
       query: vi.fn(() => of(aPage([lens, frame]))),
       adjustStock: vi.fn(),
+      getById: vi.fn(),
     };
     TestBed.configureTestingModule({
       providers: [
@@ -156,6 +161,16 @@ describe('ProductsStore', () => {
     await settle();
 
     expect(store.summary()).toEqual({ totalProducts: 24, lowStock: 7, outOfStock: 1 });
+  });
+
+  it("fetches a product's latest version past shared caches", async () => {
+    const latest = { ...lens, stockQuantity: 3, version: 9 };
+    api.getById.mockReturnValue(of(latest));
+
+    const result = await firstValueFrom(store.latest(lens.id));
+
+    expect(api.getById).toHaveBeenCalledWith(lens.id, true);
+    expect(result).toEqual(latest);
   });
 
   it('exposes load failures as ApiError', async () => {

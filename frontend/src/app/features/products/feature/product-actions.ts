@@ -19,12 +19,12 @@ import {
 } from './stock-history-dialog/stock-history-dialog';
 
 /**
- * What a user can do with products on this screen: each action opens the right dialog (or calls the store directly),
- * then tells the user how it went. Provided by the page, next to its {@link ProductsStore}; dialogs get the page's
- * injector, so they share that store.
+ * What the user can do on the products page (create, edit, delete, change stock, see history): each action opens the
+ * right dialog (or calls the store directly), then shows a toast saying how it went.
  *
- * Keeping this out of the components means the table and the page only say *what* the user asked for; how it is
- * carried out (dialogs, idempotency keys, messages) lives in one place and is tested on its own.
+ * Provided by the page, next to its {@link ProductsStore}. Dialogs are opened with the page's injector (the page's
+ * own set of services), so they use that same store. The table and the page only say *what* the user asked for; how
+ * it is carried out (dialogs, idempotency keys, messages) lives here, in one place, tested on its own.
  */
 @Service({ autoProvided: false })
 export class ProductActions {
@@ -61,7 +61,7 @@ export class ProductActions {
       );
   }
 
-  /** One click, no dialog. A new idempotency key per click: each click is a new change. */
+  /** The table's + / − buttons: one click, no dialog. A new idempotency key per click: each click is a new change. */
   quickChange(product: Product, operation: StockOperation, quantity: number): void {
     this.setPending(product.id, true);
     this.store

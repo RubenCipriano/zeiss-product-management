@@ -12,7 +12,16 @@ export interface StockHistoryDialogData {
   product: Product;
 }
 
-/** A product's stock ledger: every change, who made it and when, newest first. */
+/** Page sizes offered for the history; the first is the default. */
+const PAGE_SIZES = [10, 25, 50] as const;
+
+/**
+ * The "Stock history" dialog: every stock change of one product, who made it and when, newest first, page by page.
+ *
+ * Loads its pages with its own `rxResource` (a loader that re-runs its request whenever `params` change) rather than
+ * through `ProductsStore`: the history belongs to one product, is needed only while this dialog is open and is shared
+ * with nothing else on screen, so it lives and dies with the dialog.
+ */
 @Component({
   selector: 'app-stock-history-dialog',
   imports: [DatePipe, Icon, Paginator, ProgressBar, MovementReasonPipe, SignedNumberPipe],
@@ -27,7 +36,8 @@ export class StockHistoryDialog {
   protected readonly dialogRef = inject<DialogRef<void, StockHistoryDialog>>(DialogRef);
   protected readonly product = inject<StockHistoryDialogData>(DIALOG_DATA).product;
 
-  protected readonly page = signal({ page: 1, pageSize: 10 });
+  protected readonly pageSizes = PAGE_SIZES;
+  protected readonly page = signal<PageChange>({ page: 1, pageSize: PAGE_SIZES[0] });
 
   protected readonly history = rxResource({
     params: () => this.page(),

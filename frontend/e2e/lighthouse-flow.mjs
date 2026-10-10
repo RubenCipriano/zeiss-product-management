@@ -34,7 +34,10 @@ await Promise.all([page.waitForSelector('tbody tr'), page.click('button[type=sub
 await flow.endTimespan();
 
 // Same tab, storage kept: the session survives the reload.
-await flow.navigate(`${BASE_URL}/products`, { name: 'Products, signed in', disableStorageReset: true });
+await flow.navigate(`${BASE_URL}/products`, {
+  name: 'Products, signed in',
+  disableStorageReset: true,
+});
 await page.waitForSelector('tbody tr');
 
 await flow.startTimespan({ name: 'Paging through 5 pages' });
@@ -46,7 +49,9 @@ await flow.endTimespan();
 
 await page.$eval('button[aria-label^="Actions for"]', (button) => button.click());
 await page.waitForSelector('[role=menuitem]');
-await page.$$eval('[role=menuitem]', (items) => items.find((item) => item.textContent.includes('Stock history')).click());
+await page.$$eval('[role=menuitem]', (items) =>
+  items.find((item) => item.textContent.includes('Stock history')).click(),
+);
 await page.waitForSelector('[data-testid=movement-row]');
 // A snapshot has no load metrics: performance does not apply (Lighthouse would show 0).
 await flow.snapshot({
@@ -69,7 +74,17 @@ for (const step of result.steps) {
 }
 const failing = result.steps.flatMap((step) =>
   Object.values(step.lhr.audits)
-    .filter((audit) => audit.score !== null && audit.score < 0.9 && audit.scoreDisplayMode !== 'informative')
-    .map((audit) => `  [${step.name}] ${audit.id}: ${audit.title}${audit.displayValue ? ` (${audit.displayValue})` : ''}`),
+    .filter(
+      (audit) =>
+        audit.score !== null && audit.score < 0.9 && audit.scoreDisplayMode !== 'informative',
+    )
+    .map(
+      (audit) =>
+        `  [${step.name}] ${audit.id}: ${audit.title}${audit.displayValue ? ` (${audit.displayValue})` : ''}`,
+    ),
 );
-console.log(failing.length ? `\nAudits below 90:\n${[...new Set(failing)].join('\n')}` : '\nNo audit below 90.');
+console.log(
+  failing.length
+    ? `\nAudits below 90:\n${[...new Set(failing)].join('\n')}`
+    : '\nNo audit below 90.',
+);

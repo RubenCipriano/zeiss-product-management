@@ -1,7 +1,10 @@
-import { expect, signIn, test } from './support';
+import { expect, signIn, signInWithForm, test } from './support';
 
 test.describe('signing in', () => {
-  test('a signed-out visitor is sent to the login page and back after signing in', async ({ page, consoleErrors }) => {
+  test('a signed-out visitor is sent to the login page and back after signing in', async ({
+    page,
+    consoleErrors,
+  }) => {
     await page.goto('/products');
     await expect(page).toHaveURL(/\/login\?returnUrl=%2Fproducts/);
 
@@ -24,9 +27,10 @@ test.describe('signing in', () => {
   });
 
   test('signing out ends the session', async ({ page }) => {
-    await signIn(page, 'clerk');
+    await signInWithForm(page, 'clerk');
 
     await page.getByRole('button', { name: 'Sign out' }).click();
+    await expect(page).toHaveURL(/\/login/);
     await page.goto('/products');
 
     await expect(page).toHaveURL(/\/login/);
@@ -39,7 +43,10 @@ test.describe('roles', () => {
 
     await expect(page.getByRole('button', { name: 'New product' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /^Add one unit of/ })).toHaveCount(0);
-    await page.getByRole('button', { name: /^Actions for/ }).first().click();
+    await page
+      .getByRole('button', { name: /^Actions for/ })
+      .first()
+      .click();
     await expect(page.getByRole('menuitem')).toHaveText(['Stock history']);
   });
 

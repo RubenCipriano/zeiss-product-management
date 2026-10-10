@@ -3,8 +3,8 @@ import { catchError, throwError } from 'rxjs';
 import { ApiError } from './api-error';
 
 /**
- * Converts every failed HTTP call into an {@link ApiError}, so callers never have to understand
- * `HttpErrorResponse` or the problem-details format.
+ * Interceptor (runs on every HTTP call) that turns any failure into an {@link ApiError}, so the rest of the app never
+ * has to understand Angular's `HttpErrorResponse` or the API's problem-details format.
  */
 export const apiErrorInterceptor: HttpInterceptorFn = (req, next) =>
   next(req).pipe(

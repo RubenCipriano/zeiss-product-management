@@ -1,3 +1,4 @@
+// Storage for the browser-side API cache (ResponseCache); the rules for using it are in client-cache-interceptor.ts.
 import { HttpResponse } from '@angular/common/http';
 import { Service } from '@angular/core';
 
@@ -7,8 +8,9 @@ interface Entry {
 }
 
 /**
- * In-memory cache of API responses for this browser tab (least recently used first out). Never persisted: data from
- * one session never reaches the next. Cleared when the user signs out and after any change made through the API.
+ * Where the browser-side cache keeps API responses (see clientCacheInterceptor): an in-memory map for this tab, at most
+ * MAX_ENTRIES, dropping the least recently used first. Never persisted, so data from one session never reaches the
+ * next. Cleared when the user signs out and after any change made through the API.
  */
 @Service()
 export class ResponseCache {

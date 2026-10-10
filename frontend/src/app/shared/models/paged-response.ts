@@ -7,6 +7,7 @@ export interface PagedResponse<T> {
   totalPages: number;
 }
 
+/** A page with no items, shown before anything has loaded. */
 export function emptyPage<T>(pageSize: number): PagedResponse<T> {
   return { items: [], page: 1, pageSize, totalCount: 0, totalPages: 0 };
 }

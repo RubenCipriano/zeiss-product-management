@@ -1,6 +1,8 @@
-# Gateway: the single entry point. Everything the browser needs comes through here, from one origin:
-#   /api/*   -> API replicas (per-request load balancing, rate limiting, 1 s microcache for reads)
+# The gateway's routing: the single entry point. Everything the browser needs comes through here, from one origin:
+#   /api/*   -> API replicas (per-request load balancing, rate limiting, token check, 1 s microcache for reads)
+#   /collect -> the browser's error reports, to the log collector in the cluster (Grafana Alloy), if there is one
 #   /*       -> web (static Angular app), with an edge cache for the immutable bundles
+# The whole picture: docs/guide/02-request-journey.md and docs/adr/0012-gateway.md.
 #
 # ${VARIABLES} are filled from the container environment at startup (see Dockerfile).
 
@@ -10,7 +12,7 @@ resolver ${NGINX_LOCAL_RESOLVERS} valid=5s ipv6=off;
 resolver_timeout 2s;
 
 # The API's headless Service returns one DNS record per ready pod; `resolve` keeps the list current and
-# least_conn sends each request to the replica with the fewest in-flight requests.
+# least_conn ("least connections") sends each request to the replica with the fewest requests in progress.
 upstream api {
   zone api 64k;
   least_conn;
@@ -24,21 +26,51 @@ upstream web {
   keepalive 16;
 }
 
-# Per-client-IP rate limit for the API (coarse protection in front of the API's own per-user limits).
+# Grafana Alloy's Faro receiver in the observability namespace: it turns the browser's error reports into log lines
+# in Loki. Written at startup from COLLECTOR_UPSTREAM by collector.sh: the `collector` upstream, or nothing when
+# COLLECTOR_UPSTREAM is empty (no log collector).
+include /etc/nginx/collector-upstream.conf;
+
+# The real client address when a trusted proxy is in front (production: the Ingress controller, whose pod network
+# is GATEWAY_TRUSTED_PROXIES). Without this every client would share the proxy's address: one rate-limit bucket for
+# everyone, and logs that cannot tell clients apart. Only addresses in that range may set X-Forwarded-For; the
+# default (127.0.0.1/32) trusts nobody, which is right when clients connect directly (local LoadBalancer).
+set_real_ip_from ${GATEWAY_TRUSTED_PROXIES};
+real_ip_header X-Forwarded-For;
+real_ip_recursive on;
+
+# Rate limits: requests per second allowed per client IP (coarse protection in front of the API's own per-user limits).
+# A short burst above the rate is allowed; beyond it nginx answers 429 Too Many Requests.
 limit_req_zone $binary_remote_addr zone=api_per_ip:10m rate=${GATEWAY_RATE_LIMIT_RPS}r/s;
+# Browser error reports: a much smaller allowance per client IP. The browser batches its reports and drops repeated
+# identical errors, so a working page sends a few; a page stuck in an error loop is cut off here, not at Loki.
+limit_req_zone $binary_remote_addr zone=collect_per_ip:1m rate=5r/s;
 limit_req_status 429;
 limit_req_log_level warn;
 
-# Edge cache for the web app's hashed static files.
+# Edge cache for the web app's static files: kept on the gateway's disk, so the web pods serve each file only once.
 proxy_cache_path /tmp/static-cache levels=1:2 keys_zone=static_cache:10m max_size=256m inactive=7d use_temp_path=off;
 
-# Access-token verification at the edge (jwt.js): the API's public keys, and tokens already verified.
+# Access-token verification at the edge (jwt.js, run by njs): shared memory for the API's public keys and for tokens
+# already verified, so the signature check runs once per token.
 js_path "/etc/nginx/njs/";
 js_import jwt from jwt.js;
 js_shared_dict_zone zone=jwt_keys:64k timeout=1h;
 js_shared_dict_zone zone=jwt_tokens:8m timeout=10m evict;
 
-# Microcache for API reads (see location /api/).
+# Trace context (trace.js) and the access log: one JSON object per request, collected with every other pod's logs
+# (Grafana Alloy → Loki). trace_id links it to the API's log lines; user is the verified token's subject.
+js_import trace from trace.js;
+js_set $traceparent trace.traceparent;
+js_set $trace_id trace.traceId;
+log_format json escape=json '{"time":"$time_iso8601","level":"info","component":"gateway","trace_id":"$trace_id",'
+  '"request_id":"$request_id",'
+  '"user":"$jwt_subject","remote":"$remote_addr","method":"$request_method","uri":"$request_uri","status":$status,'
+  '"bytes":$body_bytes_sent,"duration":$request_time,"upstream":"$upstream_addr",'
+  '"upstream_duration":"$upstream_response_time","cache":"$upstream_cache_status","user_agent":"$http_user_agent"}';
+access_log /dev/stdout json;
+
+# Microcache for API reads: a cache that keeps answers for only 1 s (see location /api/).
 proxy_cache_path /tmp/api-cache levels=1:2 keys_zone=api_cache:10m max_size=64m inactive=1m use_temp_path=off;
 
 map $http_upgrade $connection_upgrade {
@@ -70,6 +102,7 @@ server {
   proxy_set_header X-Forwarded-Proto $scheme;
   proxy_set_header X-Forwarded-Host $host;
   proxy_set_header X-Forwarded-Port $server_port;
+  proxy_set_header traceparent $traceparent;
   proxy_connect_timeout 3s;
   proxy_read_timeout 30s;
   # A replica that fails or times out before sending a response is retried on another one (idempotent methods only).
@@ -89,12 +122,15 @@ server {
   }
 
   # Every other /api request needs a valid access token, checked here first (jwt.js) and again by the API.
+  # auth_request: before proxying, nginx makes an internal sub-request to /_jwt; a 2xx answer lets the request
+  # through, a 401 rejects it (@unauthorized). auth_request_set copies headers of that answer into variables.
   # ^~ : this prefix match wins over the static-file regex below.
   location ^~ /api/ {
     limit_req zone=api_per_ip burst=${GATEWAY_RATE_LIMIT_BURST} nodelay;
     auth_request /_jwt;
     auth_request_set $jwt_scope $sent_http_x_jwt_scope;
     auth_request_set $jwt_error $sent_http_x_jwt_error;
+    auth_request_set $jwt_subject $sent_http_x_jwt_subject;
     error_page 401 = @unauthorized;
     proxy_pass http://api;
 
@@ -128,6 +164,19 @@ server {
     js_content jwt.verify;
   }
 
+  # Browser error reports (Grafana Faro, src/app/core/observability). Anonymous on purpose: errors happen on the
+  # sign-in page too. POST only, small bodies, never cached (no proxy_cache here). Logged like every request: one
+  # line per batch, only when a browser has errors to report, and the 429s show a client in an error loop.
+  # collect-location.conf (collector.sh): forward to the `collector` upstream, or `return 204` without a collector.
+  location = /collect {
+    limit_except POST {
+      deny all;
+    }
+    limit_req zone=collect_per_ip burst=20 nodelay;
+    client_max_body_size 64k;
+    include /etc/nginx/collect-location.conf;
+  }
+
   # Rejected at the edge: the same problem-details shape the API uses.
   location @unauthorized {
     default_type application/problem+json;
@@ -136,7 +185,8 @@ server {
     return 401 '{"type":"https://tools.ietf.org/html/rfc9110#section-15.5.2","title":"Unauthorized","status":401,"detail":"A valid access token is required ($jwt_error).","errorCode":"invalid_token"}';
   }
 
-  # Hashed bundles: served from the edge cache after the first request.
+  # Static files (bundles have a content hash in their name, so they never change): served from the edge cache after the
+  # first request.
   location ~* \.(?:js|css|woff2?|ico|svg|png)$ {
     proxy_pass http://web;
     proxy_cache static_cache;

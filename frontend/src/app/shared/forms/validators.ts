@@ -1,4 +1,9 @@
+// Form validators Angular does not ship. A validator receives a field (or group) and returns null when the value is
+// fine, or an error object such as `{ integer: true }` that validation-message.ts turns into words.
 import { AbstractControl, ValidationErrors, ValidatorFn } from '@angular/forms';
+
+/** Rounding noise allowed by maxDecimals: in binary floating point, 0.29 * 100 is 28.999999999999996, not 29. */
+const FLOAT_TOLERANCE = 1e-6;
 
 /** Rejects values made only of whitespace (Validators.required accepts "   "). */
 export const notBlank: ValidatorFn = (control: AbstractControl): ValidationErrors | null =>
@@ -6,11 +11,13 @@ export const notBlank: ValidatorFn = (control: AbstractControl): ValidationError
     ? { required: true }
     : null;
 
+/** Whole numbers only (an empty field is left to `Validators.required`). */
 export const integer: ValidatorFn = (control: AbstractControl): ValidationErrors | null =>
   control.value === null || control.value === '' || Number.isInteger(control.value)
     ? null
     : { integer: true };
 
+/** At most `places` decimal places (e.g. 2 for a price). */
 export function maxDecimals(places: number): ValidatorFn {
   const factor = 10 ** places;
   return (control: AbstractControl): ValidationErrors | null => {
@@ -18,8 +25,8 @@ export function maxDecimals(places: number): ValidatorFn {
     if (typeof value !== 'number') {
       return null;
     }
-    // Compare scaled values with a small tolerance to absorb binary floating point noise.
-    return Math.abs(Math.round(value * factor) - value * factor) < 1e-6
+    const scaled = value * factor;
+    return Math.abs(Math.round(scaled) - scaled) < FLOAT_TOLERANCE
       ? null
       : { maxDecimals: { places } };
   };

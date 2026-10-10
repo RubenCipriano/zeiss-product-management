@@ -13,8 +13,10 @@ export interface AppDialogOptions<D> {
 }
 
 /**
- * Opens every dialog the same way: an accessible name, the app's backdrop, and the CDK's focus trap and focus
- * restore. Dialog components therefore only render their content (no `role` of their own: one dialog, one name).
+ * Opens every dialog of the app the same way, on top of the Angular CDK dialog (the Component Dev Kit: unstyled,
+ * accessible building blocks from the Angular team). The CDK keeps keyboard focus inside the dialog and returns it to
+ * the button that opened it; this class adds the accessible name and the app's backdrop. Dialog components therefore
+ * only render their content (no `role` of their own: one dialog, one name).
  */
 @Service()
 export class AppDialog {

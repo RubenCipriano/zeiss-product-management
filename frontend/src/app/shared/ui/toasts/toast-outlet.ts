@@ -2,7 +2,10 @@ import { Component, inject } from '@angular/core';
 import { Notifications } from '../../../core/notifications/notifications';
 import { Icon } from '../icon/icon';
 
-/** Renders the notifications queue. Announced politely to screen readers. */
+/**
+ * Shows the toast messages from {@link Notifications} at the bottom of the screen (placed once, in the app shell).
+ * Screen readers announce them (`aria-live`).
+ */
 @Component({
   selector: 'app-toast-outlet',
   imports: [Icon],

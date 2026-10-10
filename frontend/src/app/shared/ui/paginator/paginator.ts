@@ -7,7 +7,10 @@ export interface PageChange {
   pageSize: number;
 }
 
-/** Server-side paging controls: page size, range summary and first/previous/next/last. */
+/**
+ * Paging controls under a table: rows per page, "21–40 of 135", and first/previous/next/last. The data is paged by the
+ * server: this component only reports the page the user asked for (`pageChange`).
+ */
 @Component({
   selector: 'app-paginator',
   imports: [Icon],

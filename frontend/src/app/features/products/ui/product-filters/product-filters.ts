@@ -10,12 +10,13 @@ import {
   ProductFilterKind,
 } from '../../data-access/product-models';
 
+/** Typing waits this long for a pause before filtering, so a search is not sent on every keystroke. */
 const DEBOUNCE_MS = 300;
 
 /**
- * Filter bar: all products, search by name, or a stock range. Controlled component: `filter` (the store's current
- * filter) is the single source of truth and the form follows it; user input is reported, debounced, through
- * `filterChange`.
+ * The filter bar: all products, search by name, or a stock range. Presentational and "controlled": the `filter` input
+ * (the store's current filter) is the single source of truth and the fields follow it; what the user types is
+ * reported, after a short pause, through the `filterChange` output. It never filters anything itself.
  */
 @Component({
   selector: 'app-product-filters',
@@ -43,7 +44,8 @@ export class ProductFilters {
   );
 
   constructor() {
-    // Follow the current filter (e.g. a summary card was clicked) without echoing it back.
+    // An effect re-runs whenever a signal it reads changes: here, the `filter` input. The fields follow the current
+    // filter (e.g. a summary card was clicked) without reporting it back (`emitEvent: false`).
     effect(() => {
       const current = this.filter();
       if (current.kind === 'name' && current.name !== this.name.value.trim()) {

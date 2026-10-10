@@ -1,3 +1,4 @@
+// Sign-in and the user's session (Auth), plus the role → permission table the UI uses to hide actions.
 import { HttpClient } from '@angular/common/http';
 import { computed, inject, InjectionToken, Service, signal } from '@angular/core';
 import { Observable, map } from 'rxjs';
@@ -17,7 +18,10 @@ const PERMISSIONS_BY_ROLE: Readonly<Record<string, readonly Permission[]>> = {
   manager: ['products:read', 'stock:write', 'products:write'],
 };
 
-/** Where the session is kept. `sessionStorage`: survives a reload, gone when the tab closes. A token for tests. */
+/**
+ * Where the session is kept: `sessionStorage` survives a reload and is gone when the tab closes. An InjectionToken (a
+ * named value Angular can inject) so that tests can use a fake storage.
+ */
 export const SESSION_STORAGE = new InjectionToken<Storage>('SESSION_STORAGE', {
   factory: () => window.sessionStorage,
 });
@@ -39,9 +43,15 @@ interface TokenResponse {
 }
 
 /**
- * Signs in against the API's own token endpoint (`POST /api/auth/token`) and keeps the session as signals.
- * The token is a JWT signed by the API; its claims are read here only to show the user and their roles; the
- * signature is verified by the API on every request.
+ * The user's session: signs in, keeps the access token, tells the UI who the user is and what they may do, and signs
+ * out (also by itself when the token expires). One shared instance for the whole app (`@Service()`).
+ *
+ * Sign-in calls the API's own token endpoint (`POST /api/auth/token`). The token is a JWT signed by the API; this class
+ * only reads its claims to show the user and their roles. The signature is checked by the gateway and the API on every
+ * request (docs/guide/04-security.md).
+ *
+ * The session is a signal: a value that templates and `computed` values re-read automatically when it changes. So
+ * signing in or out updates the top bar and every permission check at once.
  */
 @Service()
 export class Auth {
@@ -64,7 +74,7 @@ export class Auth {
     this.scheduleExpiry(this.session());
   }
 
-  /** Reactive when called from a template or `computed`. */
+  /** Whether the user may do something. Called from a template or `computed`, it is re-evaluated on sign-in/out. */
   can(permission: Permission): boolean {
     return this.permissions().has(permission);
   }

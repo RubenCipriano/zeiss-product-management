@@ -1,3 +1,8 @@
+/*
+ * The app's only stylesheet. Styling is done with Tailwind: small utility classes written directly in the templates
+ * (`px-4` = horizontal padding, `text-slate-500` = grey text, `sm:` = from small screens up). Tailwind generates CSS
+ * only for the classes actually used. This file adds the colours/fonts and a few shared classes (.btn, .input, .card).
+ */
 @import 'tailwindcss';
 /* Self-hosted font: no request to a third party (privacy), and the CSP can stay 'self'-only. */
 @import '@fontsource-variable/inter';

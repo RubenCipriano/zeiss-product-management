@@ -9,8 +9,8 @@
     "test": "ng test",
     "test:ci": "ng test --watch=false",
     "lint": "ng lint",
-    "format": "prettier --write \"src/**/*.{ts,html,scss}\"",
-    "format:check": "prettier --check \"src/**/*.{ts,html,scss}\"",
+    "format": "prettier --write \"src/**/*.{ts,html,scss}\" \"e2e/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.{ts,html,scss}\" \"e2e/**/*.ts\"",
     "e2e": "playwright test",
     "audit:lighthouse": "node e2e/lighthouse-flow.mjs"
   },
@@ -25,6 +25,7 @@
     "@angular/platform-browser": "^22.2.0",
     "@angular/router": "^22.2.0",
     "@fontsource-variable/inter": "^5.3.0",
+    "@grafana/faro-web-sdk": "2.12.1",
     "rxjs": "~7.8.0",
     "tslib": "^2.3.0"
   },

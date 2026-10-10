@@ -9,7 +9,10 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
-RUN npm run build
+# The release, reported with the browser's errors (core/observability): deploy/deploy.sh and the pipeline pass the
+# image tag.
+ARG APP_VERSION=dev
+RUN npm run build -- --define "APP_VERSION='${APP_VERSION}'"
 
 # Unprivileged nginx: listens on 8080 and runs as a non-root user.
 FROM nginxinc/nginx-unprivileged:1.29-alpine AS runtime

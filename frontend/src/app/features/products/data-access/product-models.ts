@@ -1,3 +1,5 @@
+// The product feature's data shapes (as the API sends and receives them) and its business constants.
+
 /** A product as returned by the API. Mirrors `ProductResponse` in the backend. */
 export interface Product {
   id: number;
@@ -9,7 +11,10 @@ export interface Product {
   categoryName: string;
   createdAt: string;
   updatedAt: string;
-  /** Concurrency token; sent back as `If-Match` so stale edits are rejected (HTTP 412). */
+  /**
+   * Increases on every change. Sent back in the `If-Match` header when editing or deleting: if someone else changed
+   * the product meanwhile, the versions differ and the API answers 412 instead of overwriting their change.
+   */
   version: number;
 }
 
@@ -67,6 +72,10 @@ export const PRODUCT_LIMITS = {
 
 /** At or below this quantity a product is highlighted as running low. */
 export const LOW_STOCK_THRESHOLD = 10;
+
+/** The stock-level filters behind the summary cards (and their counts). */
+export const LOW_STOCK_FILTER: ProductFilter = { kind: 'stock', min: 0, max: LOW_STOCK_THRESHOLD };
+export const OUT_OF_STOCK_FILTER: ProductFilter = { kind: 'stock', min: 0, max: 0 };
 
 export const DEFAULT_PAGE_SIZE = 20;
 

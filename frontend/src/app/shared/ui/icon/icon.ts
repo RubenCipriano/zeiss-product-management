@@ -1,3 +1,4 @@
+// The app's icons: `<app-icon name="plus" />` draws an inline SVG from the table below.
 import { Component, computed, input } from '@angular/core';
 
 interface IconShape {

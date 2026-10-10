@@ -1,7 +1,9 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('the edge (gateway)', () => {
-  test('sends a strict Content-Security-Policy and the other security headers', async ({ request }) => {
+  test('sends a strict Content-Security-Policy and the other security headers', async ({
+    request,
+  }) => {
     const response = await request.get('/login');
     const headers = response.headers();
 
@@ -11,7 +13,9 @@ test.describe('the edge (gateway)', () => {
     expect(headers['permissions-policy']).toContain('camera=()');
   });
 
-  test('refuses API calls without a valid token, before they reach the API', async ({ request }) => {
+  test('refuses API calls without a valid token, before they reach the API', async ({
+    request,
+  }) => {
     const missing = await request.get('/api/products');
     const forged = await request.get('/api/products', {
       headers: { Authorization: 'Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.' },

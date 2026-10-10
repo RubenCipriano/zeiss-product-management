@@ -9,7 +9,6 @@ import { validationMessage } from '../../../../shared/forms/validation-message';
 import { Icon } from '../../../../shared/ui';
 import { CategoriesApi } from '../../data-access/categories-api';
 import { PRODUCT_LIMITS, Product, ProductInput } from '../../data-access/product-models';
-import { ProductsApi } from '../../data-access/products-api';
 import { ProductsStore } from '../../data-access/products-store';
 
 export interface ProductFormDialogData {
@@ -28,10 +27,12 @@ const FIELD_LABELS: Record<ProductField, string> = {
 };
 
 /**
- * Create / edit form. Client-side validation mirrors the API rules for fast feedback, but the
- * API remains authoritative: its field errors are shown on the matching controls.
+ * The "New product" / "Edit product" dialog. Its form checks the same rules as the API for fast feedback, but the API
+ * decides: its per-field errors are shown on the matching fields. If someone else changed the product meanwhile (HTTP
+ * 412), it offers to reload the latest version.
  *
- * Opened with the product list's injector, so it shares the screen's {@link ProductsStore}.
+ * Opened by ProductActions with the page's injector, so it shares the page's {@link ProductsStore}. `DIALOG_DATA` is
+ * what the opener passed in; `DialogRef` closes the dialog and hands the saved product back to the opener.
  */
 @Component({
   selector: 'app-product-form-dialog',
@@ -44,10 +45,23 @@ export class ProductFormDialog {
   protected readonly titleId = ProductFormDialog.TITLE_ID;
 
   private readonly store = inject(ProductsStore);
-  private readonly productsApi = inject(ProductsApi);
   protected readonly dialogRef = inject<DialogRef<Product, ProductFormDialog>>(DialogRef);
 
   protected readonly limits = PRODUCT_LIMITS;
+  /** One key for this dialog: resubmitting (e.g. after a network error) can never create a second product. */
+  private readonly idempotencyKey = crypto.randomUUID();
+
+  /** The version being edited (null: creating). Replaced when the user reloads after a conflict. */
+  protected readonly editing = signal<Product | null>(
+    inject<ProductFormDialogData>(DIALOG_DATA).product ?? null,
+  );
+  protected readonly isEdit = computed(() => this.editing() !== null);
+  protected readonly saving = signal(false);
+  protected readonly errorMessage = signal<string | null>(null);
+  /** Set when the product changed on the server since it was opened (HTTP 412). */
+  protected readonly conflict = signal(false);
+
+  /** The category dropdown's options; `toSignal` turns the request's answer into a signal (empty until it arrives). */
   protected readonly categories = toSignal(
     inject(CategoriesApi)
       .list()
@@ -55,18 +69,7 @@ export class ProductFormDialog {
     { initialValue: [] },
   );
 
-  /** The version being edited. Replaced when the user reloads after a conflict. */
-  protected readonly editing = signal<Product | null>(
-    inject<ProductFormDialogData>(DIALOG_DATA).product ?? null,
-  );
-  protected readonly isEdit = computed(() => this.editing() !== null);
-  /** One key for this dialog: resubmitting (e.g. after a network error) can never create a second product. */
-  private readonly idempotencyKey = crypto.randomUUID();
-  protected readonly saving = signal(false);
-  protected readonly errorMessage = signal<string | null>(null);
-  /** Set when the product changed on the server since it was opened (HTTP 412). */
-  protected readonly conflict = signal(false);
-
+  /** A reactive form: the fields, their validators and their values live here, bound to the template by name. */
   protected readonly form = new FormGroup({
     name: new FormControl('', {
       nonNullable: true,
@@ -102,6 +105,7 @@ export class ProductFormDialog {
     }
   }
 
+  /** The message to show under a field, once the user has touched it. */
   protected fieldError(field: ProductField): string | null {
     const control = this.form.controls[field];
     return control.touched || control.dirty
@@ -137,7 +141,7 @@ export class ProductFormDialog {
     }
 
     this.setSaving(true);
-    this.productsApi.getById(product.id).subscribe({
+    this.store.latest(product.id).subscribe({
       next: (latest) => {
         this.editing.set(latest);
         this.fillForm(latest);

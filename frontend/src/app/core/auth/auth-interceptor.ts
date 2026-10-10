@@ -7,8 +7,11 @@ import { ApiError } from '../http/api-error';
 import { Auth } from './auth';
 
 /**
- * Adds the access token to API calls (and only to API calls: tokens must never leak to other origins).
- * A 401 from the API means the session is no longer valid, so the user is sent to sign in again.
+ * Adds the signed-in user's access token to every API call. An interceptor is a function that runs on every HTTP
+ * request the app makes (and on its response), so no service has to add the token itself.
+ *
+ * Only API calls get the token: it must never leak to another site. A 401 from the API means the session is no longer
+ * valid, so the user is signed out and sent to the login page.
  */
 export const authInterceptor: HttpInterceptorFn = (req, next) => {
   const auth = inject(Auth);

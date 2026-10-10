@@ -1,7 +1,10 @@
 import { expect, signIn, test } from './support';
 
 test.describe('managing products (manager)', () => {
-  test('create, find, change stock by 10, see the history, edit and delete', async ({ page, consoleErrors }) => {
+  test('create, find, change stock by 10, see the history, edit and delete', async ({
+    page,
+    consoleErrors,
+  }) => {
     const name = `E2E lens ${Date.now()}-${test.info().project.name}`;
     await signIn(page, 'manager');
 
@@ -12,23 +15,33 @@ test.describe('managing products (manager)', () => {
     await form.getByLabel('Price').fill('19.90');
     await form.getByLabel('Stock').fill('5');
     await form.getByLabel('Category').selectOption({ index: 1 });
+    // Wait for the API's answer rather than a fixed time: under a heavy database load a write may take seconds.
+    const created = page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/products') && response.request().method() === 'POST',
+      { timeout: 30_000 },
+    );
     await form.getByRole('button', { name: /Create/ }).click();
+    expect((await created).status()).toBe(201);
     await expect(form).toHaveCount(0);
 
     // Find it with a partial, case-insensitive search
     await page.getByRole('radio', { name: 'Search by name' }).click();
     await page.getByLabel('Name contains').fill(name.slice(4, 20).toUpperCase());
     const row = page.getByTestId('product-row').filter({ hasText: name });
+    // The stock badge's accessible label ("15 units, In stock"): the row also holds digits in the name and the date.
+    const stock = row.locator('app-stock-status');
     await expect(row).toHaveCount(1);
-    await expect(row).toContainText('5');
+    await expect(stock).toHaveAttribute('aria-label', /^5 units/);
 
     // +10 in one click
     await page.getByLabel('Units per + / - click').selectOption('10');
     await row.getByRole('button', { name: `Add 10 units of ${name}` }).click();
-    await expect(row).toContainText('15');
-    // -10 is refused by the UI when there is not enough stock... 15 is enough:
+    await expect(stock).toHaveAttribute('aria-label', /^15 units/);
     await row.getByRole('button', { name: `Remove 10 units of ${name}` }).click();
-    await expect(row).toContainText('5');
+    await expect(stock).toHaveAttribute('aria-label', /^5 units/);
+    // With 5 left, removing 10 is not offered.
+    await expect(row.getByRole('button', { name: `Remove 10 units of ${name}` })).toBeDisabled();
 
     // The history records each change, newest first (an accessible, named dialog)
     await row.getByRole('button', { name: `Actions for ${name}` }).click();

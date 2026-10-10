@@ -2,7 +2,9 @@ import { Component, computed, input, output } from '@angular/core';
 import { Icon, IconName } from '../../../../shared/ui';
 import {
   InventorySummary as Summary,
+  LOW_STOCK_FILTER,
   LOW_STOCK_THRESHOLD,
+  OUT_OF_STOCK_FILTER,
   ProductFilter,
 } from '../../data-access/product-models';
 
@@ -14,7 +16,11 @@ interface Card {
   filter: ProductFilter;
 }
 
-/** The headline counts. Each card is also a shortcut: clicking it asks for the matching filter. */
+/**
+ * The three summary cards above the table (products, low stock, out of stock). Each card is also a shortcut: clicking
+ * it asks for the matching filter. Presentational: it receives data through `input()` and reports clicks through
+ * `output()` (an event the parent listens to); it calls no service.
+ */
 @Component({
   selector: 'app-inventory-summary',
   imports: [Icon],
@@ -52,6 +58,7 @@ export class InventorySummary {
   readonly summary = input.required<Summary | null>();
   readonly selectFilter = output<ProductFilter>();
 
+  /** A computed value: recalculated only when `summary` changes. */
   protected readonly cards = computed((): Card[] => {
     const summary = this.summary();
     return [
@@ -67,14 +74,14 @@ export class InventorySummary {
         value: summary?.lowStock,
         icon: 'trendingDown',
         accent: 'bg-amber-50 text-amber-600',
-        filter: { kind: 'stock', min: 0, max: LOW_STOCK_THRESHOLD },
+        filter: LOW_STOCK_FILTER,
       },
       {
         label: 'Out of stock',
         value: summary?.outOfStock,
         icon: 'ban',
         accent: 'bg-red-50 text-red-600',
-        filter: { kind: 'stock', min: 0, max: 0 },
+        filter: OUT_OF_STOCK_FILTER,
       },
     ];
   });

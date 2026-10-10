@@ -1,7 +1,8 @@
 import { InjectionToken } from '@angular/core';
 
 /**
- * Base URL of the backend API.
+ * Where the API is: the start of every API URL (`/api`). An InjectionToken (a named value Angular can inject), so tests
+ * could point it elsewhere.
  *
  * Relative by default: in development the Angular dev server proxies `/api` to the backend
  * (proxy.conf.json), and in Docker nginx does the same. The browser therefore always talks to a

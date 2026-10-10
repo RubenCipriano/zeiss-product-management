@@ -1,4 +1,5 @@
-// Verifies the API's access tokens at the edge (nginx njs), so that:
+// Checks the access token of every /api request at the gateway, before it reaches the API. Runs inside nginx (njs:
+// nginx's built-in JavaScript engine), so that:
 //  - requests with a missing, forged or expired token are rejected here, without reaching the API;
 //  - the microcache can be shared by everyone with the same role (cache key = role, not token), because the
 //    gateway now knows the role is genuine.
@@ -6,8 +7,9 @@
 // The API signs tokens with ES256 and publishes only its public key (JWKS). The gateway holds no secret: it can
 // verify tokens but never issue one. The API still validates every token it receives (defence in depth).
 //
-// Called through `auth_request /_jwt` for every /api request: answers 204 with `X-Jwt-Scope: <roles>` when the
-// token is valid, 401 otherwise.
+// Called through `auth_request /_jwt` (an internal sub-request nginx makes before proxying) for every /api request:
+// answers 204 with `X-Jwt-Scope: <roles>` and `X-Jwt-Subject: <client id>` when the token is valid, 401 otherwise.
+// Details: docs/adr/0020-edge-token-verification.md.
 
 const KEYS = ngx.shared.jwt_keys; // kid -> public JWK (JSON), from the API's JWKS; expires after 1 h
 const TOKENS = ngx.shared.jwt_tokens; // token -> "roles|exp" for tokens already verified (skip the crypto)
@@ -27,7 +29,7 @@ async function verify(r) {
   const known = TOKENS.get(token);
   if (known) {
     const parts = known.split('|');
-    return Number(parts[1]) + CLOCK_SKEW_SECONDS > now ? allow(r, parts[0]) : deny(r, 'token expired');
+    return Number(parts[1]) + CLOCK_SKEW_SECONDS > now ? allow(r, parts[0], parts[2]) : deny(r, 'token expired');
   }
 
   let header;
@@ -80,8 +82,9 @@ async function verify(r) {
   const scope = roles.sort().join(',');
 
   // Remember it until it expires (at most 10 minutes): the next requests with this token skip the signature check.
-  TOKENS.set(token, scope + '|' + claims.exp, Math.max(1, Math.min(claims.exp - now, 600)) * 1000);
-  return allow(r, scope);
+  const subject = String(claims.sub || '').replace(/[^A-Za-z0-9._-]/g, '');
+  TOKENS.set(token, scope + '|' + claims.exp + '|' + subject, Math.max(1, Math.min(claims.exp - now, 600)) * 1000);
+  return allow(r, scope, subject);
 }
 
 /** The public key for `kid`, from the shared cache or, if unknown, from a fresh download of the API's JWKS. */
@@ -122,8 +125,9 @@ async function publicKey(r, kid) {
   return downloaded ? JSON.parse(downloaded) : null;
 }
 
-function allow(r, scope) {
+function allow(r, scope, subject) {
   r.headersOut['X-Jwt-Scope'] = scope;
+  r.headersOut['X-Jwt-Subject'] = subject; // for the access log: who made the request
   r.return(204);
 }
 

@@ -16,10 +16,10 @@ export interface StockAdjustDialogData {
 }
 
 /**
- * Adds or removes a quantity of stock. The API applies the change atomically; this dialog only
- * previews the result and shows the API's answer (e.g. "only 3 available").
+ * The "Adjust stock" dialog: add or remove any quantity, with a preview of the stock afterwards. The API applies the
+ * change in one atomic step and has the last word; this dialog shows its answer (e.g. "only 3 available").
  *
- * Opened with the product list's injector, so it shares the screen's {@link ProductsStore}.
+ * Opened by ProductActions with the page's injector, so it shares the page's {@link ProductsStore}.
  */
 @Component({
   selector: 'app-stock-adjust-dialog',
@@ -60,6 +60,7 @@ export class StockAdjustDialog {
     ]),
   });
 
+  /** The form's current value as a signal, so the `computed` values below update as the user types. */
   private readonly formValue = toSignal(this.form.valueChanges, {
     initialValue: this.form.getRawValue(),
   });

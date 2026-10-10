@@ -4,7 +4,10 @@ import { Observable, shareReplay } from 'rxjs';
 import { API_BASE_URL } from '../../../core/config/api-config';
 import { Category } from './product-models';
 
-/** Categories are static reference data, so they are fetched once and shared. */
+/**
+ * Loads the product categories (for the form's dropdown). They never change while the app runs, so they are fetched
+ * once: `shareReplay` makes every later caller get the same answer without a new request.
+ */
 @Service()
 export class CategoriesApi {
   private readonly http = inject(HttpClient);

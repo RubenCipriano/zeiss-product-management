@@ -8,7 +8,7 @@ export interface ConfirmDialogData {
   confirmLabel: string;
 }
 
-/** Generic destructive-action confirmation. Closes with `true` when confirmed. */
+/** A reusable "Are you sure?" dialog for destructive actions (e.g. delete). Closes with `true` when confirmed. */
 @Component({
   selector: 'app-confirm-dialog',
   imports: [Icon],

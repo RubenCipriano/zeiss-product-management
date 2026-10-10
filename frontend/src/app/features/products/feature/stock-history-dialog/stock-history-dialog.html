@@ -71,7 +71,7 @@
       [page]="page().page"
       [pageSize]="page().pageSize"
       [totalCount]="history.hasValue() ? history.value().totalCount : 0"
-      [pageSizeOptions]="[10, 25, 50]"
+      [pageSizeOptions]="pageSizes"
       (pageChange)="onPage($event)"
     />
   }

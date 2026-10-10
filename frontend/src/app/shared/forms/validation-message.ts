@@ -1,8 +1,8 @@
 import { ValidationErrors } from '@angular/forms';
 
 /**
- * Turns a control's errors into one user-facing message. Server-side messages (key `server`) are
- * shown as-is, so the API remains the source of truth for business rules.
+ * Turns a form field's errors into one message for the user ("Price must be at least 0.01."). Messages from the API
+ * (key `server`) are shown as-is, so the API remains the source of truth for business rules.
  */
 export function validationMessage(errors: ValidationErrors | null, label: string): string | null {
   if (!errors) {

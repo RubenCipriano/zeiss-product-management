@@ -13,8 +13,9 @@ export interface QuickStockChange {
 }
 
 /**
- * The product rows, with the quick stock buttons and each row's action menu. Presentational: it shows what it is
- * given and reports what the user asked for; the page decides what happens.
+ * The products table: one row per product, with the quick + / − stock buttons and each row's action menu (Angular CDK
+ * menu). Presentational: it shows what it receives through `input()`s and reports what the user asked for through
+ * `output()`s; the page decides what happens.
  */
 @Component({
   selector: 'app-product-table',
@@ -42,6 +43,7 @@ export class ProductTable {
   protected readonly unitsLabel = computed(() =>
     this.step() === 1 ? 'one unit' : `${this.step()} units`,
   );
+  /** Grey placeholder rows shown while the first page loads. */
   protected readonly skeletonRows = [1, 2, 3, 4, 5];
 
   protected setStep(event: Event): void {

@@ -24,6 +24,9 @@
           "builder": "@angular/build:application",
           "options": {
             "browser": "src/main.ts",
+            "allowedCommonJsDependencies": [
+              "ua-parser-js"
+            ],
             "tsConfig": "tsconfig.app.json",
             "assets": [
               {
@@ -90,7 +93,8 @@
           "options": {
             "lintFilePatterns": [
               "src/**/*.ts",
-              "src/**/*.html"
+              "src/**/*.html",
+              "e2e/**/*.ts"
             ]
           }
         }

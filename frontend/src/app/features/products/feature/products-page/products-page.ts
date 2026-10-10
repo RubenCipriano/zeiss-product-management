@@ -6,9 +6,9 @@ import { InventorySummary, ProductFilters, ProductTable } from '../../ui';
 import { ProductActions } from '../product-actions';
 
 /**
- * The product catalogue screen. A container: it owns the screen's state ({@link ProductsStore}) and the user's
- * actions ({@link ProductActions}) for its lifetime, and wires them to presentational components (summary, filters,
- * table, paginator). It renders no business logic of its own.
+ * The products page: shows the summary cards, the filters, the table and the paginator. It owns no data and no logic:
+ * it reads everything from {@link ProductsStore} and hands every user action (which may open a dialog) to
+ * {@link ProductActions}. Both are created with the page (`providers`) and destroyed with it.
  */
 @Component({
   selector: 'app-products-page',

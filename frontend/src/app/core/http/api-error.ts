@@ -1,6 +1,7 @@
+// The one error type the app works with (ApiError), built from whatever a failed HTTP call returned.
 import { HttpErrorResponse } from '@angular/common/http';
 
-/** RFC 9457 problem details, as returned by the API for every error. */
+/** The error body the API returns for every error: the standard "problem details" format (RFC 9457). */
 export interface ProblemDetails {
   type?: string;
   title?: string;
@@ -47,10 +48,22 @@ export class ApiError extends Error {
     );
   }
 
-  /** First message for a field, matching the camelCase keys the API uses. */
+  /**
+   * First message for a form field (camelCase, as the API keys its validation errors). Framework-generated errors may
+   * name the field by its C# property (`StockQuantity`) or JSON path (`$.stockQuantity`): those match too.
+   */
   fieldError(field: string): string | null {
-    return this.fieldErrors[field]?.[0] ?? null;
+    const key = Object.hasOwn(this.fieldErrors, field)
+      ? field
+      : Object.keys(this.fieldErrors).find((key) => toFieldName(key) === field);
+    return key ? (this.fieldErrors[key][0] ?? null) : null;
   }
+}
+
+/** `$.stockQuantity` / `StockQuantity` -> `stockQuantity`. */
+function toFieldName(key: string): string {
+  const name = key.startsWith('$.') ? key.slice(2) : key;
+  return name.charAt(0).toLowerCase() + name.slice(1);
 }
 
 function isProblemDetails(body: unknown): body is ProblemDetails {

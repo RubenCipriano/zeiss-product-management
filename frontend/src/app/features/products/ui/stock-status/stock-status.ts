@@ -1,3 +1,4 @@
+// The stock badge ("12 In stock", "3 Low stock", "0 Out of stock") used in the table and the stock dialog.
 import { Component, computed, input } from '@angular/core';
 import { LOW_STOCK_THRESHOLD } from '../../data-access/product-models';
 
@@ -21,7 +22,7 @@ const LEVELS: Record<StockLevel, { label: string; badge: string; dot: string }> 
   },
 };
 
-/** A stock quantity with an at-a-glance status. Purely presentational. */
+/** A stock quantity with a coloured status. Purely presentational: it only displays its `quantity` input. */
 @Component({
   selector: 'app-stock-status',
   template: `

@@ -34,6 +34,15 @@ describe('ProductsApi', () => {
     expect(normal.request.headers.has('Cache-Control')).toBe(false);
   });
 
+  it('gets a single product, revalidating shared caches when asked to', () => {
+    api.getById(123456).subscribe();
+    api.getById(123456, true).subscribe();
+
+    const [normal, fresh] = httpTesting.match('/api/products/123456');
+    expect(normal.request.headers.has('Cache-Control')).toBe(false);
+    expect(fresh.request.headers.get('Cache-Control')).toBe('no-cache');
+  });
+
   it('uses the search endpoint for name filters', () => {
     api.query({ filter: { kind: 'name', name: 'lens' }, page: 1, pageSize: 20 }).subscribe();
 

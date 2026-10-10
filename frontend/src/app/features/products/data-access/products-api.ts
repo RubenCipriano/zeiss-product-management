@@ -6,6 +6,7 @@ import { CLIENT_CACHE, LIST_CACHE_POLICY } from '../../../core/http/client-cache
 import { PagedResponse } from '../../../shared/models/paged-response';
 import {
   Product,
+  ProductFilter,
   ProductInput,
   ProductQuery,
   StockMovement,
@@ -13,7 +14,7 @@ import {
 } from './product-models';
 
 /**
- * Typed client for the products endpoints. Stateless: it only maps calls to HTTP. Errors arrive as
+ * The products endpoints of the API as typed methods: one method per HTTP call, no state. A failed call arrives as an
  * `ApiError` (see apiErrorInterceptor).
  */
 @Service()
@@ -22,59 +23,40 @@ export class ProductsApi {
   private readonly baseUrl = `${inject(API_BASE_URL)}/products`;
 
   /**
-   * @param fresh skip shared caches (the gateway's 1 s microcache) - used right after the user's own changes so they
-   * always see the result.
+   * One page of products. The API has a separate list endpoint per kind of filter (all, by name, by stock level).
+   * @param fresh skip the caches (browser and gateway): used right after the user's own changes so they always see the
+   * result.
    */
   query(
     { filter, page, pageSize }: ProductQuery,
     fresh = false,
   ): Observable<PagedResponse<Product>> {
-    let params = new HttpParams().set('page', page).set('pageSize', pageSize);
-    const headers = fresh ? new HttpHeaders({ 'Cache-Control': 'no-cache' }) : undefined;
-    const context = cached();
-
-    switch (filter.kind) {
-      case 'all':
-        return this.http.get<PagedResponse<Product>>(this.baseUrl, { params, headers, context });
-      case 'name':
-        // An empty search is no filter at all.
-        if (!filter.name.trim()) {
-          return this.http.get<PagedResponse<Product>>(this.baseUrl, { params, headers, context });
-        }
-        params = params.set('name', filter.name);
-        return this.http.get<PagedResponse<Product>>(`${this.baseUrl}/search`, {
-          params,
-          headers,
-          context,
-        });
-      case 'stock':
-        if (filter.min !== null) {
-          params = params.set('min', filter.min);
-        }
-        if (filter.max !== null) {
-          params = params.set('max', filter.max);
-        }
-        return this.http.get<PagedResponse<Product>>(`${this.baseUrl}/stock-level`, {
-          params,
-          headers,
-          context,
-        });
-    }
+    const paging = new HttpParams().set('page', page).set('pageSize', pageSize);
+    const { url, params } = this.listEndpoint(filter, paging);
+    return this.http.get<PagedResponse<Product>>(url, {
+      params,
+      headers: noCacheIf(fresh),
+      context: cached(),
+    });
   }
 
-  getById(id: number): Observable<Product> {
-    return this.http.get<Product>(`${this.baseUrl}/${id}`);
+  /** @param fresh skip shared caches, as for {@link query}. */
+  getById(id: number, fresh = false): Observable<Product> {
+    return this.http.get<Product>(`${this.baseUrl}/${id}`, { headers: noCacheIf(fresh) });
   }
 
   /**
-   * @param idempotencyKey one key per user action: if the request is retried (double click, network error, a retry
-   * reaching another server), the API applies it only once.
+   * @param idempotencyKey sent as the `Idempotency-Key` header, one key per user action: if the same request arrives
+   * twice (double click, network error, a retry reaching another server), the API applies it only once.
    */
   create(input: ProductInput, idempotencyKey: string): Observable<Product> {
     return this.http.post<Product>(this.baseUrl, input, { headers: idempotent(idempotencyKey) });
   }
 
-  /** Sends the version the user edited as `If-Match`: if someone else changed it meanwhile, the API answers 412. */
+  /**
+   * Sends the version the user edited in the `If-Match` header: if someone else changed the product meanwhile, the API
+   * answers 412 (Precondition Failed) instead of overwriting their change.
+   */
   update(product: Pick<Product, 'id' | 'version'>, input: ProductInput): Observable<Product> {
     return this.http.put<Product>(`${this.baseUrl}/${product.id}`, input, {
       headers: ifMatch(product.version),
@@ -110,9 +92,43 @@ export class ProductsApi {
       { params, context: cached() },
     );
   }
+
+  /** The list endpoint for a filter, and its query parameters added to `params`. */
+  private listEndpoint(
+    filter: ProductFilter,
+    params: HttpParams,
+  ): { url: string; params: HttpParams } {
+    switch (filter.kind) {
+      case 'all':
+        return { url: this.baseUrl, params };
+      case 'name':
+        // An empty search is no filter at all.
+        return filter.name.trim()
+          ? { url: `${this.baseUrl}/search`, params: params.set('name', filter.name) }
+          : { url: this.baseUrl, params };
+      case 'stock': {
+        let stockParams = params;
+        if (filter.min !== null) {
+          stockParams = stockParams.set('min', filter.min);
+        }
+        if (filter.max !== null) {
+          stockParams = stockParams.set('max', filter.max);
+        }
+        return { url: `${this.baseUrl}/stock-level`, params: stockParams };
+      }
+    }
+  }
 }
 
-/** Reads are cached in the browser (see clientCacheInterceptor); writes empty that cache. */
+/**
+ * `Cache-Control: no-cache` when `fresh`: the browser cache and the gateway's microcache then skip their stored copy, ask
+ * the API, and keep its new answer.
+ */
+function noCacheIf(fresh: boolean): HttpHeaders | undefined {
+  return fresh ? new HttpHeaders({ 'Cache-Control': 'no-cache' }) : undefined;
+}
+
+/** Marks a read as cacheable in the browser (see clientCacheInterceptor); writes empty that cache. */
 function cached(): HttpContext {
   return new HttpContext().set(CLIENT_CACHE, LIST_CACHE_POLICY);
 }

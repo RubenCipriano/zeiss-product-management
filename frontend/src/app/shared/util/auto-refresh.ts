@@ -8,11 +8,10 @@ export interface AutoRefreshOptions {
 }
 
 /**
- * Calls `refresh` periodically while the browser tab is visible, and stops when the caller is destroyed.
+ * Calls `refresh` every `everyMs` while the browser tab is visible, and stops when the caller is destroyed.
  *
- * Angular's equivalent of a React hook: an `inject…`-style function that adds a behaviour to whichever component or
- * service calls it, using that caller's lifetime (`DestroyRef`). Must be called in an injection context (a
- * constructor or field initializer).
+ * A reusable behaviour for any component or service: it uses `inject()` to find the caller's lifetime (`DestroyRef`),
+ * so it must be called where `inject()` works: in a constructor or a field initializer.
  */
 export function autoRefresh(
   refresh: () => void,

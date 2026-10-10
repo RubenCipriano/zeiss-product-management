@@ -1,3 +1,5 @@
+// The products page's data: which page and filter are shown, the loaded products, the summary counts, and the changes
+// the user makes. Components read it and call its methods; they never call the API themselves.
 import {
   computed,
   effect,
@@ -16,7 +18,8 @@ import { autoRefresh } from '../../../shared/util';
 import {
   DEFAULT_PAGE_SIZE,
   InventorySummary,
-  LOW_STOCK_THRESHOLD,
+  LOW_STOCK_FILTER,
+  OUT_OF_STOCK_FILTER,
   Product,
   ProductFilter,
   ProductInput,
@@ -27,67 +30,67 @@ import { ProductsApi } from './products-api';
 
 /**
  * How often the list re-fetches in the background, so changes made by other users or other API
- * clients show up without a manual refresh. 0 disables it.
+ * clients show up without a manual refresh. 0 disables it (an InjectionToken, so tests can).
  */
 export const PRODUCTS_AUTO_REFRESH_MS = new InjectionToken<number>('PRODUCTS_AUTO_REFRESH_MS', {
   factory: () => 15_000,
 });
 
+/** A page of products together with the query it answers. */
+interface LoadedPage {
+  query: ProductQuery;
+  page: PagedResponse<Product>;
+}
+
 /**
- * State of the product list screen: the current query, the loaded page and the mutations that
- * affect it. Provided by the page component, so it lives exactly as long as the screen.
+ * State of the products page, kept in signals: values that templates and `computed` values re-read automatically when
+ * they change. Provided by the page component (`autoProvided: false`), so it lives exactly as long as the page.
  *
- * Data flow is one-directional: components call methods, the store updates `query`, and
- * `rxResource` re-fetches. Changing the query while a request is in flight cancels it.
+ * Data flows one way: a component calls a method (`setFilter`, `setPage`, `update`...), the store changes `query`, and
+ * `rxResource` (a signal-driven loader: it re-runs its request whenever its `params` change, cancelling the one in
+ * flight) fetches the new page. Background: docs/adr/0007-frontend-state.md, docs/guide/07-frontend.md.
  */
 @Service({ autoProvided: false })
 export class ProductsStore {
   private readonly api = inject(ProductsApi);
 
+  /** What the user asked to see. Every change triggers a load (see productsResource). */
   readonly query = signal<ProductQuery>(
     { filter: { kind: 'all' }, page: 1, pageSize: DEFAULT_PAGE_SIZE },
     // Structural equality: re-applying the same filter must not trigger another request.
     { equal: (a, b) => JSON.stringify(a) === JSON.stringify(b) },
   );
 
-  /** Set before a reload that must bypass shared caches (after the user's own changes or an explicit refresh). */
+  /** Set before a reload that must bypass the caches (after the user's own changes or an explicit refresh). */
   private nextLoadFresh = false;
   private summaryFresh = false;
+  /** The next page last prefetched, so the same one is not fetched twice. */
+  private lastPrefetch = '';
 
   /**
-   * Each result remembers the query it answers. Changing the query cancels the request in flight, so paging quickly
-   * never lets an older page overwrite a newer one.
+   * Loads the page for `query`. Each result remembers the query it answers. Changing the query cancels the request in
+   * flight, so paging quickly never lets an older page overwrite a newer one.
    */
   private readonly productsResource = rxResource({
     params: () => this.query(),
     stream: ({ params }) =>
-      this.api.query(params, this.consumeFresh()).pipe(map((page) => ({ query: params, page }))),
+      this.api
+        .query(params, this.consumeFresh())
+        .pipe(map((page): LoadedPage => ({ query: params, page }))),
   });
 
+  /**
+   * The last page that loaded successfully. A linkedSignal is a signal computed from a source that also sees its own
+   * previous value: while a new load is in flight (or after it fails) it keeps the previous page.
+   */
   private readonly loaded = linkedSignal<
-    { query: ProductQuery; page: PagedResponse<Product> } | undefined,
+    LoadedPage | undefined,
     { query: ProductQuery | null; page: PagedResponse<Product> }
   >({
     source: () => (this.productsResource.hasValue() ? this.productsResource.value() : undefined),
     computation: (current, previous) =>
       current ?? previous?.value ?? { query: null, page: emptyPage(DEFAULT_PAGE_SIZE) },
   });
-
-  /**
-   * The last successfully loaded page. While a new query or a reload is in flight (or after it fails) the
-   * previous page stays on screen, so the table and paginator don't flash empty between requests.
-   */
-  readonly page = computed(() => this.loaded().page);
-
-  /**
-   * True while the screen shows a different page or filter than the one requested (the user is paging or filtering),
-   * as opposed to a background refresh of the same page. The UI dims the table only in this case.
-   */
-  readonly isChangingPage = computed(
-    () => this.isLoading() && !sameQuery(this.loaded().query, this.query()),
-  );
-
-  private lastPrefetch = '';
 
   /**
    * Counts for the summary cards. They come from the same list endpoints with `pageSize=1` (only `totalCount` is
@@ -97,34 +100,35 @@ export class ProductsStore {
     stream: () =>
       // combineLatest (not forkJoin): cached counts show at once, refreshed counts replace them.
       combineLatest({
-        all: this.api.query({ filter: { kind: 'all' }, page: 1, pageSize: 1 }, this.summaryFresh),
-        low: this.api.query(
-          { filter: { kind: 'stock', min: 0, max: LOW_STOCK_THRESHOLD }, page: 1, pageSize: 1 },
-          this.summaryFresh,
-        ),
-        out: this.api.query(
-          { filter: { kind: 'stock', min: 0, max: 0 }, page: 1, pageSize: 1 },
-          this.summaryFresh,
-        ),
-      }).pipe(
-        map(({ all, low, out }): InventorySummary => ({
-          totalProducts: all.totalCount,
-          lowStock: low.totalCount,
-          outOfStock: out.totalCount,
-        })),
-      ),
+        totalProducts: this.count({ kind: 'all' }),
+        lowStock: this.count(LOW_STOCK_FILTER),
+        outOfStock: this.count(OUT_OF_STOCK_FILTER),
+      }),
   });
+
+  /**
+   * The page on screen: the last one loaded. While a new query or a reload is in flight (or after it fails) the
+   * previous page stays, so the table and paginator don't flash empty between requests.
+   */
+  readonly page = computed(() => this.loaded().page);
+  readonly products = computed(() => this.page().items);
+  readonly totalCount = computed(() => this.page().totalCount);
+  readonly isLoading = this.productsResource.isLoading;
+  readonly error = computed(() => toApiError(this.productsResource.error()));
+
+  /**
+   * True while the screen shows a different page or filter than the one requested (the user is paging or filtering),
+   * as opposed to a background refresh of the same page. The UI dims the table only in this case.
+   */
+  readonly isChangingPage = computed(
+    () => this.isLoading() && !sameQuery(this.loaded().query, this.query()),
+  );
 
   /** Last known summary; `null` until the first load (and kept while reloading). */
   readonly summary = linkedSignal<InventorySummary | undefined, InventorySummary | null>({
     source: () => (this.summaryResource.hasValue() ? this.summaryResource.value() : undefined),
     computation: (current, previous) => current ?? previous?.value ?? null,
   }).asReadonly();
-
-  readonly products = computed(() => this.page().items);
-  readonly totalCount = computed(() => this.page().totalCount);
-  readonly isLoading = this.productsResource.isLoading;
-  readonly error = computed(() => toApiError(this.productsResource.error()));
 
   constructor() {
     // Background refreshes may be served by the caches (browser, gateway): no `fresh`.
@@ -133,19 +137,8 @@ export class ProductsStore {
       when: () => !this.isLoading(),
     });
 
-    // Prefetch the next page once a page has loaded, so "next" is usually instant (served by the browser cache).
-    effect(() => {
-      const { query, page } = this.loaded();
-      if (!query || query.page * query.pageSize >= page.totalCount) {
-        return;
-      }
-      const next = { ...query, page: query.page + 1 };
-      const key = JSON.stringify(next);
-      if (key !== this.lastPrefetch) {
-        this.lastPrefetch = key;
-        untracked(() => this.api.query(next).subscribe({ error: () => undefined }));
-      }
-    });
+    // An effect runs its function now and again whenever a signal it read changes: here, whenever a page loads.
+    effect(() => this.prefetchNextPage());
   }
 
   setFilter(filter: ProductFilter): void {
@@ -156,12 +149,20 @@ export class ProductsStore {
     this.query.update((query) => ({ ...query, page, pageSize }));
   }
 
-  /** `fresh` (default) bypasses shared caches: used for explicit refreshes and after the user's own changes. */
+  /** `fresh` (default) bypasses the caches: used for explicit refreshes and after the user's own changes. */
   reload({ fresh } = { fresh: true }): void {
     this.nextLoadFresh = fresh;
     this.summaryFresh = fresh;
     this.productsResource.reload();
     this.summaryResource.reload();
+  }
+
+  /**
+   * The product as the server has it now, bypassing the caches: after a 412 the user re-applies their edit on top of
+   * it, so it must not be the version they already saw.
+   */
+  latest(id: number): Observable<Product> {
+    return this.api.getById(id, true);
   }
 
   create(input: ProductInput, idempotencyKey: string): Observable<Product> {
@@ -187,10 +188,32 @@ export class ProductsStore {
       .pipe(tap((updated) => this.applyChange(updated)));
   }
 
+  /** How many products match `filter`: one product per page is enough to get `totalCount`. */
+  private count(filter: ProductFilter): Observable<number> {
+    return this.api
+      .query({ filter, page: 1, pageSize: 1 }, this.summaryFresh)
+      .pipe(map((page) => page.totalCount));
+  }
+
   private consumeFresh(): boolean {
     const fresh = this.nextLoadFresh;
     this.nextLoadFresh = false;
     return fresh;
+  }
+
+  /** Once a page has loaded, fetches the next one, so "next" is usually instant (served by the browser cache). */
+  private prefetchNextPage(): void {
+    const { query, page } = this.loaded();
+    const hasNextPage = query !== null && query.page * query.pageSize < page.totalCount;
+    if (!hasNextPage) {
+      return;
+    }
+    const next = { ...query, page: query.page + 1 };
+    const key = JSON.stringify(next);
+    if (key !== this.lastPrefetch) {
+      this.lastPrefetch = key;
+      untracked(() => this.api.query(next).subscribe({ error: () => undefined }));
+    }
   }
 
   /**

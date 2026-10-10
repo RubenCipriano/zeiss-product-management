@@ -5,25 +5,25 @@ import { aProduct } from '../../../../../testing/product-fixtures';
 import { ApiError } from '../../../../core/http/api-error';
 import { CategoriesApi } from '../../data-access/categories-api';
 import { Product } from '../../data-access/product-models';
-import { ProductsApi } from '../../data-access/products-api';
 import { ProductsStore } from '../../data-access/products-store';
 import { ProductFormDialog } from './product-form-dialog';
 
 describe('ProductFormDialog', () => {
-  let store: { create: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
-  let productsApi: { getById: ReturnType<typeof vi.fn> };
+  let store: {
+    create: ReturnType<typeof vi.fn>;
+    update: ReturnType<typeof vi.fn>;
+    latest: ReturnType<typeof vi.fn>;
+  };
   let dialogRef: { close: ReturnType<typeof vi.fn>; disableClose: boolean };
 
   async function open(product?: Product) {
-    store = { create: vi.fn(), update: vi.fn() };
-    productsApi = { getById: vi.fn() };
+    store = { create: vi.fn(), update: vi.fn(), latest: vi.fn() };
     dialogRef = { close: vi.fn(), disableClose: false };
     TestBed.configureTestingModule({
       providers: [
         { provide: DIALOG_DATA, useValue: { product } },
         { provide: DialogRef, useValue: dialogRef },
         { provide: ProductsStore, useValue: store },
-        { provide: ProductsApi, useValue: productsApi },
         {
           provide: CategoriesApi,
           useValue: { list: () => of([{ id: 1, name: 'Spectacle Lenses' }]) },
@@ -146,7 +146,7 @@ describe('ProductFormDialog', () => {
       throwError(() => new ApiError(412, 'product.version_mismatch', 'Modified')),
     );
     const latest = { ...product, stockQuantity: 9, version: 8 };
-    productsApi.getById.mockReturnValue(of(latest));
+    store.latest.mockReturnValue(of(latest));
 
     await submit(fixture);
     expect(text(fixture)).toContain('changed by someone else');
@@ -157,7 +157,7 @@ describe('ProductFormDialog', () => {
     reload.click();
     await fixture.whenStable();
 
-    expect(productsApi.getById).toHaveBeenCalledWith(product.id);
+    expect(store.latest).toHaveBeenCalledWith(product.id);
     expect(form(fixture).controls.stockQuantity.value).toBe(9);
     expect(text(fixture)).not.toContain('changed by someone else');
   });
