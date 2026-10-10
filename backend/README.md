@@ -70,6 +70,18 @@ Other files: `Dockerfile` (the API image, which also runs the migrations), `glob
 | .NET 10 SDK (10.0.401+, `global.json`) | building, tests, `dotnet run` |
 | Docker | the tests (Testcontainers), a local PostgreSQL, the image |
 
+Installing them (the SDK must be 10.0.401 or a later feature band; Linux distributions' own `dotnet-sdk-10.0`
+packages are 10.0.1xx and too old):
+
+| | .NET 10 SDK | Docker |
+| --- | --- | --- |
+| macOS | `brew install dotnet`, or the installer from https://dotnet.microsoft.com/download/dotnet/10.0 | Docker Desktop |
+| Windows | `winget install Microsoft.DotNet.SDK.10` | Docker Desktop (WSL 2 backend) |
+| Linux (Ubuntu) | `curl -sSL https://dot.net/v1/dotnet-install.sh \| bash -s -- --channel 10.0`, then add `~/.dotnet` to `PATH` | Docker Engine (`sudo apt install docker.io`, or the deploy repository's `scripts/setup-ubuntu.sh`) |
+
+The commands below are the same on every platform (on Windows, in PowerShell or Git Bash, or in WSL 2 with the SDK
+installed there; the `bash` snippets need a bash shell).
+
 ## Run locally with `dotnet run`
 
 The API runs in the `Development` environment (`Properties/launchSettings.json`, http://localhost:5080). There,
@@ -126,9 +138,9 @@ Redis__Password="$(kubectl -n infra get secret redis-auth -o go-template='{{ .da
 dotnet run --project ProductManagement.Api
 ```
 
-**The whole system** (API, web app, gateway, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes: clone the three
-repositories side by side and follow the deploy repository's README (`scripts/infra.sh up`, then
-`scripts/deploy.sh local`, which builds this folder's image).
+**The whole system** (API, web app, gateway, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes (macOS,
+Windows) or a k3s on an Ubuntu server: clone the three repositories side by side and follow the deploy repository's
+README, "Where it runs" (`scripts/infra.sh up`, then `scripts/deploy.sh local`, which builds this folder's image).
 
 ## Tests
 

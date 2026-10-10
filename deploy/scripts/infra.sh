@@ -83,6 +83,17 @@ ensure_metrics_server() {
   if kubectl get apiservice v1beta1.metrics.k8s.io >/dev/null 2>&1; then
     return
   fi
+  # k3s installs its own as an add-on shortly after the server starts: wait for that one instead of adding a second.
+  if [[ "$(kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.kubeletVersion}')" == *+k3s* ]]; then
+    echo "==> metrics-server: waiting for k3s' own"
+    for _ in $(seq 1 24); do
+      if kubectl get apiservice v1beta1.metrics.k8s.io >/dev/null 2>&1; then
+        return
+      fi
+      sleep 5
+    done
+    echo "    k3s has none (started with --disable metrics-server?): installing it"
+  fi
   echo "==> metrics-server $METRICS_SERVER_VERSION (the cluster has none)"
   kubectl apply -f "https://github.com/kubernetes-sigs/metrics-server/releases/download/$METRICS_SERVER_VERSION/components.yaml"
   if [[ "$(kubectl config current-context)" == docker-desktop ]]; then

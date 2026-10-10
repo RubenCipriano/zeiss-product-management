@@ -18,7 +18,8 @@ pipelines release by committing an image tag to it (GitOps,
 It is a runbook: commands to copy, in order. It is also honest about what has been exercised. Each section is marked:
 
 * **Tested here:** run in this repository, locally or in CI (Docker Desktop's Kubernetes runs the same manifests and
-  scripts as a production cluster).
+  scripts as a production cluster, and so does a single-node k3s on a fresh Ubuntu 24.04 VM, prepared with
+  `deploy/scripts/setup-ubuntu.sh`).
 * **Procedure:** the standard way to do it, written for this system but not executed against real machines as part
   of this assessment. Versions and flags are current at the time of writing; check them against the vendors' docs.
 
@@ -231,7 +232,10 @@ collector, set the gateway's `COLLECTOR_UPSTREAM` to `""` in `deploy/environment
 ## 5. The Kubernetes cluster (k3s)
 
 **Tested here:** the manifests render and validate for staging and production
-(`deploy/scripts/validate.sh`, the deploy pipeline's `validate:manifests`), and the same files run on Docker Desktop. **Procedure:** k3s itself.
+(`deploy/scripts/validate.sh`, the deploy pipeline's `validate:manifests`), and the same files run on Docker Desktop;
+`infra/` and the local environment also run on a single-node k3s v1.34.1+k3s1 (a fresh Ubuntu 24.04 VM, set up by
+`deploy/scripts/setup-ubuntu.sh`: ServiceLB, `local-path` volumes, k3s' metrics-server, NetworkPolicies enforced).
+**Procedure:** a k3s cluster of several servers, as below.
 
 ```bash
 # First server (pin the version: the manifests are validated against Kubernetes 1.34)
@@ -509,7 +513,7 @@ consumers (and, for the smoke check, optionally a viewer). Never reuse the local
 | Project | Stages | Releases / deploys |
 | --- | --- | --- |
 | backend | test (`test:backend`: format, build, 381 tests on dind; SAST, secret detection) → build (`build:api`, `migrations:sql`) → scan (`scan:api`) | `migrate:staging` (the migration pod in the cluster, sample data on an empty database) → `release:staging` (commits "backend: api <sha>" to deploy's `environments/staging`) → `migrate:production` (**manual**) → `release:production` (opens the merge request "Release api <sha> to production" in deploy) |
-| frontend | test (`test:frontend`: lint, format, 185 tests, build; SAST, secret detection) → build (`build:web`, `build:gateway`) → scan (`scan:web`, `scan:gateway`) | `release:staging` (commits "frontend: web, gateway <sha>") → `release:production` (**manual**: the merge request) |
+| frontend | test (`test:frontend`: lint, format, 187 tests, build; SAST, secret detection) → build (`build:web`, `build:gateway`) → scan (`scan:web`, `scan:gateway`) | `release:staging` (commits "frontend: web, gateway <sha>") → `release:production` (**manual**: the merge request) |
 | deploy | validate (`validate:manifests`: `scripts/validate.sh` on every environment and `infra/`; `validate:scripts`: `shellcheck`; `validate:alloy`: `alloy validate` and `alloy fmt` on the inline Alloy configuration) | `deploy:staging` (`scripts/deploy.sh staging apps`: Secrets `gitlab-registry`, `api-secrets`, `redis-credentials`, apply, rollouts) → `smoke:staging` (`scripts/smoke.sh $STAGING_URL`); `deploy:production` (**manual**, after a release merge request is merged) → `smoke:production`; `infra:staging` / `infra:production` (**manual**: `scripts/deploy.sh <env> infra`, with `LOKI_URL` when set) |
 
 Merge request pipelines test, build and scan (deploy: validate); pipelines on `main` also release and deploy, once
@@ -520,19 +524,30 @@ not pipeline jobs; run them by hand against staging. Details per job:
 
 ### One machine of our own
 
-The short path to a running staging without cloud machines or the agent (**procedure**): k3s, the shared
-infrastructure and a GitLab Runner on one Linux machine, the jobs reaching the cluster with a kubeconfig.
+The short path to a running staging without cloud machines or the agent: k3s, the shared infrastructure and a GitLab
+Runner on one Linux machine, the jobs reaching the cluster with a kubeconfig. Step 1 is **tested here** (a fresh
+Ubuntu 24.04 VM, where the local environment then ran end to end); the rest is a **procedure**.
 
-1. **k3s**, one server: `curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="v1.34.1+k3s1" sh -s - --write-kubeconfig-mode 600`.
-2. **Shared infrastructure**, from the deploy folder with the machine's kubeconfig (`/etc/rancher/k3s/k3s.yaml`):
+1. **k3s**, one server, on Ubuntu 22.04 or 24.04: clone the deploy repository and run
+   `scripts/setup-ubuntu.sh`. It installs, pinned, Docker Engine 29.9.0, kubectl v1.34.1 and k3s v1.34.1+k3s1 as a
+   single server (k3s' own kubeconfig stays readable by root only; yours is a copy, `~/.kube/config`, context
+   `default`), waits for k3s' add-ons and prints the next commands; it is safe to run again. With backend and
+   frontend cloned next to it, `scripts/infra.sh up` and `scripts/deploy.sh local` give the whole system on
+   http://&lt;server-ip&gt;:8080 without any registry (the images are copied into k3s), the quickest check that the
+   machine works.
+2. **Shared infrastructure**, from the deploy folder with the machine's kubeconfig (`~/.kube/config`):
    `scripts/deploy.sh staging infra` (or, once step 4 is done, the deploy project's `infra:staging`), then
    `scripts/create-database.sh product-management product_management pm_app pm_migrator`. PostgreSQL, Redis and the
    logs run on the one node; `environments/staging/api.yaml` already names them.
-3. **Runner:** install GitLab Runner and Docker, register it for the group (or for backend, frontend and deploy) with
-   the Docker executor, `--docker-privileged` (docker:dind) and "Run untagged jobs" on; turn off instance runners in
-   the three projects, so every job, deploys included, runs here and can reach the cluster's API.
+3. **Runner:** Docker is already there (step 1). Install GitLab Runner from GitLab's repository
+   (`curl -L "https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh" | sudo bash`, then
+   `sudo apt install -y gitlab-runner`), create a runner for the group (Settings → CI/CD → Runners → New group
+   runner, "Run untagged jobs" on; it shows a `glrt-` token) and register it with the Docker executor:
+   `sudo gitlab-runner register --non-interactive --url https://gitlab.com --token <glrt-token> --executor docker --docker-image alpine:3.22 --docker-privileged`
+   (privileged for docker:dind). Turn off instance runners in the three projects, so every job, deploys included,
+   runs here and can reach the cluster's API.
 4. **Cluster access:** in backend and deploy a File variable `KUBECONFIG`, scope `staging`, with the content
-   of `/etc/rancher/k3s/k3s.yaml` where `server: https://127.0.0.1:6443` is replaced by the machine's LAN address
+   of `~/.kube/config` (the same as `/etc/rancher/k3s/k3s.yaml`) where `server: https://127.0.0.1:6443` is replaced by the machine's LAN address
    (inside a job's container, 127.0.0.1 is the container). No agent, and the cluster's API is not exposed beyond
    the machine's network.
 5. **The rest of section 7:** the group deploy token, the release token, the staging variables of the deploy project

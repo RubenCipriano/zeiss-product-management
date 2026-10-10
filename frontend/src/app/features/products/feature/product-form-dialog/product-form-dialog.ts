@@ -7,6 +7,7 @@ import { ApiError } from '../../../../core/http/api-error';
 import { integer, maxDecimals, notBlank } from '../../../../shared/forms/validators';
 import { validationMessage } from '../../../../shared/forms/validation-message';
 import { Icon } from '../../../../shared/ui';
+import { newIdempotencyKey } from '../../../../shared/util';
 import { CategoriesApi } from '../../data-access/categories-api';
 import { PRODUCT_LIMITS, Product, ProductInput } from '../../data-access/product-models';
 import { ProductsStore } from '../../data-access/products-store';
@@ -49,7 +50,7 @@ export class ProductFormDialog {
 
   protected readonly limits = PRODUCT_LIMITS;
   /** One key for this dialog: resubmitting (e.g. after a network error) can never create a second product. */
-  private readonly idempotencyKey = crypto.randomUUID();
+  private readonly idempotencyKey = newIdempotencyKey();
 
   /** The version being edited (null: creating). Replaced when the user reloads after a conflict. */
   protected readonly editing = signal<Product | null>(

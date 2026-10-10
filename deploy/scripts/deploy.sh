@@ -7,11 +7,14 @@
 #   apps    the API, the web app and the gateway in the namespace product-management: environments/<environment>
 #   all     infra, then apps
 #
-# local (Docker Desktop's Kubernetes, context docker-desktop):
+# local (a cluster on this machine: Docker Desktop's Kubernetes, context docker-desktop, on macOS or Windows; or a
+# single-node k3s on Linux, context default, set up by scripts/setup-ubuntu.sh):
 #   1. creates the API's local secrets if they are missing (scripts/local-secrets.sh);
-#   2. builds the api, web and gateway images from the sibling checkouts ../backend and ../frontend (the layout you get
-#      by cloning the three repositories side by side) and records their tags in environments/local/generated/build
-#      (not committed), so `kubectl diff -k environments/local` compares against exactly what was applied;
+#   2. builds the api, web and gateway images with Docker from the sibling checkouts ../backend and ../frontend (the
+#      layout you get by cloning the three repositories side by side) and records their tags in
+#      environments/local/generated/build (not committed), so `kubectl diff -k environments/local` compares against
+#      exactly what was applied. Docker Desktop's Kubernetes runs the images of its Docker engine as they are; k3s has
+#      a containerd of its own, so they are copied into it (docker save | sudo k3s ctr images import);
 #   3. creates the service's database if it does not exist yet (scripts/create-database.sh);
 #   4. copies the shared Redis' password into the namespace (Secret redis-credentials);
 #   5. applies the database migrations with the new API image, in a one-off pod inside the cluster;
@@ -29,6 +32,8 @@
 #   KUBE_CONTEXT                          the kubectl context to use (the GitLab agent: <project path>:<agent name>);
 #                                         default: the current context (e.g. of a KUBECONFIG file)
 #   BACKEND_DIR, FRONTEND_DIR             local: the checkouts to build (default: ../backend and ../frontend)
+#   LOCAL_CLUSTER=docker-desktop|k3s      local: how the images reach the cluster, when the detection gets it wrong
+#                                         (default: docker-desktop for that context, k3s for a k3s node on this machine)
 #   LOGS=off                              local: no log collector, the gateway answers /collect with 204
 #   SEED_SAMPLE_DATA                      local: sample catalogue on an empty database (default: true)
 #   CI_DEPLOY_USER, CI_DEPLOY_PASSWORD    staging/production: a deploy token with read_registry on both registries
@@ -61,17 +66,50 @@ if ! CONTEXT="$(kubectl config current-context 2>/dev/null)"; then
   echo "No Kubernetes context: set KUBE_CONTEXT (GitLab agent) or KUBECONFIG (a kubeconfig file)" >&2
   exit 1
 fi
-# Local images exist only in this machine's Docker engine, which only Docker Desktop's Kubernetes shares; and the
-# laptop's cluster is never staging or production.
-if [[ "$ENVIRONMENT" == local && "$CONTEXT" != docker-desktop ]]; then
-  echo "local builds images in the local Docker engine, which only the context docker-desktop can run (current: $CONTEXT)" >&2
-  exit 1
-fi
+# The laptop's cluster is never staging or production.
 if [[ "$ENVIRONMENT" != local && "$CONTEXT" == docker-desktop ]]; then
   echo "$ENVIRONMENT runs on its own cluster, not docker-desktop: set KUBE_CONTEXT or KUBECONFIG" >&2
   exit 1
 fi
-echo "Deploying $ENVIRONMENT ($TARGET) to Kubernetes context: $CONTEXT"
+
+# local: the images are built on this machine, so the cluster must be able to run them without a registry.
+#   docker-desktop   Docker Desktop's Kubernetes runs the images of its own Docker engine (macOS, Windows)
+#   k3s              a k3s node on this machine (Linux): the images are copied into k3s' containerd
+local_cluster() {
+  local versions nodes
+  if [[ -n "${LOCAL_CLUSTER:-}" ]]; then
+    echo "$LOCAL_CLUSTER"
+  elif [[ "$CONTEXT" == docker-desktop ]]; then
+    echo docker-desktop
+  else
+    # k3s reports itself in the kubelet version (v1.34.1+k3s1) and names the node after the machine.
+    versions="$(kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.kubeletVersion}' 2>/dev/null || true)"
+    nodes=" $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true) "
+    if [[ "$versions" == *+k3s* && "$nodes" == *" $(hostname | tr '[:upper:]' '[:lower:]') "* ]] \
+      && command -v k3s >/dev/null; then
+      echo k3s
+    else
+      echo other
+    fi
+  fi
+}
+
+if [[ "$ENVIRONMENT" == local && ( "$TARGET" == apps || "$TARGET" == all ) ]]; then
+  CLUSTER="$(local_cluster)"
+  case "$CLUSTER" in
+    docker-desktop | k3s) ;;
+    *)
+      echo "local builds the images on this machine, and the context $CONTEXT cannot run them without a registry." >&2
+      echo "Use Docker Desktop's Kubernetes (context docker-desktop) or a k3s server on this machine" >&2
+      echo "(scripts/setup-ubuntu.sh), or set LOCAL_CLUSTER=docker-desktop|k3s if the detection is wrong." >&2
+      echo "Any other cluster runs registry images: release them (the app pipelines) and deploy staging or production." >&2
+      exit 1
+      ;;
+  esac
+  echo "Deploying $ENVIRONMENT ($TARGET) to Kubernetes context: $CONTEXT ($CLUSTER)"
+else
+  echo "Deploying $ENVIRONMENT ($TARGET) to Kubernetes context: $CONTEXT"
+fi
 
 # ─── helpers ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -88,10 +126,11 @@ apply_secret() {
   fi
 }
 
-# The commit of a checkout, plus a timestamp when it has uncommitted changes: a unique, immutable tag per build.
+# The commit of a checkout, plus a timestamp when it has uncommitted changes: a unique, immutable tag per build
+# (a folder that is not a git checkout gets dev-<timestamp>).
 image_tag() {
   local dir="$1" tag
-  tag="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo dev)"
+  tag="$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo "dev-$(date +%Y%m%d%H%M%S)")"
   if [[ -n "$(git -C "$dir" status --porcelain -- . 2>/dev/null)" ]]; then
     tag="$tag-dirty-$(date +%Y%m%d%H%M%S)"
   fi
@@ -116,6 +155,16 @@ copy_redis_password() {
       --dry-run=client -o yaml | apply_secret)" ]]; then
     restart_api=true
   fi
+}
+
+# k3s runs its own containerd, which does not see Docker's images: copy them in, with their names and tags (the
+# Deployments use imagePullPolicy IfNotPresent, so the node runs the copy and never asks a registry).
+import_into_k3s() {
+  local sudo=sudo
+  if [[ "$(id -u)" == 0 ]]; then sudo=""; fi
+  echo "==> Copying the images into k3s (docker save | ${sudo:+sudo }k3s ctr images import)"
+  docker save "$@" | $sudo k3s ctr images import - >/dev/null
+  printf '    %s\n' "$@"
 }
 
 require_secret() {
@@ -189,6 +238,12 @@ deploy_local_apps() {
 
   "$HERE/local-secrets.sh"
 
+  if ! docker info >/dev/null 2>&1; then
+    echo "Docker is not reachable (docker info): start Docker Desktop, or the Docker Engine on Linux; there, your user" >&2
+    echo "must be in the group docker (scripts/setup-ubuntu.sh adds it; log in again or run: newgrp docker)" >&2
+    exit 1
+  fi
+
   api_tag="$(image_tag "$backend")"
   web_tag="$(image_tag "$frontend")"
   echo "==> Building product-management/api:$api_tag ($backend)"
@@ -197,19 +252,24 @@ deploy_local_apps() {
   # APP_VERSION: the release the web app reports with its browser errors.
   docker build --quiet --tag "product-management/web:$web_tag" --build-arg APP_VERSION="$web_tag" "$frontend" >/dev/null
   docker build --quiet --tag "product-management/gateway:$web_tag" "$frontend/gateway" >/dev/null
+  if [[ "$CLUSTER" == k3s ]]; then
+    import_into_k3s "product-management/api:$api_tag" "product-management/web:$web_tag" \
+      "product-management/gateway:$web_tag"
+  fi
 
   mkdir -p "$build"
+  # The tags are quoted: a commit like 1186184 would otherwise be a YAML number, which Kustomize rejects.
   cat > "$build/kustomization.yaml" <<EOF
 # Generated by scripts/deploy.sh local: the images it built on this machine. Not committed.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 images:
   - name: product-management/api
-    newTag: $api_tag
+    newTag: "$api_tag"
   - name: product-management/web
-    newTag: $web_tag
+    newTag: "$web_tag"
   - name: product-management/gateway
-    newTag: $web_tag
+    newTag: "$web_tag"
 EOF
   if [[ "${LOGS:-on}" == off ]]; then
     cat >> "$build/kustomization.yaml" <<EOF
@@ -316,7 +376,10 @@ if [[ "$TARGET" == apps || "$TARGET" == all ]]; then
   echo
   kubectl -n "$NAMESPACE" get pods -l 'app.kubernetes.io/name in (api, web, gateway)'
   if [[ "$ENVIRONMENT" == local ]]; then
-    echo "Application: http://localhost:8080"
+    # Docker Desktop publishes the LoadBalancer on localhost; k3s (ServiceLB) on the node's addresses.
+    address="$(kubectl -n "$NAMESPACE" get service gateway \
+      -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}')"
+    echo "Application: http://${address:-localhost}:8080"
     echo "Swagger:     kubectl -n $NAMESPACE port-forward deployment/api 5080:8080   →   http://localhost:5080/swagger"
   fi
 fi

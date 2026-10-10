@@ -6,6 +6,7 @@ import { ApiError } from '../../../../core/http/api-error';
 import { integer } from '../../../../shared/forms/validators';
 import { validationMessage } from '../../../../shared/forms/validation-message';
 import { Icon, IconName } from '../../../../shared/ui';
+import { newIdempotencyKey } from '../../../../shared/util';
 import { PRODUCT_LIMITS, Product, StockOperation } from '../../data-access/product-models';
 import { ProductsStore } from '../../data-access/products-store';
 import { StockStatus } from '../../ui/stock-status/stock-status';
@@ -46,7 +47,7 @@ export class StockAdjustDialog {
 
   protected readonly product = this.data.product;
   /** One key for this dialog: resubmitting after an error can never apply the movement twice. */
-  private readonly idempotencyKey = crypto.randomUUID();
+  private readonly idempotencyKey = newIdempotencyKey();
   protected readonly saving = signal(false);
   protected readonly errorMessage = signal<string | null>(null);
 

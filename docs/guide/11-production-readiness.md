@@ -38,7 +38,7 @@ Checked against the running system by `tools/check-requirements.py` (14 checks, 
 | EF Core code-first migrations | ✅ | `Persistence/Migrations`, applied once per deployment, before the rollout, with the API image being deployed, as the schema owner `pm_migrator` (`deploy/scripts/deploy.sh local` locally, the backend pipeline's `migrate:*` jobs in GitLab; large indexes built `CONCURRENTLY`) |
 | Database seeding | ✅ | sample data via `UseSeeding`; bulk data via `tools/load-tests/seed-bulk.sh` |
 | Angular frontend consuming the API, reflecting changes made through the API | ✅ | every endpoint used; background refresh; E2E suite ([chapter 7](07-frontend.md)) |
-| Unit tests for various scenarios; BDD optional | ✅ | 381 back-end tests (212 unit, 153 integration, 16 Reqnroll BDD scenarios); 185 front-end tests; 22 E2E ([chapter 10](10-testing-and-quality.md)) |
+| Unit tests for various scenarios; BDD optional | ✅ | 381 back-end tests (212 unit, 153 integration, 16 Reqnroll BDD scenarios); 187 front-end tests; 22 E2E ([chapter 10](10-testing-and-quality.md)) |
 | Documentation for running locally | ✅ | [README](../../README.md) "Run it"; this guide |
 
 ## 2. Quality expectations

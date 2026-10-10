@@ -182,7 +182,7 @@ it is skipped when no Loki is reachable (e.g. `LOGS=off`).
 cd frontend
 npm ci
 npm run lint && npm run format:check
-npm run test:ci                          # 185 Vitest tests
+npm run test:ci                          # 187 Vitest tests
 npm run e2e                              # 22 Playwright tests against http://localhost:8080 (deploy first)
 npm run audit:lighthouse                 # mobile; FORM_FACTOR=desktop npm run audit:lighthouse for desktop
 npm start                                # dev server on :4200, /api proxied to :5080 (port-forward the api Service)

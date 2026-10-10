@@ -1,9 +1,10 @@
-# Local environment: Docker Desktop's Kubernetes on this machine.
+# Local environment: a cluster on this machine, Docker Desktop's Kubernetes (macOS, Windows) or a single-node k3s
+# (an Ubuntu server, scripts/setup-ubuntu.sh).
 #   scripts/deploy.sh local        # local secrets (first run), images from ../backend and ../frontend, migrations, apply
 #
 # The database and Redis are the cluster's shared ones, in the namespace `infra` (scripts/infra.sh up and
 # scripts/create-database.sh; api.yaml names them). The gateway is a LoadBalancer Service: Docker Desktop publishes it
-# on http://localhost:8080.
+# on http://localhost:8080, k3s (ServiceLB) on the server's addresses, http://<server-ip>:8080.
 #
 # generated/ is made on this machine and never committed:
 #   signing-key.pem, consumers.json   the API's own keys (scripts/local-secrets.sh)

@@ -126,6 +126,33 @@ environment's `api.yaml` (its comments say how, with TLS).
 `COLLECTOR_UPSTREAM: ""` in the environment's `gateway.yaml`). The application works the same; the pods log to stdout (`kubectl logs`) and the gateway answers the browser's error reports with 204. With
 `LOKI_URL=… deploy/scripts/infra.sh up logs` the logs go to another Loki instead (no Loki or Grafana in the cluster).
 
+## Where the local deployment runs
+
+`deploy/scripts/infra.sh up` and `deploy/scripts/deploy.sh local` deploy the whole system on one machine, on a
+Kubernetes that can run images built there without a registry. Three platforms, the same scripts (plain bash with
+tools that behave the same in their GNU and BSD versions; `.gitattributes` keeps the scripts' line endings LF on
+Windows):
+
+| | macOS | Windows | Ubuntu server (22.04, 24.04) |
+| --- | --- | --- | --- |
+| Kubernetes | Docker Desktop's (context `docker-desktop`) | Docker Desktop's, WSL 2 backend (context `docker-desktop`) | k3s v1.34.1+k3s1, one node (context `default`) |
+| Prepared by | enabling Kubernetes in Docker Desktop | the same, plus WSL integration for Ubuntu; the scripts run in the Ubuntu shell | `deploy/scripts/setup-ubuntu.sh`: Docker Engine 29.9.0, kubectl v1.34.1, k3s, `git`/`openssl`/`python3`/`curl`/`jq` (about 1.5 minutes) |
+| How the images reach the cluster | the cluster runs on the Docker engine that built them | the same | `docker save … \| sudo k3s ctr images import -`: k3s has a containerd of its own; tags kept, `imagePullPolicy: IfNotPresent` |
+| Gateway (`LoadBalancer`) | http://localhost:8080 | http://localhost:8080 | k3s' ServiceLB on the node's address: http://&lt;server-ip&gt;:8080 (and localhost on the server) |
+| Volumes | `hostpath` | `hostpath` | `local-path` (a directory on the server; `postgres-backups` binds at the first backup) |
+| metrics-server | installed by `infra.sh up` | the same | k3s' own (`infra.sh up` waits for it instead of installing a second) |
+| NetworkPolicies | not enforced | not enforced | enforced (k3s' network policy controller) |
+| Verified | every change | not run (scripts checked for macOS-only commands) | a fresh Ubuntu 24.04 VM (Multipass, 4 CPUs, 8 GB): setup, `infra.sh up`, `deploy.sh local`, smoke check, 14/14 requirement checks and 22/22 Playwright tests from the Mac, a start over from nothing |
+
+`deploy.sh local` decides how to deliver the images from the context (`docker-desktop`) or from a node that reports
+k3s (`v1.34.1+k3s1`) and is named like the machine it runs on; `LOCAL_CLUSTER=docker-desktop|k3s` overrides it, and
+any other cluster is refused with an explanation (a remote cluster needs registry images: staging or production).
+Two things the Ubuntu run brought to light and that are fixed for every platform: a commit hash made only of digits
+(`1186184`) was a YAML number in the generated `kustomization.yaml` (the tags are quoted now), and
+`crypto.randomUUID()`, which the web app used for idempotency keys, exists only in secure contexts (HTTPS or
+`localhost`), so creating a product over `http://<server-ip>:8080` failed; the web app now falls back to
+`crypto.getRandomValues()` (`shared/util/idempotency-key.ts`).
+
 ## What runs where
 
 **Namespace `infra`** (the deploy repository's `infra/`, applied by `deploy/scripts/infra.sh up`):
@@ -168,7 +195,7 @@ idle after 60 s. The superuser `postgres` is used by the infra scripts and by pe
 | `web` | Deployment (2 pods) + Service + PDB | frontend | nginx serving the Angular build. |
 | `web-ingress` | NetworkPolicy | frontend | Only the gateway may connect. |
 | `gateway` | Deployment (no fixed count) + PDB + HPA | frontend | The nginx gateway, 2–6 pods at 70 % CPU. |
-| `gateway` | Service | frontend | Port 8080. Locally type `LoadBalancer` (`localhost:8080` on Docker Desktop). |
+| `gateway` | Service | frontend | Port 8080. Locally type `LoadBalancer` (`localhost:8080` on Docker Desktop, the server's address on k3s). |
 | `gateway` | Ingress | frontend (staging, production: `environments/<env>/ingress.yaml`) | HTTPS for `staging.products.example.com` / `products.example.com`, certificate from cert-manager (Let's Encrypt). |
 
 **`kube-system`:** metrics-server, which feeds the two HPAs and `kubectl top`. k3s and most managed clusters ship
@@ -238,8 +265,9 @@ Secret (it prints the command).
 
 `deploy/scripts/deploy.sh <local|staging|production> [infra|apps|all]`; `apps` (the default) is the API, the web app
 and the gateway, `infra` runs `infra.sh up`, `all` both. It selects the cluster first (`KUBE_CONTEXT`, else the
-current context of `KUBECONFIG`), and refuses `local` on any context but `docker-desktop` and staging or production on
-`docker-desktop`. It needs the shared PostgreSQL and Redis running.
+current context of `KUBECONFIG`), and refuses `local` on a cluster that cannot run images built on this machine (only
+Docker Desktop's and a k3s on this machine can) and staging or production on `docker-desktop`. It needs the shared
+PostgreSQL and Redis running.
 
 **`local`** builds and applies what is in the sibling checkouts:
 
@@ -248,7 +276,8 @@ current context of `KUBECONFIG`), and refuses `local` on any context but `docker
    `dotnet run` when `../backend` is there.
 2. **Images:** builds `../backend` → `product-management/api:<tag>`, `../frontend` → `product-management/web:<tag>`
    (with `APP_VERSION=<tag>`, the release the browser reports with its errors) and `../frontend/gateway` →
-   `product-management/gateway:<tag>`, and writes their tags into `deploy/environments/local/generated/build/`
+   `product-management/gateway:<tag>` with Docker; on k3s copies them into its containerd
+   (`docker save | sudo k3s ctr images import -`); and writes their tags into `deploy/environments/local/generated/build/`
    (not committed), so `kubectl diff -k deploy/environments/local` compares with exactly what was applied.
 3. **The shared Secrets:** creates the database the first time (`create-database.sh`, when `database-credentials` is
    missing in `product-management`), and copies the password of `infra/redis-auth` into `redis-credentials`.
@@ -273,6 +302,7 @@ current context of `KUBECONFIG`), and refuses `local` on any context but `docker
 | --- | --- |
 | `KUBE_CONTEXT` | the kubectl context (the GitLab agent's `<project>:<agent>`); default: the current context |
 | `BACKEND_DIR`, `FRONTEND_DIR` | local: the checkouts to build (default `../backend`, `../frontend`) |
+| `LOCAL_CLUSTER` | local: `docker-desktop` or `k3s`, when the detection is wrong |
 | `LOGS=off` | local: a patch that sets the gateway's `COLLECTOR_UPSTREAM` to `""`: its `collector.sh` then makes `/collect` answer 204 and drop the reports instead of proxying to a collector that is not there |
 | `SEED_SAMPLE_DATA` | local: sample catalogue on an empty database (default `true`) |
 | `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD`, `CI_REGISTRY` | staging, production: the registry credential (GitLab passes the group deploy token by itself) |
@@ -300,7 +330,7 @@ with `kubectl -n product-management get secrets` and `kubectl delete secret`.
 and the local keys, then deploys again; an empty database gets the 24-product sample catalogue from the migrations.
 
 ```bash
-kubectl config use-context docker-desktop
+kubectl config use-context docker-desktop          # on the Ubuntu server (k3s): default
 kubectl delete namespace product-management --ignore-not-found
 deploy/scripts/infra.sh down --delete-data
 rm -rf deploy/environments/local/generated
@@ -309,7 +339,8 @@ deploy/scripts/deploy.sh local
 deploy/scripts/smoke.sh http://localhost:8080
 ```
 
-Keeping the data and rebuilding only the application is just the last two commands.
+Keeping the data and rebuilding only the application is just the last two commands. On the Ubuntu VM the whole block
+took 103 s.
 
 **A new environment, the first time:** cluster (k3s, nodes joined with `add-node.sh`), the GitLab variables and the
 group deploy token, `infra:<environment>` then `create-database.sh`, `STAGING_ENABLED` / `PRODUCTION_ENABLED`, then
@@ -322,7 +353,9 @@ step-by-step list is in the deploy repository's README ("Clean deploy") and, wit
 * **Local:** `deploy.sh local` tags each image with its checkout's short commit hash (`git rev-parse --short HEAD`),
   plus `-dirty-<timestamp>` when the working tree has uncommitted changes, so two different builds never share a tag.
   On Docker Desktop (context `docker-desktop`) the cluster runs on the same Docker engine that built the images, so
-  nothing is pushed; that is why `local` runs only there.
+  nothing is pushed; on k3s they are copied into its containerd with their tags. That is why `local` runs only on
+  those two. The tags are written quoted (`newTag: "1186184"`): a hash made only of digits is otherwise a YAML
+  number. A folder that is not a git checkout gets `dev-<timestamp>`.
 * **Staging and production:** the pipelines tag images with the commit's short SHA and push them to the project's
   registry (`registry.gitlab.com/zeiss/backend/api`, `.../frontend/web`, `.../frontend/gateway`). The tag that runs is
   the `newTag` in `deploy/environments/<env>/kustomization.yaml`, written by the app pipelines' release jobs; nothing

@@ -116,7 +116,7 @@ The contract between the API and the web app is small and made of names only:
 | Worst-case mix (25 % writes, reads spread over all products) | ~2,400 requests/s, 0 errors | same |
 | Ten teams, 30 % of stock changes sent twice | 281 requests/s, 0 errors, p95 4.3 ms, no change applied twice | same |
 | 300 simultaneous orders for 100 units | exactly 100 succeed, stock ends at 0 | [load-test-results.md](../load-test-results.md#docker-desktop-cluster-final-setup) |
-| Automated tests | 381 back end, 185 front end, 22 end-to-end | [chapter 10](10-testing-and-quality.md) |
+| Automated tests | 381 back end, 187 front end, 22 end-to-end | [chapter 10](10-testing-and-quality.md) |
 
 ## Map of the rest of the documentation
 

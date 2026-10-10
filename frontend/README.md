@@ -40,7 +40,15 @@ request reaches the API, rate-limits per client and keeps read answers for one s
 
 ## Run locally
 
-Requires Node 24 LTS (`.nvmrc`) and an API to talk to.
+Requires Node 24 LTS (`.nvmrc`) and an API to talk to. Node 24, per platform:
+
+| | Node 24 |
+| --- | --- |
+| macOS | `brew install node@24`, or nvm: `nvm install` (reads `.nvmrc`) |
+| Windows | `winget install CoreyButler.NVMforWindows`, then `nvm install 24` and `nvm use 24` (or the 24.x installer from https://nodejs.org) |
+| Linux (Ubuntu) | nvm (https://github.com/nvm-sh/nvm): `nvm install`; or NodeSource: `curl -fsSL https://deb.nodesource.com/setup_24.x \| sudo -E bash - && sudo apt install -y nodejs` |
+
+The commands are the same everywhere (on Windows in PowerShell, Git Bash or WSL 2):
 
 ```bash
 npm ci
@@ -57,9 +65,10 @@ The dev server proxies `/api` ([`proxy.conf.mjs`](proxy.conf.mjs)) to `API_URL`,
 
 Sign in with a consumer of that API: locally `viewer`/`viewer`, `clerk`/`clerk` or `manager`/`manager`.
 
-The whole system (gateway, web app, API, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes: clone the three
-repositories side by side and follow the deploy repository's README (`scripts/infra.sh up`, then
-`scripts/deploy.sh local`, which builds this folder's two images) → http://localhost:8080.
+The whole system (gateway, web app, API, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes (macOS, Windows) or
+a k3s on an Ubuntu server: clone the three repositories side by side and follow the deploy repository's README, "Where
+it runs" (`scripts/infra.sh up`, then `scripts/deploy.sh local`, which builds this folder's two images) →
+http://localhost:8080 (on the Ubuntu server also http://&lt;server-ip&gt;:8080).
 
 ## Scripts
 
@@ -82,14 +91,17 @@ running system; it is not a CI job. By default it targets the local cluster (htt
 ```bash
 npx playwright install chromium                            # once, if Chrome is not installed (then PLAYWRIGHT_CHANNEL=chromium)
 npm run e2e                                                # against http://localhost:8080 with the local demo accounts
+BASE_URL=http://<server-ip>:8080 npm run e2e               # against the deploy repository's k3s on an Ubuntu server
 kubectl -n infra port-forward svc/loki 3100:3100 &         # optional: the browser-errors test reads Loki (LOKI_URL)
 BASE_URL=https://staging.products.example.com \
 E2E_VIEWER_SECRET=… E2E_CLERK_SECRET=… E2E_MANAGER_SECRET=… npm run e2e     # against an environment
 ```
 
 Against an environment the consumers `viewer`, `clerk` and `manager` must be registered in its API, with their
-secrets in `E2E_<ROLE>_SECRET`, and paging needs more than three pages of products (staging seeds the sample
-catalogue). The tests clean up what they create; the browser-errors test is skipped without Loki.
+secrets in `E2E_<ROLE>_SECRET`. The paging test needs more than three pages of products (over 60; a fresh database
+has only the sample catalogue's 24, so add some first). The tests clean up what they create; the browser-errors test
+is skipped without Loki (on a k3s server, port-forward it from a laptop with a copy of the server's kubeconfig, as the
+deploy repository's README describes).
 
 ## Structure
 

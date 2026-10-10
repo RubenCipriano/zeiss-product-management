@@ -46,7 +46,7 @@ than read.
 | 7 | [Front end](guide/07-frontend.md) | Angular layers and rules, the product page's data flow, loading UX, accessibility, what Lighthouse and Playwright found. |
 | 8 | [Logs, dashboards and alerts](guide/08-observability.md) | Logs only, and why: what is collected (the browser's errors included) and how it reaches Grafana, where it is kept and for how long, the two dashboards, twelve alerts with runbooks, one request followed by its trace id. |
 | 9 | [Deployment and operations](guide/09-deployment-and-operations.md) | What runs where (the namespaces `product-management` and `infra`), the three repositories and the deploy scripts, one Kustomize folder per environment, configuration as env keys and the Secrets, migrations as `pm_migrator` in a one-off pod before the rollout, logs as an option, the GitLab pipelines (releases as commits to the deploy repository, rollback as `git revert`), day-2 commands. |
-| 10 | [Testing and quality](guide/10-testing-and-quality.md) | The test pyramid with counts (381 back end, 185 front end, 22 E2E), what each kind proves, the project agents. |
+| 10 | [Testing and quality](guide/10-testing-and-quality.md) | The test pyramid with counts (381 back end, 187 front end, 22 E2E), what each kind proves, the project agents. |
 | 11 | [Production readiness](guide/11-production-readiness.md) | An honest ✅ / ⚠️ / ❌ assessment and the work left for go-live. |
 | 12 | [From zero to production](guide/12-from-zero.md) | A runbook from an empty GitLab group and fresh machines: k3s nodes and their roles, firewall, TLS, backups, one GitLab project per part, the agent, environments, every CI/CD variable per project, first deployment, day 2, go-live checklist. |
 | 13 | [Reading the code](guide/13-reading-the-code.md) | Where to open the code for any question, one click followed file by file, and a plain-words glossary of the C#, Angular and nginx constructs used (`record`, `Result`, dependency injection, signals, interceptors, ETag…). |
@@ -68,7 +68,7 @@ kubectl -n infra port-forward svc/loki 3100:3100 &    # Loki, for the e2e test t
 
 python3 tools/check-requirements.py                   # the assessment PDF: 14 checks against the running system
 cd backend && dotnet test --solution ProductManagement.sln     # 381 tests (Docker running: real PostgreSQL + Redis)
-cd frontend && npm ci && npm run test:ci              # 185 tests
+cd frontend && npm ci && npm run test:ci              # 187 tests
 cd frontend && npm run e2e                            # 22 Playwright tests, desktop and phone
 cd frontend && npm run audit:lighthouse               # Lighthouse user flow (FORM_FACTOR=desktop for desktop)
 

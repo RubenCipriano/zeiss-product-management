@@ -3,6 +3,7 @@ import { filter, finalize, Observable, switchMap } from 'rxjs';
 import { ApiError } from '../../../core/http/api-error';
 import { Notifications } from '../../../core/notifications/notifications';
 import { AppDialog, ConfirmDialog, ConfirmDialogData } from '../../../shared/ui';
+import { newIdempotencyKey } from '../../../shared/util';
 import { Product, StockOperation } from '../data-access/product-models';
 import { ProductsStore } from '../data-access/products-store';
 import {
@@ -65,7 +66,7 @@ export class ProductActions {
   quickChange(product: Product, operation: StockOperation, quantity: number): void {
     this.setPending(product.id, true);
     this.store
-      .adjustStock(product, operation, quantity, crypto.randomUUID())
+      .adjustStock(product, operation, quantity, newIdempotencyKey())
       .pipe(finalize(() => this.setPending(product.id, false)))
       .subscribe({ error: (error: ApiError) => this.notifications.error(error.message) });
   }

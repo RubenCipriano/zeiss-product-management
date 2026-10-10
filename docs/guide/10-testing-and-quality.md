@@ -17,7 +17,7 @@ prove, one real example of each, how to run every one of them, and the project a
 | Integration | `Api.IntegrationTests` | 153 | the real API over HTTP, with **real PostgreSQL and Redis** in Docker (Testcontainers) |
 | Acceptance (BDD) | `Api.AcceptanceTests` | 16 | Gherkin scenarios (Reqnroll) against the same real stack |
 | **Back end total** | | **381** | `dotnet test` |
-| Unit / component | front end (Vitest) | **185** (34 spec files) | Angular components, services and the store, in a simulated DOM |
+| Unit / component | front end (Vitest) | **187** (35 spec files) | Angular components, services and the store, in a simulated DOM |
 | End-to-end | Playwright | **22** | the running system (gateway, API, Redis, PostgreSQL) in a real browser: 11 scenarios × desktop and phone; the browser-errors scenario also reads Loki and is skipped when no Loki is reachable (e.g. `LOGS=off`) |
 | Requirements | `tools/check-requirements.py` | 14 checks | the running system, through the gateway |
 | Audit | Lighthouse user flow | 5 steps × 2 form factors | the running system, signed in |
@@ -102,7 +102,7 @@ cd backend && dotnet test --solution ProductManagement.sln
 cd backend && dotnet test --project ProductManagement.UnitTests                 # one project: 212 unit tests, no Docker
 cd backend && dotnet test --project ProductManagement.UnitTests --filter-namespace "ProductManagement.UnitTests.Core*"   # one folder: 116
 
-# Front end: 185 tests, lint and format (ESLint and Prettier also cover e2e/)
+# Front end: 187 tests, lint and format (ESLint and Prettier also cover e2e/)
 cd frontend && npm ci && npm run lint && npm run format:check && npm run test:ci
 
 # Against the running system (deploy first: deploy/scripts/infra.sh up, deploy/scripts/deploy.sh local)
