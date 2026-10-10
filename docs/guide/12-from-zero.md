@@ -302,18 +302,15 @@ the API and the web app) are enforced. `--secrets-encryption` encrypts Secrets a
 snapshots off the nodes (`--etcd-s3` flags), although the cluster holds no data that Git and the pipeline cannot
 recreate.
 
-**Pulling from the GitLab registry.** The project's images are private. Give the nodes a read-only credential instead
-of adding `imagePullSecrets` to every manifest: create a **deploy token** with `read_registry` (project → Settings →
-Repository → Deploy tokens) and on every node:
-
-```yaml
-# /etc/rancher/k3s/registries.yaml   (then: sudo systemctl restart k3s)
-configs:
-  registry.gitlab.com:
-    auth:
-      username: <deploy token username>
-      password: <deploy token>
-```
+**Pulling from the GitLab registry.** The projects' images are private (`registry.gitlab.com/zeiss/backend/api`,
+`…/frontend/web`, `…/frontend/gateway`), so the cluster needs a read-only credential. In backend and in frontend,
+create a **deploy token named exactly `gitlab-deploy-token`** with the `read_registry` scope (project → Settings →
+Repository → Deploy tokens; or once in the group, which serves its immediate child projects). GitLab then passes it
+to every job as `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`, and each deploy job stores it in the namespace as a
+`docker-registry` Secret (`gitlab-registry-backend`, `gitlab-registry-frontend`: one per project, so two project
+tokens never overwrite each other), which the staging and production overlays reference in `imagePullSecrets`. The
+job's own `CI_JOB_TOKEN` would not do: it expires with the job, and a pod rescheduled later could no longer pull. No
+node configuration is needed; the local overlay pulls nothing (local images).
 
 **cert-manager and Let's Encrypt** (TLS for the public entry point):
 
@@ -362,9 +359,10 @@ cluster. Traffic that leaves the cluster (to PostgreSQL and Redis) crosses the p
 
 ## 7. GitLab
 
-**Tested here:** the scripts the pipelines call run locally, and each `.gitlab-ci.yml` is validated against GitLab's
-CI schema. **Procedure:** the GitLab configuration itself; the pipelines have not run on a GitLab instance as part of
-this assessment.
+**Tested here:** the scripts the pipelines call run locally and in clean containers of the jobs' images, and each
+`.gitlab-ci.yml` is validated against GitLab's CI schema; the pipelines run on gitlab.com (test, build and scan on the
+shared runners). **Procedure:** the rest of the GitLab configuration; the staging and production jobs have not run
+against real clusters.
 
 ### Group, projects and branch protection
 
@@ -386,9 +384,9 @@ this assessment.
 
 | Project | Jobs | Runner | Why |
 | --- | --- | --- | --- |
-| backend, frontend | test, build, scan, verify, deploy | gitlab.com shared Linux runners (or your own, **privileged** Docker executor) | `docker:dind` for Testcontainers and image builds; the deploy jobs reach the cluster through the agent, not the network |
-| backend | `migrate:*` | **self-hosted runner in the private network**, tag `product-management-private` | the only place that can reach `pm-db:5432`; the database is never exposed |
-| infra | `validate:*`, `cluster-logs:*` | shared runners | no network access needed; the collector is applied through the agent |
+| backend, frontend | test, build, scan, verify, deploy | gitlab.com shared Linux runners (no tags), or your own: **privileged** Docker executor, "Run untagged jobs", instance runners turned off for the project | `docker:dind` for Testcontainers and image builds; the deploy jobs reach the cluster through the agent, not the network |
+| backend | `migrate:*` | **self-hosted runner in the private network**, tag `product-management-private` (`PRIVATE_RUNNER_TAG` in `.gitlab-ci.yml`; override it as a CI/CD variable) | the only place that can reach `pm-db:5432`; the database is never exposed |
+| infra | `validate:*`, `cluster-logs:*` | shared runners | no network access needed; the collector is applied through the agent (or a kubeconfig) |
 | infra | `servers:*` | **a shell runner with Docker on each server**, tag `pm-<environment>-<component>` (`pm-staging-database`, `pm-production-redis`, `pm-production-logs`, …) | `./infra.sh up <component>` runs on the machine that hosts the component |
 
 Install the private runner for the backend (Docker executor, not privileged: it only runs the API image):
@@ -443,14 +441,21 @@ clusters' API servers are never exposed. One agent per cluster, shared by the th
 
    | Project | Applies |
    | --- | --- |
-   | backend | the namespace `product-management`; in it the Deployment, Service, HPA, PDB and NetworkPolicy `api*`, and the Secret `api-secrets` |
-   | frontend | the namespace `product-management`; in it the `web` and `gateway` Deployments, Services, HPA, PDBs, NetworkPolicy and the Ingress |
+   | backend | the namespace `product-management`; in it the Deployment, Service, HPA, PDB and NetworkPolicy `api*`, and the Secrets `api-secrets` and `gitlab-registry-backend` |
+   | frontend | the namespace `product-management`; in it the `web` and `gateway` Deployments, Services, HPA, PDBs, NetworkPolicy, the Ingress and the Secret `gitlab-registry-frontend` |
    | infra | the namespace `observability` and everything in it (Alloy, its ConfigMap, Service, NetworkPolicy, the Secret `loki-credentials`), plus the ClusterRole/ClusterRoleBinding `observability-alloy` (read-only access to pods and their logs) |
 
    The simplest correct start is `cluster-admin` bound to `gitlab:project_env:<project id>:production` for each of the
    three projects; tighten it to a Role per namespace (and the one ClusterRole for infra) afterwards.
 4. The jobs select the cluster with `KUBE_CONTEXT=<agent configuration project path>:<agent name>`, e.g.
    `zeiss/deploy:production`.
+
+Without the agent, a **kubeconfig** works too: a File-type variable `KUBECONFIG`, scoped to the environment, whose
+current context is the cluster. The deploy scripts (`deploy/ci/deploy-environment.sh` in backend and frontend,
+`ci/cluster-logs.sh` in infra) use `KUBE_CONTEXT` when it is set (GitLab also sets a `KUBECONFIG` with the agent's
+contexts in every job of a project the agent is shared with), else the kubeconfig's current context, else fail with
+"set KUBE_CONTEXT (GitLab agent) or a KUBECONFIG file variable". A kubeconfig means the runner reaches the cluster's
+API (port 6443): a self-hosted runner next to the cluster, not the shared runners (see "One machine of our own" below).
 
 ### Environments
 
@@ -477,6 +482,20 @@ branches (`main`); **Masked and hidden** = never shown in logs nor in the UI aft
 value to a temporary file and the variable holds its path. Environment scope `staging` / `production` = one value per
 environment, picked by the job's `environment:`.
 
+**Switches** (group or each project, scope **all**: the pipelines' `rules` decide with them which jobs exist, and rules
+cannot see environment-scoped variables). Until they are set, every pipeline stops after test, build and scan and is
+green; nothing tries to reach a cluster that does not exist yet.
+
+| Variable | Type | Protected | Masked | Scope | Value |
+| --- | --- | :---: | :---: | --- | --- |
+| `STAGING_ENABLED` | Variable | | | all | `true`: pipelines on `main` deploy staging (backend: migrate, deploy, verify; frontend: deploy, E2E; infra: its manual staging jobs) |
+| `PRODUCTION_ENABLED` | Variable | | | all | `true`: the manual production jobs appear (backend and frontend also need `STAGING_ENABLED`: production deploys what staging verified) |
+| `PRIVATE_RUNNER_TAG` | Variable | | | all | only to change the self-hosted runner's tag (default `product-management-private`) |
+
+**Deploy token** (not a variable): `gitlab-deploy-token`, scope `read_registry`, in backend and frontend (or once in the
+group). GitLab exposes it as `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`; the deploy jobs fail with a clear message without
+it (section 5, "Pulling from the GitLab registry").
+
 **Group level** (shared by infra and backend, which must use the same values: infra sets them on the servers, the
 backend gives them to the migration and the API):
 
@@ -486,6 +505,7 @@ backend gives them to the migration and the API):
 | `PM_APP_PASSWORD` | Variable | ✔ | ✔ (hidden) | staging, production | `openssl rand -hex 32`: `pm_app`, the API's database user |
 | `REDIS_PASSWORD` | Variable | ✔ | ✔ (hidden) | staging, production | `openssl rand -hex 32`: the Redis password |
 | `KUBE_CONTEXT` | Variable | ✔ | | staging, production | `zeiss/deploy:<agent>`; the same agent for the three projects (or set it in each project) |
+| `KUBECONFIG` | **File** | ✔ | | staging, production | instead of `KUBE_CONTEXT`: a kubeconfig whose current context is the cluster (self-hosted runner next to it) |
 
 Environment-scoped group variables need GitLab Premium; on the Free tier, set the three passwords in both the infra
 and the backend project, with the same values.
@@ -554,11 +574,35 @@ generated by `backend/deploy/local-secrets.sh`.
 | Project | Stages | Deploys |
 | --- | --- | --- |
 | infra | validate (Compose files, `logs/k8s` with kubeconform, `alloy fmt`) | manual only: `servers:<env>` (matrix `database`, `redis`, `logs` on the servers' shell runners) and `cluster-logs:<env>` (the collector, through the agent) |
-| backend | test (`test:backend`: format, build, 381 tests on dind; `test:manifests`; SAST, secret detection) → build (`build:api`, `migrations:sql`) → scan (`scan:api`) | `migrate:staging` (private runner, sample data on an empty database) → `deploy:staging` (Secret `api-secrets`, then `deploy/deploy.sh`) → `verify:requirements` → `migrate:production` (**manual**) → `deploy:production` |
-| frontend | test (`test:frontend`: lint, format, 185 tests, build; `test:manifests`; SAST, secret detection) → build (`build:web`, `build:gateway`) → scan (`scan:web`, `scan:gateway`) | `deploy:staging` → `verify:e2e` (Playwright, desktop and phone, against `STAGING_URL`) → `deploy:production` (**manual**) |
+| backend | test (`test:backend`: format, build, 381 tests on dind; `test:manifests`; SAST, secret detection) → build (`build:api`, `migrations:sql`) → scan (`scan:api`) | `migrate:staging` (private runner, sample data on an empty database) → `deploy:staging` (Secrets `gitlab-registry-backend` and `api-secrets`, then `deploy/deploy.sh`) → `verify:requirements` → `migrate:production` (**manual**) → `deploy:production` |
+| frontend | test (`test:frontend`: lint, format, 185 tests, build; `test:manifests`; SAST, secret detection) → build (`build:web`, `build:gateway`) → scan (`scan:web`, `scan:gateway`) | `deploy:staging` (Secret `gitlab-registry-frontend`, then `deploy/deploy.sh`) → `verify:e2e` (Playwright, desktop and phone, against `STAGING_URL`) → `deploy:production` (**manual**) |
 
-Merge request pipelines test, build and scan; pipelines on `main` also deploy. Details per job:
+Merge request pipelines test, build and scan; pipelines on `main` also deploy, once `STAGING_ENABLED` /
+`PRODUCTION_ENABLED` are `true`. Details per job:
 [chapter 9](09-deployment-and-operations.md#cicd-pipelines).
+
+### One machine of our own
+
+The short path to a running staging without cloud servers or the agent (**procedure**): k3s, the servers and a GitLab
+Runner on one Linux machine, the jobs reaching the cluster with a kubeconfig.
+
+1. **k3s**, one server: `curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="v1.34.1+k3s1" sh -s - --write-kubeconfig-mode 600`.
+2. **Servers:** from the infra folder, `POSTGRES_PASSWORD=… PM_MIGRATOR_PASSWORD=… PM_APP_PASSWORD=… REDIS_PASSWORD=… ./infra.sh up`
+   (or register a shell runner for the infra project with the tags `pm-staging-database`, `pm-staging-redis`,
+   `pm-staging-logs` and run `servers:staging`). In `backend/deploy/k8s/overlays/staging/api.yaml` point the
+   connection strings at the machine's address (the pods reach it on its LAN IP).
+3. **Runner:** install GitLab Runner and Docker (section 7, "Runners"), register it for the group (or for backend
+   and frontend) with the Docker executor, `--docker-privileged` (docker:dind), the tag `product-management-private`
+   and "Run untagged jobs" on; turn off instance runners in backend and frontend, so every job, deploys included, runs
+   here.
+4. **Cluster access:** in backend, frontend and infra a File variable `KUBECONFIG`, scope `staging`, with the content
+   of `/etc/rancher/k3s/k3s.yaml` where `server: https://127.0.0.1:6443` is replaced by the machine's LAN address
+   (inside a job's container, 127.0.0.1 is the container). No agent, and the cluster's API is not exposed beyond
+   the machine's network.
+5. **The rest of section 7:** the deploy tokens, the staging variables (`DB_SERVER` / `REDIS_SERVER` = the machine's
+   address, the passwords, the signing key, the consumers), the staging Ingress host and `STAGING_URL` (a name that
+   resolves to the machine; cert-manager as in section 5 for a certificate the verify jobs accept), then
+   `STAGING_ENABLED=true`. The next pipeline on `main` migrates, deploys and verifies staging.
 
 The k6 smoke test is not in the GitLab pipelines: its scripts sign in with the local demo secrets, so it would need
 those consumers in staging. Run it by hand after a local deployment (`backend/load-tests/run.sh smoke`).
@@ -566,24 +610,25 @@ those consumers in staging. Run it by hand after a local deployment (`backend/lo
 ## 8. The first deployment, in order
 
 1. **Network and DNS:** private network, the private DNS names, the firewall rules (section 1).
-2. **GitLab:** the group and the three projects, protections, registry rules, the runners (private runner for the
-   backend, shell runners on the servers for infra), the agents and their RBAC, protected environments, resource
-   groups, every variable of section 7.
+2. **GitLab:** the group and the three projects, protections, registry rules, the deploy tokens
+   (`gitlab-deploy-token`), the runners (private runner for the backend, shell runners on the servers for infra), the
+   agents and their RBAC, protected environments, resource groups, every variable of section 7 (the switches
+   `STAGING_ENABLED` / `PRODUCTION_ENABLED` last, once the cluster and the servers are up).
 3. **Database server:** PostgreSQL (infra job `servers:<env>` with `database`, or the packages of section 2), TLS,
    `pg_hba.conf`, `roles.sql`, pgBackRest with a first full backup.
 4. **Cache server:** Redis with its password, and TLS (`servers:<env>` with `redis`, or section 3).
 5. **Monitoring server:** Loki and Grafana (`servers:<env>` with `logs`); the server agents on `pm-db` and `pm-cache`
    (section 4); check that their logs appear.
-6. **Cluster:** k3s, `registries.yaml` (a deploy token that can read the backend's and the frontend's registries),
-   cert-manager and the `letsencrypt` ClusterIssuer, public DNS records; then the infra job `cluster-logs:<env>`.
+6. **Cluster:** k3s, cert-manager and the `letsencrypt` ClusterIssuer, public DNS records; then the infra job `cluster-logs:<env>`.
 7. **Repositories:** replace the `example.*` names in `backend/deploy/k8s/overlays/{staging,production}/api.yaml`
    (connection strings) and `frontend/deploy/k8s/overlays/{staging,production}/ingress.yaml` (Ingress hosts), and set
    `STAGING_URL` / `PRODUCTION_URL`; open a merge request in each. Their pipelines test, build and scan; read
    `migrations.sql` in the backend's MR.
-8. **Merge the backend.** The pipeline on `main` migrates and deploys staging, then verifies it.
+8. **Switch staging on** (`STAGING_ENABLED=true`) and **merge the backend.** The pipeline on `main` migrates and
+   deploys staging, then verifies it.
 9. **Merge the frontend.** Its pipeline deploys the web app and the gateway to staging and runs Playwright against
    it. Watch the first certificate being issued: `kubectl -n product-management get certificate,ingress`.
-10. **Production:** in the backend's pipeline start `migrate:production`; approve the deployment if approvals are
+10. **Production:** set `PRODUCTION_ENABLED=true`; in the backend's pipeline start `migrate:production`; approve the deployment if approvals are
     required; `deploy:production` rolls out the API. Then the frontend's `deploy:production`.
 11. **Check by hand:** sign in on `https://products.example.com`, look at the API and gateway logs in Grafana, run
     `BASE_URL=https://products.example.com CHECK_CLIENT_ID=... CHECK_CLIENT_SECRET=... python3 backend/scripts/check-requirements.py`
@@ -681,13 +726,13 @@ log; the servers' logs under `{namespace="servers"}` ([chapter 8](08-observabili
 | ☐ | Backups: WAL archiving healthy, a full backup exists, a restore drill done and timed, alert on missing backups |
 | ☐ | Redis: password, TLS, `maxmemory` sized, dangerous commands renamed (in `redis.conf`) |
 | ☐ | Monitoring: Loki retention, Grafana behind SSO, alerts routed to on-call, server agents shipping, the cluster's collector deployed |
-| ☐ | Cluster: 3 k3s servers, Secrets encrypted at rest, `registries.yaml` with a read-only deploy token, metrics-server running (`kubectl top nodes`) |
+| ☐ | Cluster: 3 k3s servers, Secrets encrypted at rest, metrics-server running (`kubectl top nodes`) |
 | ☐ | TLS: certificate issued for the public names, HTTP redirects to HTTPS, HSTS |
 | ☐ | Internal CA trusted by the API, `SSL Mode=VerifyFull` in the overlays and `DB_SSL_MODE=VerifyFull` (open item, section 6) |
-| ☐ | GitLab: three projects, `main` protected, MR approvals, immutable image tags, cleanup policy, protected private runner, protected shell runners on the servers |
+| ☐ | GitLab: three projects, `main` protected, MR approvals, immutable image tags, cleanup policy, deploy token `gitlab-deploy-token` (`read_registry`) in backend and frontend, protected private runner, protected shell runners on the servers |
 | ☐ | Agent: one per cluster, RBAC limited to what each project's deploy script applies |
 | ☐ | Environments: `production` protected with required approval; resource groups `oldest_first` |
-| ☐ | Variables: all of section 7, protected and masked as listed, the shared passwords identical in infra and backend, a new signing key per environment, no local demo values |
+| ☐ | Variables: all of section 7, protected and masked as listed, `STAGING_ENABLED` / `PRODUCTION_ENABLED` set, the shared passwords identical in infra and backend, a new signing key per environment, no local demo values |
 | ☐ | `example.*` names replaced in the backend's and the frontend's overlays and in `STAGING_URL` / `PRODUCTION_URL` |
 | ☐ | A full pipeline run on `main` green through staging in backend and frontend; one production deployment and one rollback rehearsed |
 | ☐ | The HPAs' limits re-measured on the real nodes ([chapter 6](06-scaling-and-capacity.md)) |
@@ -701,7 +746,9 @@ log; the servers' logs under `{namespace="servers"}` ([chapter 8](08-observabili
   [`backend/deploy/ci/deploy-environment.sh`](../../backend/deploy/ci/deploy-environment.sh),
   [`backend/deploy/ci/validate-manifests.sh`](../../backend/deploy/ci/validate-manifests.sh),
   [`backend/deploy/deploy.sh`](../../backend/deploy/deploy.sh), [`frontend/deploy/deploy.sh`](../../frontend/deploy/deploy.sh),
-  [`frontend/deploy/ci/validate-manifests.sh`](../../frontend/deploy/ci/validate-manifests.sh)
+  [`frontend/deploy/ci/deploy-environment.sh`](../../frontend/deploy/ci/deploy-environment.sh),
+  [`frontend/deploy/ci/validate-manifests.sh`](../../frontend/deploy/ci/validate-manifests.sh),
+  [`infra/ci/cluster-logs.sh`](../../infra/ci/cluster-logs.sh)
 * Overlays: [`backend/deploy/k8s/overlays/staging`](../../backend/deploy/k8s/overlays/staging),
   [`backend/deploy/k8s/overlays/production`](../../backend/deploy/k8s/overlays/production),
   [`frontend/deploy/k8s/overlays/staging`](../../frontend/deploy/k8s/overlays/staging),
@@ -715,7 +762,8 @@ log; the servers' logs under `{namespace="servers"}` ([chapter 8](08-observabili
 What can be checked without real servers (**tested here**):
 
 ```bash
-# Every overlay renders and is valid; the settings each overlay must set; no Secret in staging/production
+# Every overlay renders and is valid; the settings each overlay must set; no Secret in staging/production; staging
+# and production pull with the registry Secret
 docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 backend/deploy/ci/validate-manifests.sh
 docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 frontend/deploy/ci/validate-manifests.sh
 
@@ -733,7 +781,7 @@ docker compose -f infra/database.yaml config --quiet && docker compose -f infra/
 kubectl kustomize infra/logs/k8s | less
 
 # The SQL the migrations run (the pipeline's review artifact)
-cd backend && dotnet tool restore && dotnet ef migrations script --idempotent \
+cd backend && dotnet tool restore && dotnet restore ProductManagement.sln && dotnet ef migrations script --idempotent \
   --project ProductManagement.Infrastructure --startup-project ProductManagement.Api --output ../migrations.sql
 
 # Each pipeline's structure (resolves GitLab's templates), from inside each part

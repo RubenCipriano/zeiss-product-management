@@ -128,8 +128,13 @@ down() {
 }
 
 status() {
-  docker ps --all --filter label=com.product-management.role=server \
-    --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+  # Without docker (the pipeline's cluster-logs job) there are no server containers to show.
+  if command -v docker >/dev/null; then
+    docker ps --all --filter label=com.product-management.role=server \
+      --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+  else
+    echo "No docker here: the servers' containers are not shown."
+  fi
   if kubectl config current-context >/dev/null 2>&1; then
     echo
     kubectl -n observability get deployment alloy 2>/dev/null || echo "The cluster's log collector is not deployed."

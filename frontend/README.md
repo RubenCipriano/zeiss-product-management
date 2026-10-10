@@ -147,14 +147,19 @@ docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 deploy/ci/validat
 
 [`.gitlab-ci.yml`](.gitlab-ci.yml): test (`test:frontend`: lint, format, unit tests, build; `test:manifests`) →
 build (`build:web`, `build:gateway`) → scan (`scan:web`, `scan:gateway`, Trivy) → staging (`deploy:staging`:
-`kubectl config use-context "$KUBE_CONTEXT"` and `deploy/deploy.sh`) → verify (`verify:e2e`, Playwright against
-`STAGING_URL`) → production (`deploy:production`, manual).
+[`deploy/ci/deploy-environment.sh`](deploy/ci/deploy-environment.sh), which selects the cluster, stores the pull
+Secret and runs `deploy/deploy.sh`) → verify (`verify:e2e`, Playwright against `STAGING_URL`) → production
+(`deploy:production`, manual). The staging jobs exist once the project or group variable `STAGING_ENABLED` is `true`,
+production once `PRODUCTION_ENABLED` is `true` as well; until then the pipeline stops, green, after scan. The deploy
+jobs need a deploy token named `gitlab-deploy-token` (scope `read_registry`): they store it as the Secret
+`gitlab-registry-frontend` the pods pull the images with.
 
 CI/CD variables, scoped to the `staging` and `production` environments:
 
 | Variable | What |
 | --- | --- |
 | `KUBE_CONTEXT` | `<agent configuration project path>:<agent name>` (the GitLab agent for Kubernetes) |
+| `KUBECONFIG` | File, instead of `KUBE_CONTEXT`: a kubeconfig whose current context is the cluster (a self-hosted runner next to it) |
 | `E2E_VIEWER_SECRET`, `E2E_CLERK_SECRET`, `E2E_MANAGER_SECRET` | staging only, masked: the secrets of the consumers `viewer`, `clerk` and `manager` registered in staging's API (the backend's `API_CONSUMERS`) |
 
 `STAGING_URL` and `PRODUCTION_URL` default to the example hosts in `.gitlab-ci.yml`; override them in the project.

@@ -684,8 +684,9 @@ Decision: [ADR 0021](adr/0021-deployment-layout.md).
 ### CI/CD pipelines (GitLab)
 
 One pipeline per repository. The backend and the frontend take a commit to staging automatically and to production
-after a manual, protected step; the infra only validates automatically, and every deployment of a server is a manual
-job. They have not run on a GitLab instance.
+after a manual, protected step, once each environment is switched on (`STAGING_ENABLED`, `PRODUCTION_ENABLED`); the
+infra only validates automatically, and every deployment of a server is a manual job. They run on gitlab.com; the
+staging and production jobs have not yet run against real clusters.
 
 ```mermaid
 flowchart TB

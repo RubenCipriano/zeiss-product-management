@@ -268,18 +268,22 @@ exits, and only then is the new API rolled out. In the backend's GitLab pipeline
 One GitLab pipeline per repository (backend, frontend, deploy), the only CI/CD: it tests every merge request and
 delivers to staging and production. Every step it runs is a script in that repository that also runs on a laptop. The
 deploy jobs reach the clusters through the GitLab agent for Kubernetes (`KUBE_CONTEXT`), so no cluster API is exposed
-to the runners.
+to the runners, or with a kubeconfig (a File variable `KUBECONFIG`) from a self-hosted runner next to the cluster.
+The staging and production jobs exist only once the environment is switched on (project or group variables
+`STAGING_ENABLED` / `PRODUCTION_ENABLED` = `true`); until then a pipeline on `main` stops, green, after scan. The deploy
+jobs store the project's deploy token (`gitlab-deploy-token`, `read_registry`) as the Secret the pods pull the private
+images with (`imagePullSecrets` in the staging and production overlays).
 
 *Backend* ([`backend/.gitlab-ci.yml`](../../backend/.gitlab-ci.yml)):
 
 | Stage | Jobs | Runs on |
 | --- | --- | --- |
 | test | `test:backend` (`dotnet format --verify-no-changes`, Release build with warnings as errors, every test suite, the integration and acceptance tests with PostgreSQL and Redis from Testcontainers on Docker-in-Docker, JUnit), `test:manifests` (`deploy/ci/validate-manifests.sh` in the `alpine/k8s` image: render, `kubeconform -strict` against the Kubernetes 1.34 schemas, the settings each overlay must set, no Secret where there must be none), GitLab SAST and secret detection | merge requests, `main`, tags |
-| build | `build:api` → `$CI_REGISTRY_IMAGE/api:<short sha>`; `migrations:sql` (the idempotent SQL of every migration, for review in the merge request) | merge requests, `main`, tags |
+| build | `build:api` → `$CI_REGISTRY_IMAGE/api:<short sha>`; `migrations:sql` (`dotnet restore`, then the idempotent SQL of every migration, for review in the merge request) | merge requests, `main`, tags |
 | scan | `scan:api`: Trivy, fails on fixable critical vulnerabilities | merge requests, `main`, tags |
-| staging | `migrate:staging` (API image, `pm_migrator`, private runner) → `deploy:staging` (`deploy/ci/deploy-environment.sh`: the Secret `api-secrets` from CI/CD variables, then `deploy/deploy.sh` with the pipeline's image and `MIGRATIONS=skip`; restarts the API when the Secret changed) | `main`, automatic |
-| verify | `verify:requirements` (`python3 scripts/check-requirements.py` against `STAGING_URL`) | `main` |
-| production | `migrate:production` (**manual**, protected environment) → `deploy:production` | `main` |
+| staging | `migrate:staging` (API image, `pm_migrator`, private runner) → `deploy:staging` (`deploy/ci/deploy-environment.sh`: selects the cluster, the Secrets `gitlab-registry-backend` from the deploy token and `api-secrets` from CI/CD variables, then `deploy/deploy.sh` with the pipeline's image and `MIGRATIONS=skip`; restarts the API when `api-secrets` changed) | `main` with `STAGING_ENABLED`, automatic |
+| verify | `verify:requirements` (`python3 scripts/check-requirements.py` against `STAGING_URL`) | `main` with `STAGING_ENABLED` |
+| production | `migrate:production` (**manual**, protected environment) → `deploy:production` | `main` with `STAGING_ENABLED` and `PRODUCTION_ENABLED` |
 
 *Frontend* ([`frontend/.gitlab-ci.yml`](../../frontend/.gitlab-ci.yml)):
 
@@ -288,19 +292,22 @@ to the runners.
 | test | `test:frontend` (`npm run lint`, `format:check`, `test:ci`, `build`), `test:manifests` (the same checks on the web and gateway overlays), SAST and secret detection | merge requests, `main`, tags |
 | build | `build:web`, `build:gateway` → `$CI_REGISTRY_IMAGE/{web,gateway}:<short sha>` | merge requests, `main`, tags |
 | scan | `scan:web`, `scan:gateway` (Trivy) | merge requests, `main`, tags |
-| staging | `deploy:staging` (`kubectl config use-context "$KUBE_CONTEXT"` → `deploy/deploy.sh` with the pipeline's images) | `main`, automatic |
-| verify | `verify:e2e` (Playwright, desktop and phone, against `STAGING_URL`) | `main` |
-| production | `deploy:production` (**manual**, protected environment) | `main` |
+| staging | `deploy:staging` (`deploy/ci/deploy-environment.sh`: selects the cluster, the Secret `gitlab-registry-frontend` from the deploy token, then `deploy/deploy.sh` with the pipeline's images) | `main` with `STAGING_ENABLED`, automatic |
+| verify | `verify:e2e` (Playwright, desktop and phone, against `STAGING_URL`) | `main` with `STAGING_ENABLED` |
+| production | `deploy:production` (**manual**, protected environment) | `main` with `STAGING_ENABLED` and `PRODUCTION_ENABLED` |
 
 *Infra* ([`infra/.gitlab-ci.yml`](../../infra/.gitlab-ci.yml)): `validate` on every change (the three Compose files,
 the log collector's manifests with `kubeconform`, `alloy fmt` on both Alloy configurations); then manual deploy jobs
-on the default branch: `servers:staging` / `servers:production`, a matrix over `COMPONENT` (`database`, `redis`,
+on the default branch, per environment once it is switched on: `servers:staging` / `servers:production`, a matrix over `COMPONENT` (`database`, `redis`,
 `logs`) that runs `./infra.sh up <component>` on a shell runner on that server (tag `pm-<environment>-<component>`),
-and `cluster-logs:staging` / `cluster-logs:production`, which apply the cluster's collector through the agent with
-`LOKI_URL=$CLUSTER_LOKI_URL`.
+and `cluster-logs:staging` / `cluster-logs:production` (`ci/cluster-logs.sh`), which apply the cluster's collector
+through the agent or a kubeconfig with `LOKI_URL=$CLUSTER_LOKI_URL`.
 
-The pipelines have **not run on a GitLab instance** as part of this assessment. Setting them up (runners, the agent,
-environments, every variable per project) is [chapter 12](12-from-zero.md).
+Runners: every job without tags runs on gitlab.com's shared runners; `migrate:*` needs the self-hosted runner in the
+private network (`PRIVATE_RUNNER_TAG`, default `product-management-private`), and infra's `servers:*` a shell runner
+on each server. The pipelines run on gitlab.com; the staging and production jobs have not yet run against real
+clusters. Setting them up (runners, the agent or a kubeconfig, environments, every variable per project, or one
+machine of our own) is [chapter 12](12-from-zero.md).
 
 ## Day-2 operations
 

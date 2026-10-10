@@ -106,19 +106,21 @@ the API's and the gateway's autoscalers; built into k3s and most managed cluster
 
 * **validate** (every change): `docker compose config` on the three Compose files, the collector's manifests rendered
   and checked with `kubeconform`, both Alloy configurations formatted as `alloy fmt` writes them.
-* **deploy** (manual, on the default branch, per environment):
+* **deploy** (manual, on the default branch, per environment once the project or group variable `STAGING_ENABLED` /
+  `PRODUCTION_ENABLED` is `true`):
   * `servers:staging`, `servers:production`: a matrix over `COMPONENT` = `database`, `redis`, `logs`; each runs
     `./infra.sh up <component>` on a shell runner with Docker on that server, tagged `pm-<environment>-<component>`
     (e.g. `pm-staging-database`);
-  * `cluster-logs:staging`, `cluster-logs:production`: the cluster's log collector, through the GitLab agent for
-    Kubernetes (the job has `kubectl` and no Docker, so `infra.sh up logs` applies only the collector), with
-    `LOKI_URL=$CLUSTER_LOKI_URL`.
+  * `cluster-logs:staging`, `cluster-logs:production`: [`ci/cluster-logs.sh`](ci/cluster-logs.sh) selects the cluster
+    (GitLab agent or kubeconfig) and runs `infra.sh up logs`; the job has `kubectl` and no Docker, so only the
+    collector is applied, with `LOKI_URL=$CLUSTER_LOKI_URL`.
 
 CI/CD variables, scoped to the `staging` and `production` environments:
 
 | Variable | What |
 | --- | --- |
 | `KUBE_CONTEXT` | `<agent configuration project path>:<agent name>` (the cluster's log collector) |
+| `KUBECONFIG` | File, instead of `KUBE_CONTEXT`: a kubeconfig whose current context is the cluster |
 | `CLUSTER_LOKI_URL` | the Loki the cluster's collector pushes to, e.g. `http://pm-monitoring.example.internal:3100/loki/api/v1/push` |
 | `LOKI_USERNAME`, `LOKI_PASSWORD` | only for a hosted Loki (masked) |
 | `POSTGRES_PASSWORD` | masked, protected: the database administrator |

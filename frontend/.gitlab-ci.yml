@@ -9,15 +9,31 @@
 #   manifests
 #
 # Merge request pipelines run test, build and scan. Pipelines on the default branch also deploy to staging
-# (automatically), verify it in a real browser, and offer production as a manual, protected step. Tag pipelines build
-# and scan. The API has its own repository and pipeline (backend); the gateway reaches it in the same cluster.
+# (automatically), verify it in a real browser, and offer production as a manual, protected step, each only once that
+# environment is switched on (STAGING_ENABLED, PRODUCTION_ENABLED below); until then they stop after scan. Tag
+# pipelines build and scan. The API has its own repository and pipeline (backend); the gateway reaches it in the same
+# cluster.
 #
-# Setup (runners, the GitLab agent for Kubernetes, environments, CI/CD variables): docs/guide/12-from-zero.md.
+# Setup (runners, the cluster's access, environments, CI/CD variables): docs/guide/12-from-zero.md.
+#
+# Project- or group-level CI/CD variables (not scoped to an environment: rules cannot see environment-scoped ones):
+#   STAGING_ENABLED             "true" creates the staging jobs (deploy, verify) on the default branch
+#   PRODUCTION_ENABLED          "true" creates the production job (manual); needs STAGING_ENABLED too, production
+#                               deploys only what staging verified
+# A project deploy token named exactly `gitlab-deploy-token` with the read_registry scope (Settings → Repository →
+# Deploy tokens): GitLab passes it to the jobs as CI_DEPLOY_USER / CI_DEPLOY_PASSWORD, and the deploy jobs store it
+# in the cluster as the Secret the pods pull the images with (deploy/ci/deploy-environment.sh).
 #
 # Environment-scoped CI/CD variables (Settings → CI/CD → Variables, one value per environment scope):
-#   KUBE_CONTEXT                <agent configuration project path>:<agent name>
+#   KUBE_CONTEXT                <agent configuration project path>:<agent name> (the GitLab agent for Kubernetes), or
+#   KUBECONFIG                  File: a kubeconfig whose current context is the cluster (e.g. a self-hosted runner
+#                               next to a k3s server); one of the two
 #   staging only (verify):      E2E_VIEWER_SECRET, E2E_CLERK_SECRET, E2E_MANAGER_SECRET (masked): the secrets of the
 #                               consumers viewer, clerk and manager registered in staging's API (backend: API_CONSUMERS)
+#
+# Runners: no job has tags, so they all run on gitlab.com's shared runners. To run them on your own runner instead
+# (the backend's PRIVATE_RUNNER_TAG runner, product-management-private), register it (Docker executor, privileged for
+# docker:dind) with "Run untagged jobs" and turn off instance runners for the project.
 
 workflow:
   name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
@@ -71,9 +87,12 @@ default:
       prefix: npm
     paths: [.npm]
 
-.default-branch:
+# The environments' jobs exist only on the default branch and once the environment is switched on: without a cluster
+# they would fail, and a red pipeline on main would hide the result of test, build and scan. Production also needs
+# staging: it deploys only what staging verified.
+.staging:
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
 
 # ─── test ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -185,14 +204,15 @@ scan:gateway:
 
 # ─── deployment, shared by staging and production ───────────────────────────────────────────────────────────────────
 
-# Rolls out the web app and the gateway with this pipeline's images (deploy/deploy.sh). The cluster is reached through
-# the GitLab agent for Kubernetes (KUBE_CONTEXT), so the cluster's API is never exposed to the runners.
+# Selects the cluster (KUBE_CONTEXT or KUBECONFIG), creates the image pull Secret (the deploy token) and rolls out the
+# web app and the gateway with this pipeline's images (deploy/ci/deploy-environment.sh → deploy/deploy.sh). With the
+# GitLab agent for Kubernetes (KUBE_CONTEXT) the cluster's API is never exposed to the runners; a KUBECONFIG suits a
+# self-hosted runner next to the cluster.
 .deploy:
   image: $KUBE_TOOLS_IMAGE
   interruptible: false
   script:
-    - kubectl config use-context "$KUBE_CONTEXT"
-    - deploy/deploy.sh
+    - deploy/ci/deploy-environment.sh
   artifacts:
     when: always
     paths: [deploy/k8s/.build/]
@@ -201,7 +221,7 @@ scan:gateway:
 # ─── staging ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 deploy:staging:
-  extends: [.deploy, .default-branch]
+  extends: [.deploy, .staging]
   stage: staging
   needs: [build:web, build:gateway, scan:web, scan:gateway, test:frontend, test:manifests]
   environment:
@@ -218,7 +238,7 @@ deploy:staging:
 # consumers viewer, clerk and manager registered in staging's API, with their secrets in E2E_<ROLE>_SECRET, and the
 # sample catalogue (paging needs more than 3 pages). The browser-errors test is skipped: it reads a local Loki.
 verify:e2e:
-  extends: [.npm-cache, .default-branch]
+  extends: [.npm-cache, .staging]
   stage: verify
   image: $PLAYWRIGHT_IMAGE
   needs: [deploy:staging]
@@ -246,7 +266,7 @@ deploy:production:
   stage: production
   needs: [build:web, build:gateway, scan:web, scan:gateway, verify:e2e]
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true" && $PRODUCTION_ENABLED == "true"
       when: manual
   allow_failure: false
   environment:

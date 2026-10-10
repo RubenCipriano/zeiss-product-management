@@ -10,7 +10,9 @@
 #   2. every object is valid against the Kubernetes API schemas (kubeconform -strict: unknown fields are errors);
 #   3. every overlay tells the gateway where the API is (API_UPSTREAM, JWKS_URL) and sets COLLECTOR_UPSTREAM
 #      (which may be "": no log collector);
-#   4. no Secret anywhere: the web app and the gateway need none.
+#   4. no Secret anywhere: the web app and the gateway need none (the registry credential is created by the pipeline,
+#      deploy/ci/deploy-environment.sh);
+#   5. staging and production pull both images with the Secret gitlab-registry-frontend (the registry is private).
 set -euo pipefail
 
 KUBERNETES_VERSION="${KUBERNETES_VERSION:-1.34.0}"
@@ -44,6 +46,16 @@ for target in base overlays/*; do
   if [[ -n "$secrets" ]]; then
     echo "    Secrets in $target (the web app and the gateway need none): $secrets" >&2
     failed=1
+  fi
+
+  if [[ "$target" == overlays/* && "$target" != overlays/local ]]; then
+    for deployment in web gateway; do
+      pull="$(yq ea "select(.kind == \"Deployment\" and .metadata.name == \"$deployment\") | .spec.template.spec.imagePullSecrets[].name" "$rendered")"
+      if [[ "$pull" != gitlab-registry-frontend ]]; then
+        echo "    $deployment does not pull with imagePullSecrets gitlab-registry-frontend (deploy/k8s/$target/registry.yaml)" >&2
+        failed=1
+      fi
+    done
   fi
 done
 

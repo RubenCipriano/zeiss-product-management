@@ -298,7 +298,11 @@ in `infra/logs/grafana/` can be imported into that Grafana.
 ### Staging and production (GitLab)
 
 Each part is its own GitLab project with its own pipeline (`backend/.gitlab-ci.yml`, `frontend/.gitlab-ci.yml`,
-`infra/.gitlab-ci.yml`). Their CI/CD variables, scoped to the `staging` and `production` environments:
+`infra/.gitlab-ci.yml`). Test, build and scan run on gitlab.com's shared runners; the staging and production jobs
+appear once the project or group variables `STAGING_ENABLED` / `PRODUCTION_ENABLED` are `true`. Backend and frontend
+need a deploy token named `gitlab-deploy-token` (`read_registry`), which their deploy jobs store in the cluster to pull
+the private images. CI/CD variables, scoped to the `staging` and `production` environments (`KUBECONFIG`, a File
+variable, can replace `KUBE_CONTEXT`):
 
 | Project | Variables |
 | --- | --- |

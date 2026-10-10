@@ -4,17 +4,29 @@
 #
 #   validate ──────────────────────────────► deploy (manual)
 #   compose files, logs/k8s manifests,       servers: ./infra.sh up <component> on a runner on that server
-#   Alloy configuration format               cluster: the log collector, through the GitLab agent for Kubernetes
+#   Alloy configuration format               cluster: the log collector (GitLab agent for Kubernetes or kubeconfig)
 #
-# Setup: docs/guide/12-from-zero.md. Environment-scoped CI/CD variables (Settings → CI/CD → Variables):
-#   KUBE_CONTEXT              <agent configuration project path>:<agent name> (the cluster's log collector)
+# Setup: docs/guide/12-from-zero.md.
+#
+# Project- or group-level CI/CD variables (not scoped to an environment: rules cannot see environment-scoped ones):
+#   STAGING_ENABLED, PRODUCTION_ENABLED   "true" creates that environment's deploy jobs (manual) on the default
+#                             branch; without them the pipeline only validates
+#
+# Environment-scoped CI/CD variables (Settings → CI/CD → Variables):
+#   KUBE_CONTEXT              <agent configuration project path>:<agent name> (the GitLab agent for Kubernetes), or
+#   KUBECONFIG                File: a kubeconfig whose current context is the cluster; one of the two (the
+#                             cluster's log collector)
 #   CLUSTER_LOKI_URL          the Loki the cluster's collector pushes to, e.g.
 #                             http://pm-monitoring.example.internal:3100/loki/api/v1/push, or Grafana Cloud's push URL
 #   LOKI_USERNAME, LOKI_PASSWORD   only for a hosted Loki (masked)
 #   POSTGRES_PASSWORD, PM_MIGRATOR_PASSWORD, PM_APP_PASSWORD, REDIS_PASSWORD   masked, protected; the last three are
 #                             the same values the backend repository's pipeline uses (group-level variables)
-# Runners: one shell runner with Docker on each server, tagged pm-<environment>-<component>
-# (e.g. pm-staging-database), registered to this project only.
+# Runners: validate and cluster-logs run on gitlab.com's shared runners (no tags). The servers jobs run on a shell
+# runner with Docker on each server, tagged pm-<environment>-<component> (e.g. pm-staging-database), registered to
+# this project only: they start containers on that machine, from this checkout. These are not the backend's
+# PRIVATE_RUNNER_TAG runner (product-management-private, Docker executor); on a single machine that hosts every
+# server, one shell runner carries all of that environment's tags (pm-staging-database, pm-staging-redis,
+# pm-staging-logs).
 
 workflow:
   name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
@@ -34,6 +46,17 @@ variables:
 
 default:
   interruptible: true
+
+# The deploy jobs exist only on the default branch and once the environment is switched on; they are always manual.
+.staging:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
+      when: manual
+
+.production:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $PRODUCTION_ENABLED == "true"
+      when: manual
 
 # ─── validate ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -71,9 +94,6 @@ validate:alloy:
   stage: deploy
   tags: [pm-$ENVIRONMENT-$COMPONENT]
   interruptible: false
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      when: manual
   allow_failure: true
   parallel:
     matrix:
@@ -82,7 +102,7 @@ validate:alloy:
     - ./infra.sh up "$COMPONENT"
 
 servers:staging:
-  extends: .deploy-server
+  extends: [.deploy-server, .staging]
   environment:
     name: staging
     action: prepare
@@ -90,37 +110,34 @@ servers:staging:
     ENVIRONMENT: staging
 
 servers:production:
-  extends: .deploy-server
+  extends: [.deploy-server, .production]
   environment:
     name: production
     action: prepare
   variables:
     ENVIRONMENT: production
 
-# The log collector inside the cluster (logs/k8s), pointed at the environment's Loki. The job's image has kubectl and
-# no Docker, so `infra.sh up logs` applies only the collector.
+# The log collector inside the cluster (logs/k8s), pointed at the environment's Loki: ci/cluster-logs.sh selects the
+# cluster (KUBE_CONTEXT or KUBECONFIG) and runs `infra.sh up logs`, which, without Docker in the job's image, applies
+# only the collector.
 .deploy-cluster-logs:
   stage: deploy
   image: $KUBE_TOOLS_IMAGE
   interruptible: false
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      when: manual
   allow_failure: true
   variables:
     LOKI_URL: $CLUSTER_LOKI_URL
   script:
-    - kubectl config use-context "$KUBE_CONTEXT"
-    - ./infra.sh up logs
+    - ci/cluster-logs.sh
 
 cluster-logs:staging:
-  extends: .deploy-cluster-logs
+  extends: [.deploy-cluster-logs, .staging]
   environment:
     name: staging
     action: prepare
 
 cluster-logs:production:
-  extends: .deploy-cluster-logs
+  extends: [.deploy-cluster-logs, .production]
   environment:
     name: production
     action: prepare

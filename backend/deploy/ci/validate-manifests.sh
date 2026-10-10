@@ -9,7 +9,9 @@
 #   2. every object is valid against the Kubernetes API schemas (kubeconform -strict: unknown fields are errors);
 #   3. every overlay sets both connection strings (the base leaves them to the environments);
 #   4. staging and production contain no Secret: the pipeline creates it from CI/CD variables
-#      (deploy/ci/create-secrets.sh), the repository never holds its values.
+#      (deploy/ci/create-secrets.sh), the repository never holds its values;
+#   5. staging and production pull the image with the Secret gitlab-registry-backend (the registry is private; the
+#      pipeline creates it from the deploy token, deploy/ci/deploy-environment.sh).
 #
 # The local overlay reads its secrets from generated/ (deploy/local-secrets.sh), which a fresh clone or a CI runner
 # does not have: the manifests are rendered from a copy, with placeholders for missing files (their content does not
@@ -56,6 +58,14 @@ for target in base overlays/*; do
     secrets="$(yq ea '[select(.kind == "Secret") | .metadata.name] | .[]' "$rendered")"
     if [[ -n "$secrets" ]]; then
       echo "    Secrets in $target (the pipeline creates them; never commit their values): $secrets" >&2
+      failed=1
+    fi
+  fi
+
+  if [[ "$target" == overlays/* && "$target" != overlays/local ]]; then
+    pull="$(yq ea 'select(.kind == "Deployment" and .metadata.name == "api") | .spec.template.spec.imagePullSecrets[].name' "$rendered")"
+    if [[ "$pull" != gitlab-registry-backend ]]; then
+      echo "    the api Deployment does not pull with imagePullSecrets gitlab-registry-backend (deploy/k8s/$target/api.yaml)" >&2
       failed=1
     fi
   fi

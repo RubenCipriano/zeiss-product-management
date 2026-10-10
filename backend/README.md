@@ -185,13 +185,17 @@ Results: [load-test-results.md](../docs/load-test-results.md).
 `test:manifests`) → build (`build:api`; `migrations:sql`, the idempotent SQL for review) → scan (`scan:api`, Trivy)
 → staging (`migrate:staging` on the private runner, then `deploy:staging` through
 [`deploy/ci/deploy-environment.sh`](deploy/ci/deploy-environment.sh)) → verify (`verify:requirements` against
-`STAGING_URL`) → production (`migrate:production`, manual, then `deploy:production`).
+`STAGING_URL`) → production (`migrate:production`, manual, then `deploy:production`). The staging jobs exist once the
+project or group variable `STAGING_ENABLED` is `true`, the production ones once `PRODUCTION_ENABLED` is `true` as well;
+until then the pipeline stops, green, after scan. The deploy jobs need a deploy token named `gitlab-deploy-token`
+(scope `read_registry`): they store it as the Secret `gitlab-registry-backend` the pods pull the image with.
 
 CI/CD variables, scoped to the `staging` and `production` environments:
 
 | Variable | Type | What |
 | --- | --- | --- |
 | `KUBE_CONTEXT` | Variable | `<agent configuration project path>:<agent name>` (the GitLab agent for Kubernetes) |
+| `KUBECONFIG` | File | instead of `KUBE_CONTEXT`: a kubeconfig whose current context is the cluster (a self-hosted runner next to it) |
 | `DB_SERVER`, `REDIS_SERVER` | Variable | the servers' private DNS names, for the migrate jobs |
 | `PM_MIGRATOR_PASSWORD` | masked, protected | the schema owner, used only by the migrate jobs |
 | `PM_APP_PASSWORD` | masked, protected | the API's database user → `api-secrets` |
@@ -201,7 +205,7 @@ CI/CD variables, scoped to the `staging` and `production` environments:
 | `CHECK_CLIENT_ID`, `CHECK_CLIENT_SECRET` | staging only | a manager consumer for `verify:requirements` |
 
 The three passwords are the same values the infra repository's pipeline sets on the servers: define them once as
-group-level variables. The migrate jobs need a runner tagged `product-management-private` inside the private network
-(the only place that can reach the database). Rotating a secret: change the variable and re-run the deploy job;
+group-level variables. The migrate jobs need a runner tagged `product-management-private` (`PRIVATE_RUNNER_TAG`)
+inside the private network (the only place that can reach the database); every other job runs on the shared runners. Rotating a secret: change the variable and re-run the deploy job;
 `create-secrets.sh` reports the Secret as changed and the job restarts the API. Full setup:
 [chapter 12](../docs/guide/12-from-zero.md).

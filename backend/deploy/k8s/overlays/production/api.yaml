@@ -7,6 +7,10 @@ metadata:
 spec:
   template:
     spec:
+      # The image is in the project's private registry: the pipeline creates this Secret from the deploy token
+      # (deploy/ci/deploy-environment.sh).
+      imagePullSecrets:
+        - name: gitlab-registry-backend
       containers:
         - name: api
           env:

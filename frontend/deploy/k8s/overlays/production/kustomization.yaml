@@ -9,3 +9,4 @@ resources:
   - ingress.yaml
 patches:
   - path: gateway.yaml
+  - path: registry.yaml
