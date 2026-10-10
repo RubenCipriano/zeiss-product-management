@@ -66,8 +66,8 @@ deploy/scripts/deploy.sh local    # secrets (first run), the database (first run
                                   # → http://localhost:8080   (deploy.sh local all: both steps)
 ```
 
-`deploy.sh local` runs `create-database.sh` itself the first time; in staging and production that is a separate,
-deliberate step (below).
+Every first `deploy.sh` to a cluster (local, staging or production) runs `create-database.sh` itself when the Secret
+`database-credentials` is missing: the database and its users exist before the migrations, which create the tables.
 
 **What connects the parts.** Only addresses and Secrets, written in the environment's files:
 
@@ -353,7 +353,7 @@ Keeping the data and rebuilding only the application is just the last two comman
 took 103 s.
 
 **A new environment, the first time:** cluster (k3s, nodes joined with `add-node.sh`), the GitLab variables and the
-group deploy token, `infra:<environment>` then `create-database.sh`, `STAGING_ENABLED` / `PRODUCTION_ENABLED` and the
+group deploy token, `infra:<environment>` (the first deploy creates the database), `STAGING_ENABLED` / `PRODUCTION_ENABLED` and the
 `update:staging` schedule, then a first version tag in backend and in frontend; the deploy pipeline refuses the
 `unreleased` placeholders until every image has a version. The
 step-by-step list is in the deploy repository's README ("Clean deploy") and, with every variable, in

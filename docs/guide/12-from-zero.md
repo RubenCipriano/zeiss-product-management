@@ -140,17 +140,14 @@ requests 20 GiB, but `local-path` does not enforce sizes: the node's disk is the
 data and the dumps, and watch its free space (the alert rule on PostgreSQL's errors includes "No space left on
 device").
 
-**Databases, users and rights.** Once per service and environment, with the environment's cluster as the context:
-
-```bash
-deploy/scripts/create-database.sh product-management product_management pm_app pm_migrator
-```
-
-It creates the database and the users `pm_migrator` (owns the schema, runs the migrations) and `pm_app` (the API: a
-30 s statement timeout, no schema rights) with random passwords, and puts them in the Secret
-`product-management/database-credentials`; no password is ever in GitLab. The schema is created by the backend's first
-pipeline run, and `pm_app`'s rights on the tables by its migration `GrantAppPermissions`
-([chapter 9](09-deployment-and-operations.md#deployscriptscreate-databasesh)).
+**Databases, users and rights.** Nothing to run: the first `deploy:<environment>` (or `deploy/scripts/deploy.sh
+<environment>`) finds no Secret `product-management/database-credentials` and runs
+`deploy/scripts/create-database.sh product-management product_management pm_app pm_migrator` itself. That creates the
+database and the users `pm_migrator` (owns the schema, runs the migrations) and `pm_app` (the API: a 30 s statement
+timeout, no schema rights) with random passwords, kept only in that Secret; no password is ever in GitLab. The
+migrations then create the tables, and `pm_app`'s rights on them come from the migration `GrantAppPermissions`
+([chapter 9](09-deployment-and-operations.md#deployscriptscreate-databasesh)). Run the script by hand only for another
+service's database, after restoring a dump, or with `--rotate`.
 
 **Who may connect.** Anyone with a valid password who reaches the Service, which has no address outside the cluster.
 To also limit which namespaces may open connections, add a NetworkPolicy in `infra` (k3s enforces them); there is none
