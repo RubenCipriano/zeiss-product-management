@@ -1,8 +1,11 @@
-# Staging environment: the API, the web app and the gateway, with the images of the latest release.
+# Staging environment: the API, the web app and the gateway, at the newest released versions.
 #
 # Applied by this repository's pipeline (deploy:staging, scripts/deploy.sh staging) whenever main changes this folder
-# or apps/. The backend and frontend pipelines release by changing a newTag below and pushing to main: one commit per
-# release, so `git log environments/staging` is the deployment history and `git revert` is the rollback.
+# or apps/ (it migrates the database with the API version below first). The versions below are pulled in by this
+# repository: the scheduled job update:staging (scripts/update-versions.sh staging) sets each newTag to the newest
+# X.Y.Z in the registry and commits "staging: api 1.4.0, ..." to main. One commit per change of versions, so
+# `git log environments/staging` is the deployment history; a rollback is scripts/set-version.sh staging <image>
+# <older version> (or a `git revert`), with the schedule paused so it is not undone.
 #
 # No Secret is here: scripts/deploy.sh creates the registry credential (gitlab-registry) and api-secrets from CI/CD
 # variables and copies redis-credentials from the shared Redis; database-credentials is made once by
@@ -21,8 +24,9 @@ patches:
   - path: api.yaml
   - path: gateway.yaml
   - path: registry.yaml
-# The deployed images: updated by the app pipelines (ci/release.sh in backend and frontend), never by hand except to
-# roll back. "unreleased": no release yet; scripts/deploy.sh refuses to apply until every image has a tag.
+# The deployed versions (SemVer X.Y.Z, published by a vX.Y.Z tag in backend or frontend): changed with
+# scripts/set-version.sh, by update:staging or by a person. "unreleased": no version chosen yet; scripts/deploy.sh and
+# scripts/migrate.sh refuse to apply until every image has one.
 images:
   - name: product-management/api
     newName: registry.gitlab.com/zeiss/backend/api

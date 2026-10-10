@@ -17,16 +17,17 @@
 #      a containerd of its own, so they are copied into it (docker save | sudo k3s ctr images import);
 #   3. creates the service's database if it does not exist yet (scripts/create-database.sh);
 #   4. copies the shared Redis' password into the namespace (Secret redis-credentials);
-#   5. applies the database migrations with the new API image, in a one-off pod inside the cluster;
+#   5. applies the database migrations with the new API image (scripts/migrate.sh local);
 #   6. applies environments/local and waits for the rollouts.
 #
 # staging, production (this repository's pipeline, or a laptop whose kubectl reaches that cluster):
-#   1. refuses an environment whose kustomization.yaml still has an image that was never released;
+#   1. refuses an environment whose kustomization.yaml still names no version for an image (newTag: unreleased);
 #   2. creates the registry credential (Secret gitlab-registry) and the API's own Secret (api-secrets) from the CI/CD
 #      variables below, when they are set (otherwise the existing Secrets are kept);
 #   3. copies the shared Redis' password into the namespace (Secret redis-credentials);
-#   4. applies environments/<environment> exactly as committed and waits for the rollouts.
-#   The migrations are not run here: the backend pipeline applies them before it releases an API image.
+#   4. applies the database migrations with the API image the environment names (scripts/migrate.sh <environment>);
+#   5. applies environments/<environment> exactly as committed and waits for the rollouts.
+#   Which versions run is chosen in environments/<environment>/kustomization.yaml (scripts/set-version.sh).
 #
 # Variables:
 #   KUBE_CONTEXT                          the kubectl context to use (the GitLab agent: <project path>:<agent name>);
@@ -35,7 +36,8 @@
 #   LOCAL_CLUSTER=docker-desktop|k3s      local: how the images reach the cluster, when the detection gets it wrong
 #                                         (default: docker-desktop for that context, k3s for a k3s node on this machine)
 #   LOGS=off                              local: no log collector, the gateway answers /collect with 204
-#   SEED_SAMPLE_DATA                      local: sample catalogue on an empty database (default: true)
+#   SEED_SAMPLE_DATA                      sample catalogue on an empty database (default: true for local and staging,
+#                                         false for production; scripts/migrate.sh)
 #   CI_DEPLOY_USER, CI_DEPLOY_PASSWORD    staging/production: a deploy token with read_registry on both registries
 #                                         (GitLab passes the group deploy token named gitlab-deploy-token by itself)
 #   CI_REGISTRY                           the registry of that token (default: registry.gitlab.com)
@@ -182,51 +184,6 @@ wait_for_rollouts() {
   done
 }
 
-# Applies the database migrations with the API image itself (`dotnet ProductManagement.Api.dll migrate`), as the
-# schema owner, before the rollout. The database is only reachable inside the cluster, so this runs there as a
-# one-off pod: `kubectl run --rm --attach` streams its output, returns its exit code and leaves nothing behind. The
-# credentials come from database-credentials and redis-credentials; no password is on a command line.
-# (Local only: for staging and production the backend pipeline runs the same pod, its ci/migrate.sh.)
-run_migrations() {
-  local image="$1" name
-  name="migrate-$(echo "${image##*:}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9\n' '-' | cut -c1-40)"
-  name="${name%-}"
-  echo "==> Applying the database migrations with $image (pod $name)"
-  kubectl -n "$NAMESPACE" delete pod "$name" --ignore-not-found >/dev/null
-  kubectl -n "$NAMESPACE" run "$name" --rm --attach --restart=Never --quiet --image="$image" \
-    --labels=app.kubernetes.io/name=migrate,app.kubernetes.io/part-of=product-management \
-    --overrides="$(cat <<EOF
-{
-  "apiVersion": "v1",
-  "spec": {
-    "automountServiceAccountToken": false,
-    "securityContext": {"runAsNonRoot": true, "runAsUser": 1654, "seccompProfile": {"type": "RuntimeDefault"}},
-    "containers": [{
-      "name": "$name",
-      "image": "$image",
-      "args": ["migrate"],
-      "env": [
-        {"name": "ASPNETCORE_ENVIRONMENT", "value": "Production"},
-        {"name": "Database__SeedSampleData", "value": "${SEED_SAMPLE_DATA:-true}"},
-        {"name": "DB_HOST", "valueFrom": {"secretKeyRef": {"name": "database-credentials", "key": "host"}}},
-        {"name": "DB_PORT", "valueFrom": {"secretKeyRef": {"name": "database-credentials", "key": "port"}}},
-        {"name": "DB_NAME", "valueFrom": {"secretKeyRef": {"name": "database-credentials", "key": "database"}}},
-        {"name": "DB_USER", "valueFrom": {"secretKeyRef": {"name": "database-credentials", "key": "migrator-user"}}},
-        {"name": "PGPASSWORD", "valueFrom": {"secretKeyRef": {"name": "database-credentials", "key": "migrator-password"}}},
-        {"name": "ConnectionStrings__ProductManagement",
-         "value": "Host=\$(DB_HOST);Port=\$(DB_PORT);Database=\$(DB_NAME);Username=\$(DB_USER);GSS Encryption Mode=Disable"},
-        {"name": "ConnectionStrings__Redis", "value": "redis.infra.svc.cluster.local:6379"},
-        {"name": "Redis__Password", "valueFrom": {"secretKeyRef": {"name": "redis-credentials", "key": "password"}}}
-      ],
-      "resources": {"requests": {"cpu": "100m", "memory": "192Mi"}, "limits": {"cpu": "1", "memory": "512Mi"}},
-      "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}}
-    }]
-  }
-}
-EOF
-)"
-}
-
 # ─── local: build, migrate, apply ─────────────────────────────────────────────────────────────────────────────────
 
 deploy_local_apps() {
@@ -295,7 +252,7 @@ EOF
     "$HERE/create-database.sh" "$NAMESPACE" product_management pm_app pm_migrator
   fi
   copy_redis_password
-  run_migrations "product-management/api:$api_tag"
+  "$HERE/migrate.sh" local
 
   echo "==> Applying environments/local"
   kubectl apply -k "$ENV_DIR"
@@ -309,9 +266,10 @@ deploy_remote_apps() {
   trap 'rm -f "$rendered"' EXIT
   kubectl kustomize "$ENV_DIR" > "$rendered"
   if grep -q ':unreleased$' "$rendered"; then
-    echo "environments/$ENVIRONMENT has images that were never released (newTag: unreleased):" >&2
+    echo "environments/$ENVIRONMENT names no version yet for some images (newTag: unreleased):" >&2
     grep ':unreleased$' "$rendered" | sort -u >&2
-    echo "Run the backend and frontend pipelines on main first (their release jobs set the tags)." >&2
+    echo "Choose released versions first: scripts/set-version.sh $ENVIRONMENT all latest (commit it), or for staging" >&2
+    echo "the update:staging job, once backend and frontend have released a version (a vX.Y.Z tag)." >&2
     exit 1
   fi
 
@@ -348,6 +306,9 @@ deploy_remote_apps() {
   fi
 
   copy_redis_password
+
+  # The schema first, with exactly the API image about to be rolled out; a failed migration stops here.
+  "$HERE/migrate.sh" "$ENVIRONMENT"
 
   echo "==> Applying environments/$ENVIRONMENT"
   kubectl apply -f "$rendered"

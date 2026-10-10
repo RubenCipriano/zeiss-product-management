@@ -7,8 +7,8 @@ metadata:
 spec:
   template:
     spec:
-      # The image is in the backend project's private registry: scripts/deploy.sh (and the backend pipeline's migrate
-      # job) create this Secret from the group deploy token.
+      # The image is in the backend project's private registry: scripts/deploy.sh creates this Secret from the group
+      # deploy token (scripts/migrate.sh pulls the same image with it).
       imagePullSecrets:
         - name: gitlab-registry
       containers:

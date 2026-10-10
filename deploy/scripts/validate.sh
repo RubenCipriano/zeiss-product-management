@@ -19,6 +19,12 @@
 #      every dashboard is valid JSON;
 #   7. every object is labelled app.kubernetes.io/part-of=infra and, but the Namespace, app.kubernetes.io/component
 #      postgres, redis or logs (scripts/infra.sh down selects by it); no Secret (infra.sh makes them in the cluster).
+# argocd/ (prepared for Argo CD, not used by the pipeline yet):
+#   8. staging and production still render and are valid with the migration hook component (argocd/hooks) added, and
+#      the hook Job runs the same API image as the environment's Deployment;
+#   9. the Applications and the ImageUpdater are valid against the custom resource definitions of the Argo CD and
+#      Argo CD Image Updater versions the README installs (downloaded from their release tags, -strict), and each
+#      Application points at an environment folder that exists.
 #
 # The local environment reads files from environments/local/generated/ (made by scripts/deploy.sh local), which a
 # fresh clone or a CI runner does not have: it is rendered from a copy, with placeholders for missing files (their
@@ -27,6 +33,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KUBERNETES_VERSION="${KUBERNETES_VERSION:-1.34.0}"
+# The versions of README.md, "Moving to Argo CD".
+ARGOCD_VERSION="${ARGOCD_VERSION:-v3.5.4}"
+IMAGE_UPDATER_VERSION="${IMAGE_UPDATER_VERSION:-v1.3.1}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 rendered="$work/rendered.yaml"
@@ -42,7 +51,7 @@ query() {
   yq ea "[$1] | .[]" "$rendered"
 }
 
-cp -R "$ROOT/apps" "$ROOT/environments" "$work/"
+cp -R "$ROOT/apps" "$ROOT/environments" "$ROOT/argocd" "$work/"
 generated="$work/environments/local/generated"
 mkdir -p "$generated/build"
 [[ -f "$generated/signing-key.pem" ]] || echo placeholder > "$generated/signing-key.pem"
@@ -121,8 +130,47 @@ unlabelled="$(query 'select(.kind != "Namespace" and .metadata.name != "grafana-
 secrets="$(query 'select(.kind == "Secret") | .metadata.name')"
 [[ -z "$secrets" ]] || fail "Secrets in infra/ (infra.sh creates them in the cluster): $secrets"
 
+echo "==> argocd/hooks (the migration as a PreSync hook, in staging and production)"
+for environment in staging production; do
+  yq -i '.components += ["../../argocd/hooks"]' "$work/environments/$environment/kustomization.yaml"
+  if ! kubectl kustomize "$work/environments/$environment" > "$rendered"; then
+    fail "environments/$environment does not render with argocd/hooks"
+    continue
+  fi
+  kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" - < "$rendered" || failed=1
+  hook="$(query 'select(.kind == "Job" and .metadata.annotations["argocd.argoproj.io/hook"] == "PreSync") | .spec.template.spec.containers[0].image')"
+  api="$(query 'select(.kind == "Deployment" and .metadata.name == "api") | .spec.template.spec.containers[] | select(.name == "api") | .image')"
+  [[ -n "$hook" && "$hook" == "$api" ]] \
+    || fail "environments/$environment: the PreSync Job's image ($hook) is not the API's ($api)"
+done
+
+echo "==> argocd/applications (Argo CD $ARGOCD_VERSION, Image Updater $IMAGE_UPDATER_VERSION)"
+# A JSON schema per custom resource, from its CRD; -strict needs "additionalProperties: false" where the CRD lists
+# the properties (what kubeconform's own schemas have).
+crd_schema() {
+  local url="$1" file="$2"
+  curl -fsSL "$url" \
+    | yq -o json '.spec.versions[] | select(.name == "v1alpha1") | .schema.openAPIV3Schema' \
+    | jq 'walk(if type == "object" and has("properties") and (has("additionalProperties") | not)
+              then .additionalProperties = false else . end)' > "$file"
+}
+mkdir -p "$work/schemas"
+if crd_schema "https://raw.githubusercontent.com/argoproj/argo-cd/$ARGOCD_VERSION/manifests/crds/application-crd.yaml" \
+      "$work/schemas/application_v1alpha1.json" \
+  && crd_schema "https://raw.githubusercontent.com/argoproj-labs/argocd-image-updater/$IMAGE_UPDATER_VERSION/config/crd/bases/argocd-image-updater.argoproj.io_imageupdaters.yaml" \
+      "$work/schemas/imageupdater_v1alpha1.json"; then
+  kubectl kustomize "$ROOT/argocd/applications" > "$rendered"
+  kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" -schema-location default \
+    -schema-location "$work/schemas/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" - < "$rendered" || failed=1
+  while read -r path; do
+    [[ -f "$ROOT/$path/kustomization.yaml" ]] || fail "an Application points at $path, which is not an environment"
+  done < <(query 'select(.kind == "Application") | .spec.source.path')
+else
+  fail "could not download the Argo CD / Image Updater CRDs (network?)"
+fi
+
 if [[ "$failed" != 0 ]]; then
   echo "Validation FAILED" >&2
   exit 1
 fi
-echo "Every environment and the infrastructure render and are valid."
+echo "Every environment, the infrastructure and the Argo CD objects render and are valid."

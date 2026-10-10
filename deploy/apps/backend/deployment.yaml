@@ -51,7 +51,7 @@ spec:
               app.kubernetes.io/name: api
       containers:
         - name: api
-          # Pinned to the exact image of the release by each environment's kustomization.yaml (Kustomize `images`).
+          # Pinned to the exact version by each environment's kustomization.yaml (Kustomize `images`).
           image: product-management/api
           imagePullPolicy: IfNotPresent
           ports:

@@ -1,25 +1,39 @@
-# CI/CD pipeline of the deploy repository for GitLab: the only place that changes the clusters. What runs in an
-# environment is what this repository holds (GitOps): environments/<environment> for the application, infra/ for the
-# shared infrastructure. The backend and frontend pipelines never apply anything; they release by committing an image
-# tag to environments/staging (and by opening a merge request for environments/production).
+# CI/CD pipeline of the deploy repository for GitLab: the only place that changes the clusters, and the place that
+# decides which versions run. What runs in an environment is what this repository holds (GitOps): environments/<env>
+# for the application (the `images:` versions in its kustomization.yaml), infra/ for the shared infrastructure.
 #
-#   validate (every MR and commit) ──► staging (main, automatic) ───────► production (main, manual)
-#   manifests (scripts/validate.sh),     deploy:staging: scripts/deploy.sh    deploy:production: scripts/deploy.sh
-#   scripts (shellcheck),                staging apps                         production apps
-#   Alloy configuration                  smoke:staging: scripts/smoke.sh      smoke:production
-#                                        infra:staging (manual)               infra:production (manual)
+# Pull model: the backend and frontend pipelines only build and publish images (a git tag vX.Y.Z publishes
+# <image>:X.Y.Z); they never touch this repository. This repository pulls versions in:
+#   staging      update:staging (a pipeline schedule, e.g. every 15 minutes) sets every image to its newest released
+#                version (scripts/update-versions.sh staging → scripts/set-version.sh staging all latest) and, if
+#                anything changed, commits "staging: api 1.4.0, web 1.4.0, gateway 1.4.0" to main. That commit's
+#                pipeline deploys staging.
+#   production   a merge request that changes environments/production (a person runs scripts/set-version.sh, or starts
+#                propose:production, which proposes the versions staging runs). Merging it is the release decision.
+#
+#   validate (every MR and commit) ──► staging (main) ─────────────────────► production (main, manual)
+#   manifests (scripts/validate.sh),     deploy:staging: migrate + apply        deploy:production: migrate + apply
+#   scripts (shellcheck),                smoke:staging                          smoke:production
+#   Alloy configuration                  infra:staging (manual)                 infra:production (manual)
+#                                        update:staging (schedule, or manual)   propose:production (manual)
 #
 # deploy:staging runs on the default branch when a commit changes environments/staging, apps/, infra/ or the deploy
-# script; deploy:production when it changes environments/production (a merged release merge request) or apps/, and
-# waits for a person to start it. Rollback: `git revert` the release commit (or merge) on main; the pipeline applies
-# the previous tags. infra/ is applied only by the manual infra jobs: it holds the data of every service.
+# scripts; deploy:production when it changes environments/production (a merged merge request) or apps/, and waits for
+# a person to start it. Both first apply the database migrations with the API image the environment names
+# (scripts/migrate.sh), then the manifests. Rollback: scripts/set-version.sh <env> <image> <older version> (or
+# `git revert` the version commit) and commit; the pipeline applies it. infra/ is applied only by the manual infra
+# jobs: it holds the data of every service. A scheduled pipeline runs only update:staging.
 #
 # Project- or group-level CI/CD variables (not scoped to an environment: rules cannot see environment-scoped ones):
 #   STAGING_ENABLED, PRODUCTION_ENABLED   "true" creates that environment's jobs on the default branch; without them
 #                                         the pipeline only validates
+#   DEPLOY_PUSH_TOKEN                     masked, protected: a project access token of THIS repository, role
+#                                         Maintainer, scope write_repository; update:staging and propose:production
+#                                         push with it (a CI job token cannot push)
 # A group deploy token named exactly `gitlab-deploy-token` with the scope read_registry on the zeiss group (group →
 # Settings → Repository → Deploy tokens): it reads both registries (backend and frontend), and GitLab passes it to the
-# jobs as CI_DEPLOY_USER / CI_DEPLOY_PASSWORD; scripts/deploy.sh stores it as the Secret gitlab-registry.
+# jobs as CI_DEPLOY_USER / CI_DEPLOY_PASSWORD; scripts/versions.sh lists the published versions with it and
+# scripts/deploy.sh stores it as the Secret gitlab-registry.
 #
 # Environment-scoped CI/CD variables (staging, production):
 #   KUBE_CONTEXT                    <agent configuration project path>:<agent name> (the GitLab agent), or
@@ -30,11 +44,12 @@
 #   LOKI_URL, LOKI_USERNAME, LOKI_PASSWORD optional, infra jobs: another Loki (scripts/infra.sh)
 # STAGING_URL and PRODUCTION_URL (below) are the environments' public hosts (environments/*/ingress.yaml).
 #
-# Argo CD instead of these jobs: one Argo CD Application per environment, pointing at environments/<environment> of
-# this repository (automated sync for staging, manual for production; README.md). Then the deploy and smoke jobs below
-# are removed and this pipeline keeps only validate; Argo CD applies main and shows the drift. The Secrets that
-# scripts/deploy.sh creates from CI/CD variables move to a secrets operator (e.g. External Secrets) or stay a one-off
-# step per environment.
+# The schedule: Build → Pipeline schedules → New schedule, target branch main, interval e.g. "*/15 * * * *".
+#
+# Argo CD instead of these jobs (prepared in argocd/, README.md "Moving to Argo CD"): Argo CD applies main (automated
+# for staging, manual sync for production), the migration runs as its PreSync hook (argocd/hooks), and Argo CD Image
+# Updater replaces update:staging. Then the deploy, smoke and update jobs below are switched off and this pipeline
+# keeps validate (and propose:production).
 
 workflow:
   name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
@@ -62,6 +77,13 @@ variables:
 default:
   interruptible: true
 
+# A scheduled pipeline (the schedule of update:staging) runs only update:staging: in a pipeline that no push started,
+# `changes:` is always true, so without this rule every schedule would also deploy.
+.not-scheduled:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+
 # ─── validate (every merge request and commit) ──────────────────────────────────────────────────────────────────────
 
 # Every environment and infra/ render and are valid (scripts/validate.sh); hands the inline Alloy configuration to
@@ -69,6 +91,9 @@ default:
 validate:manifests:
   stage: validate
   image: $KUBE_TOOLS_IMAGE
+  rules:
+    - !reference [.not-scheduled, rules]
+    - when: on_success
   script:
     - scripts/validate.sh
     - yq 'select(.kind == "ConfigMap" and .metadata.name == "alloy-config") | .data["config.alloy"]' infra/logs.yaml
@@ -82,6 +107,9 @@ validate:manifests:
 validate:scripts:
   stage: validate
   image: $SHELLCHECK_IMAGE
+  rules:
+    - !reference [.not-scheduled, rules]
+    - when: on_success
   script:
     - shellcheck scripts/*.sh
 
@@ -89,6 +117,9 @@ validate:scripts:
 validate:alloy:
   stage: validate
   needs: [validate:manifests]
+  rules:
+    - !reference [.not-scheduled, rules]
+    - when: on_success
   image:
     name: $ALLOY_IMAGE
     entrypoint: [""]
@@ -100,7 +131,8 @@ validate:alloy:
 
 # Applies environments/$ENVIRONMENT exactly as committed (scripts/deploy.sh <environment> apps): selects the cluster
 # (KUBE_CONTEXT or KUBECONFIG), creates the Secrets gitlab-registry and api-secrets from the CI/CD variables, copies
-# the shared Redis' password, applies, waits for the rollouts. The migrations already ran in the backend pipeline.
+# the shared Redis' password, applies the database migrations with the environment's API image (scripts/migrate.sh, a
+# one-off pod; a failed migration fails the job before anything is applied), applies, waits for the rollouts.
 .deploy:
   image: $KUBE_TOOLS_IMAGE
   interruptible: false
@@ -130,8 +162,9 @@ deploy:staging:
   extends: .deploy
   stage: staging
   rules:
+    - !reference [.not-scheduled, rules]
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
-      changes: [environments/staging/**/*, apps/**/*, infra/**/*, scripts/deploy.sh]
+      changes: [environments/staging/**/*, apps/**/*, infra/**/*, scripts/deploy.sh, scripts/migrate.sh]
   environment:
     name: staging
     url: $STAGING_URL
@@ -145,18 +178,38 @@ smoke:staging:
   stage: staging
   needs: [deploy:staging]
   rules:
+    - !reference [.not-scheduled, rules]
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
-      changes: [environments/staging/**/*, apps/**/*, infra/**/*, scripts/deploy.sh]
+      changes: [environments/staging/**/*, apps/**/*, infra/**/*, scripts/deploy.sh, scripts/migrate.sh]
   environment:
     name: staging
     action: verify
   variables:
     URL: $STAGING_URL
 
+# Pulls the newest released versions into staging: scripts/update-versions.sh staging sets every image to its newest
+# X.Y.Z in the registry (scripts/set-version.sh staging all latest; pre-releases and older versions are never picked)
+# and, if anything changed, commits "staging: api 1.4.0, ..." to main with DEPLOY_PUSH_TOKEN. That commit's pipeline
+# runs deploy:staging. Runs on the pipeline schedule (Build → Pipeline schedules, on main, e.g. every 15 minutes), and
+# can be started by hand in any pipeline on main. To hold staging on an older version, deactivate the schedule first.
+update:staging:
+  stage: staging
+  image: $KUBE_TOOLS_IMAGE
+  needs: []
+  interruptible: false
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
+      when: manual
+      allow_failure: true
+  script:
+    - scripts/update-versions.sh staging
+
 infra:staging:
   extends: .infra
   stage: staging
   rules:
+    - !reference [.not-scheduled, rules]
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
       when: manual
       allow_failure: true
@@ -169,14 +222,15 @@ infra:staging:
 
 # ─── production (manual, protected) ─────────────────────────────────────────────────────────────────────────────────
 
-# After a release merge request is merged: only users allowed to deploy to the protected `production` environment
-# can start it.
+# After a merge request that changes environments/production is merged: only users allowed to deploy to the protected
+# `production` environment can start it.
 deploy:production:
   extends: .deploy
   stage: production
   rules:
+    - !reference [.not-scheduled, rules]
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $PRODUCTION_ENABLED == "true"
-      changes: [environments/production/**/*, apps/**/*, scripts/deploy.sh]
+      changes: [environments/production/**/*, apps/**/*, scripts/deploy.sh, scripts/migrate.sh]
       when: manual
   allow_failure: false
   environment:
@@ -192,8 +246,9 @@ smoke:production:
   stage: production
   needs: [deploy:production]
   rules:
+    - !reference [.not-scheduled, rules]
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $PRODUCTION_ENABLED == "true"
-      changes: [environments/production/**/*, apps/**/*, scripts/deploy.sh]
+      changes: [environments/production/**/*, apps/**/*, scripts/deploy.sh, scripts/migrate.sh]
   environment:
     name: production
     action: verify
@@ -204,6 +259,7 @@ infra:production:
   extends: .infra
   stage: production
   rules:
+    - !reference [.not-scheduled, rules]
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $PRODUCTION_ENABLED == "true"
       when: manual
       allow_failure: true
@@ -213,3 +269,24 @@ infra:production:
   resource_group: production
   variables:
     ENVIRONMENT: production
+
+# Proposes a production release: scripts/update-versions.sh production sets production's images to the versions staging
+# runs and opens the merge request "production: api 1.4.0, ..." (a branch pushed with DEPLOY_PUSH_TOKEN and GitLab's
+# merge request push options). Merging it is the release decision; deploy:production then applies it. The same as a
+# person running scripts/set-version.sh production ... and opening the merge request by hand. Starting it is limited
+# to the users allowed to deploy to the protected `production` environment.
+propose:production:
+  stage: production
+  image: $KUBE_TOOLS_IMAGE
+  needs: []
+  interruptible: false
+  rules:
+    - !reference [.not-scheduled, rules]
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $PRODUCTION_ENABLED == "true"
+      when: manual
+      allow_failure: true
+  environment:
+    name: production
+    action: prepare
+  script:
+    - scripts/update-versions.sh production

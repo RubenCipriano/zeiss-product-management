@@ -1,38 +1,27 @@
-# CI pipeline of the backend repository (the API) for GitLab. It tests, builds and scans the API image, migrates the
-# environments' databases with it and releases it. It never applies Kubernetes manifests: an environment is what the
-# deploy repository (gitlab.com/zeiss/deploy) holds in environments/<environment>/kustomization.yaml, and the deploy
-# repository's own pipeline applies it (GitOps). Releasing means committing the new image tag there.
+# CI pipeline of the backend repository (the API) for GitLab. It only builds and publishes: it tests, builds and scans
+# the API image, and when someone tags a commit with a version it publishes that version and creates a GitLab Release.
+# It never touches an environment or the deploy repository (gitlab.com/zeiss/deploy): that repository chooses which
+# published version each environment runs, migrates its database and applies it (the "pull" model).
 #
-#   test ─────► build ───────► scan ──────► staging ────────────────────► production (manual)
-#   format,     api image,     Trivy        migrate:staging                migrate:production
-#   build,      migrations     (fails on    release:staging: commits       release:production: opens a merge
-#   every test  SQL (review)   critical)    "backend: api <sha>" to the    request in deploy; merging it is the
-#   suite                                   deploy repository's main       release, its pipeline then applies it
+#   test ─────► build ─────────► scan ──────► publish (tag vX.Y.Z only) ──► release (tag vX.Y.Z only)
+#   format,     api image        Trivy        publish:api: the image         release: a GitLab Release "vX.Y.Z" with
+#   build,      :<short sha>,    (fails on    gets the tag X.Y.Z (no v,      the image reference and digest, and
+#   every test  migrations SQL   critical)    SemVer), same digest           the commits since the previous version
+#   suite       (review)
 #
-# Merge request pipelines run test, build and scan. Pipelines on the default branch also migrate and release to
-# staging (automatically) and offer production (manual), each only once that environment is switched on
-# (STAGING_ENABLED, PRODUCTION_ENABLED below); until then they stop after scan. Tag pipelines build and scan.
+# Merge request pipelines and pipelines on the default branch: test, build, scan; every image is
+# registry.gitlab.com/zeiss/backend/api:<short sha> (a build of that commit, never deployed by a version rule).
+# Tag pipelines, only for tags v<MAJOR>.<MINOR>.<PATCH> or v<MAJOR>.<MINOR>.<PATCH>-rc.<N> (README.md, "How to release
+# a version"): test, build (reusing the main pipeline's image of that commit when it exists), scan, then publish:api
+# adds the tag <MAJOR>.<MINOR>.<PATCH>[-rc.<N>] to that same image, and release creates the GitLab Release. A version
+# is therefore published only after its tests and its scan passed. The deploy repository's update:staging job (or Argo
+# CD Image Updater) picks the newest X.Y.Z up for staging; production changes through a merge request there.
 #
-# Project- or group-level CI/CD variables (not scoped to an environment: rules cannot see environment-scoped ones):
-#   STAGING_ENABLED       "true" creates the staging jobs (migrate, release) on the default branch
-#   PRODUCTION_ENABLED    "true" creates the production jobs (manual); needs STAGING_ENABLED too
-#   DEPLOY_REPO_TOKEN     masked, protected: a project access token of zeiss/deploy with the role Maintainer and the
-#                         scope write_repository; the release jobs push the new tag with it (ci/release.sh)
-# A group deploy token named exactly `gitlab-deploy-token` with the scope read_registry (zeiss group → Settings →
-# Repository → Deploy tokens): GitLab passes it to every job of the group's projects as CI_DEPLOY_USER /
-# CI_DEPLOY_PASSWORD; the migrate jobs store it in the cluster as the Secret gitlab-registry, to pull the image.
+# No CI/CD variable has to be set in this project: the jobs use only what GitLab provides (CI_REGISTRY_*, the job
+# token). Protect the tags v* (Settings → Repository → Protected tags, allowed to create: Maintainers) so only
+# maintainers release, and turn on tag immutability for the container registry so a version can never be overwritten.
 #
-# Environment-scoped CI/CD variables (staging, production), for the migrate jobs:
-#   KUBE_CONTEXT          <agent configuration project path>:<agent name> (the GitLab agent for Kubernetes), or
-#   KUBECONFIG            File: a kubeconfig whose current context is the cluster; one of the two
-# No database or Redis password is a pipeline variable: they are random and live in the cluster (the deploy
-# repository's create-database.sh makes the Secret database-credentials, once per environment).
-#
-# With Argo CD (see the deploy repository) nothing changes here: Argo CD watches the deploy repository instead of its
-# pipeline doing the applying, and the migrations stay in this pipeline, before the release commit.
-#
-# Runners: every job runs on gitlab.com's shared runners. The migrate jobs reach the database only through the
-# cluster (kubectl, with the GitLab agent or a kubeconfig), so no runner needs to be inside the private network.
+# Runners: every job runs on gitlab.com's shared runners (no tags).
 
 workflow:
   name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
@@ -42,11 +31,12 @@ workflow:
     - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
       when: never
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-    - if: $CI_COMMIT_TAG
+    # A version tag (SemVer with a leading v, optionally a release candidate -rc.N); other tags start no pipeline.
+    - if: $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$/
   auto_cancel:
     on_new_commit: interruptible
 
-stages: [test, build, scan, staging, production]
+stages: [test, build, scan, publish, release]
 
 include:
   # GitLab's own analysers (results in the security widget / vulnerability report where the tier has them).
@@ -54,18 +44,17 @@ include:
   - template: Jobs/Secret-Detection.gitlab-ci.yml
 
 variables:
-  # The release: one image, tagged with the commit. Enable tag immutability for this repository in the Container
-  # Registry settings so a tag can never be overwritten.
+  # The build of this commit. A version tag adds <MAJOR>.<MINOR>.<PATCH> to the same image (publish:api). Enable tag
+  # immutability for this repository in the Container Registry settings so a tag can never be overwritten.
   API_IMAGE: $CI_REGISTRY_IMAGE/api:$CI_COMMIT_SHORT_SHA
-  # The repository that holds the environments (ci/release.sh).
-  DEPLOY_REPO_URL: https://gitlab.com/zeiss/deploy.git
   # Tool images, pinned (bump them with Renovate or by hand).
   DOTNET_SDK_IMAGE: mcr.microsoft.com/dotnet/sdk:10.0.401        # = global.json
-  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11                            # bash, kubectl 1.34, git, yq
   DOCKER_IMAGE: docker:29.8.2-cli
   DIND_IMAGE: docker:29.8.2-dind
   BUILDKIT_IMAGE: moby/buildkit:v0.33.1
   TRIVY_IMAGE: aquasec/trivy:0.74.0
+  CRANE_IMAGE: gcr.io/go-containerregistry/crane/debug:v0.20.3   # crane (registry tool) with a busybox shell
+  RELEASE_CLI_IMAGE: registry.gitlab.com/gitlab-org/release-cli:v0.24.0   # release-cli, glab and git; for release:
   DOTNET_NOLOGO: "true"
   DOTNET_CLI_TELEMETRY_OPTOUT: "true"
   NUGET_PACKAGES: $CI_PROJECT_DIR/.nuget/packages
@@ -98,16 +87,10 @@ default:
       prefix: nuget
     paths: [.nuget/packages]
 
-# The environments' jobs exist only on the default branch and once the environment is switched on: without a cluster
-# the migrations would fail, and a red pipeline on main would hide the result of test, build and scan. Production also
-# needs staging: it is offered only what staging already runs.
-.staging:
+# The publish and release jobs exist only in pipelines of a version tag (the same pattern as in workflow:).
+.version-tag:
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
-
-.production:
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true" && $PRODUCTION_ENABLED == "true"
+    - if: $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$/
 
 # ─── test ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -137,6 +120,8 @@ test:backend:
 # BuildKit through docker:dind: the same Dockerfile and `docker build` as a local build, a layer cache kept in the
 # registry (fast rebuilds on fresh runners), and the privileged runner the integration tests need anyway. Kaniko is
 # archived upstream; Buildah (rootless) is the alternative where privileged runners are not allowed.
+# In a tag pipeline the commit was normally built already by its pipeline on main: that image is reused (the version
+# is then exactly the bits that were tested on main), and it is built only if it does not exist.
 build:api:
   stage: build
   extends: .dind
@@ -147,19 +132,23 @@ build:api:
     # BuildKit shares dind's network (network=host): no second bridge, so the MTU above applies to the build too.
     - docker buildx create --use --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE" --driver-opt network=host
   script:
-    - repository="${API_IMAGE%:*}"
-    - docker buildx build --pull --push
-      --cache-from "type=registry,ref=$repository:buildcache"
-      --cache-to "type=registry,ref=$repository:buildcache,mode=max,image-manifest=true,oci-mediatypes=true"
-      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
-      --label "org.opencontainers.image.source=$CI_PROJECT_URL"
-      --tag "$API_IMAGE" ${CI_COMMIT_TAG:+--tag "$repository:$CI_COMMIT_TAG"}
-      .
+    - |
+      if [ -n "${CI_COMMIT_TAG:-}" ] && docker buildx imagetools inspect "$API_IMAGE" >/dev/null 2>&1; then
+        echo "$API_IMAGE exists (built by the pipeline on main): reusing it"
+      else
+        repository="${API_IMAGE%:*}"
+        docker buildx build --pull --push \
+          --cache-from "type=registry,ref=$repository:buildcache" \
+          --cache-to "type=registry,ref=$repository:buildcache,mode=max,image-manifest=true,oci-mediatypes=true" \
+          --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
+          --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
+          --tag "$API_IMAGE" .
+      fi
 
 # The exact SQL the migrations will run, for review in the merge request before it reaches production. Idempotent:
-# each migration is guarded by the history table. Review artifact only: the pipeline applies migrations with the
-# API image's `migrate` command, which also runs the CREATE INDEX CONCURRENTLY statements outside a transaction (in
-# this script they sit in DO blocks, where PostgreSQL does not allow them).
+# each migration is guarded by the history table. Review artifact only: the deploy repository applies migrations with
+# the API image's `migrate` command (its scripts/migrate.sh), which also runs the CREATE INDEX CONCURRENTLY statements
+# outside a transaction (in this script they sit in DO blocks, where PostgreSQL does not allow them).
 migrations:sql:
   stage: build
   extends: .nuget-cache
@@ -206,79 +195,50 @@ scan:api:
       container_scanning: gl-container-scanning-report.json
     expire_in: 30 days
 
-# ─── staging (automatic on the default branch) ──────────────────────────────────────────────────────────────────────
+# ─── publish (version tags only) ────────────────────────────────────────────────────────────────────────────────────
 
-# Applies the migrations with the API image itself (`dotnet ProductManagement.Api.dll migrate`), as the schema owner,
-# before the image is released. The database is reachable only inside the cluster, so ci/migrate.sh runs the image
-# there as a one-off pod, with the migrator's password from the Secret database-credentials; the job needs only
-# kubectl and the cluster. Migrations must work with the version still running (expand/contract).
-.migrate:
-  image: $KUBE_TOOLS_IMAGE
+# Publishes the version: the tag <MAJOR>.<MINOR>.<PATCH>[-rc.<N>] (the git tag without its v, SemVer as Argo CD Image
+# Updater's semver strategy and the deploy repository's scripts/versions.sh expect it) on the image this pipeline
+# tested and scanned. `crane tag` adds a tag in the registry, without pulling or pushing the image, so the version has
+# the same digest as the commit's build. The digest goes to the release job (dotenv artifact).
+publish:api:
+  extends: .version-tag
+  stage: publish
+  needs: [test:backend, build:api, scan:api]
+  image:
+    name: $CRANE_IMAGE
+    entrypoint: [""]
   interruptible: false
   script:
-    - ci/migrate.sh
+    - echo "$CI_REGISTRY_PASSWORD" | crane auth login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+    - version="${CI_COMMIT_TAG#v}"
+    - crane tag "$API_IMAGE" "$version"
+    - echo "API_DIGEST=$(crane digest "$CI_REGISTRY_IMAGE/api:$version")" > publish.env
+    - echo "Published $CI_REGISTRY_IMAGE/api:$version ($(cut -d= -f2 publish.env))"
+  artifacts:
+    reports:
+      dotenv: publish.env
 
-migrate:staging:
-  extends: [.migrate, .staging]
-  stage: staging
-  needs: [build:api, scan:api, test:backend]
-  environment:
-    name: staging
-    action: prepare
-  resource_group: staging
+# ─── release (version tags only) ────────────────────────────────────────────────────────────────────────────────────
+
+# A GitLab Release named after the tag (Deploy → Releases), made by GitLab's `release:` keyword with the official
+# release-cli image. Its description (ci/release-notes.sh) lists the published image with its digest and the commits
+# since the previous version; GIT_DEPTH 0 and the fetched tags give the script the whole history.
+release:
+  extends: .version-tag
+  stage: release
+  needs:
+    - job: publish:api
+      artifacts: true
+  image: $RELEASE_CLI_IMAGE
+  interruptible: false
   variables:
-    ENVIRONMENT: staging
-    # Staging is a demo of the system: an empty database gets the sample catalogue (never in production).
-    SEED_SAMPLE_DATA: "true"
-
-# Commits "backend: api <sha>" to the deploy repository's main (environments/staging/kustomization.yaml); the deploy
-# repository's pipeline applies it and smoke-checks staging. Starts again from the new main if it moved meanwhile.
-release:staging:
-  extends: .staging
-  stage: staging
-  image: $KUBE_TOOLS_IMAGE
-  needs: [migrate:staging]
-  interruptible: false
-  environment:
-    name: staging
-    action: prepare
-  resource_group: staging
+    GIT_DEPTH: "0"
   script:
-    - ci/release.sh staging product-management/api="$CI_COMMIT_SHORT_SHA"
-
-# ─── production (manual, protected) ─────────────────────────────────────────────────────────────────────────────────
-
-# The release decision starts here: only users allowed to deploy to the protected `production` environment can start
-# it. It migrates production's database with this image; release:production then opens the merge request. Migrations
-# are backward compatible, so applying one before the merge request is merged (or if it never is) is safe.
-migrate:production:
-  extends: .migrate
-  stage: production
-  needs: [build:api, release:staging]
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true" && $PRODUCTION_ENABLED == "true"
-      when: manual
-  allow_failure: false
-  environment:
-    name: production
-    action: prepare
-  resource_group: production
-  variables:
-    ENVIRONMENT: production
-    SEED_SAMPLE_DATA: "false"
-
-# Pushes a branch to the deploy repository that sets production's api tag to this image, with push options that open
-# the merge request "Release api <sha> to production". Merging it is the release; the deploy repository's pipeline
-# then applies production. Rollback: revert that merge in the deploy repository (the schema stays: expand/contract).
-release:production:
-  extends: .production
-  stage: production
-  image: $KUBE_TOOLS_IMAGE
-  needs: [migrate:production]
-  interruptible: false
-  environment:
-    name: production
-    action: prepare
-  resource_group: production
-  script:
-    - ci/release.sh production product-management/api="$CI_COMMIT_SHORT_SHA"
+    - git fetch --tags --force --quiet origin
+    - ci/release-notes.sh "$CI_COMMIT_TAG" "$CI_REGISTRY_IMAGE/api:${CI_COMMIT_TAG#v}@$API_DIGEST" > release-notes.md
+    - cat release-notes.md
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: $CI_COMMIT_TAG
+    description: release-notes.md

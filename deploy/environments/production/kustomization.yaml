@@ -1,8 +1,10 @@
-# Production environment: the API, the web app and the gateway, with the images promoted from staging.
+# Production environment: the API, the web app and the gateway, at versions that staging ran first.
 #
-# Changed only through merge requests: the backend and frontend pipelines' release:production jobs open one that sets
-# a newTag below to a release staging already runs. Merging it is the release decision; this repository's pipeline
-# then offers deploy:production (manual, scripts/deploy.sh production). Rollback: revert the merge commit.
+# Changed only through merge requests that set a newTag below: a person runs scripts/set-version.sh production
+# <image> <version> (or starts the pipeline's propose:production job, which proposes the versions staging runs).
+# Merging it is the release decision; this repository's pipeline then offers deploy:production (manual,
+# scripts/deploy.sh production: migrations, then apply). Rollback: the same command with the older version (or a revert
+# of the merge), through a merge request.
 #
 # No Secret is here: scripts/deploy.sh creates the registry credential (gitlab-registry) and api-secrets from
 # protected CI/CD variables and copies redis-credentials from the shared Redis; database-credentials is made once by
@@ -21,7 +23,8 @@ patches:
   - path: api.yaml
   - path: gateway.yaml
   - path: registry.yaml
-# The deployed images: changed by merge requests from the app pipelines (ci/release.sh production).
+# The deployed versions (SemVer X.Y.Z): changed only by merge requests (scripts/set-version.sh production ...).
+# "unreleased": no version chosen yet; scripts/deploy.sh refuses to apply until every image has one.
 images:
   - name: product-management/api
     newName: registry.gitlab.com/zeiss/backend/api

@@ -1,0 +1,16 @@
+# Argo CD Image Updater configuration (v1.x): one ImageUpdater object that selects the Applications labelled
+# image-updater=product-management (only staging.yaml) and reads everything else from their annotations
+# (useAnnotations: true). Image Updater 1.x is configured through this custom resource; the annotations keep the whole
+# update policy next to the Application it changes.
+apiVersion: argocd-image-updater.argoproj.io/v1alpha1
+kind: ImageUpdater
+metadata:
+  name: product-management
+  namespace: argocd
+spec:
+  applicationRefs:
+    - namePattern: "product-management-*"
+      labelSelectors:
+        matchLabels:
+          image-updater: product-management
+      useAnnotations: true

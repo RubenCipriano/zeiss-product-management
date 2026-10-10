@@ -1,31 +1,29 @@
-# CI pipeline of the frontend repository (the web app and the gateway) for GitLab. It tests, builds and scans the two
-# images and releases them. It never applies Kubernetes manifests: an environment is what the deploy repository
-# (gitlab.com/zeiss/deploy) holds in environments/<environment>/kustomization.yaml, and the deploy repository's own
-# pipeline applies it (GitOps). Releasing means committing the new image tags there.
+# CI pipeline of the frontend repository (the web app and the gateway) for GitLab. It only builds and publishes: it
+# tests, builds and scans the two images, and when someone tags a commit with a version it publishes that version of
+# both and creates a GitLab Release. It never touches an environment or the deploy repository
+# (gitlab.com/zeiss/deploy): that repository chooses which published version each environment runs and applies it (the
+# "pull" model).
 #
-#   test ─────► build ─────► scan ──────► staging ─────────────────────────► production (manual)
-#   lint,       web and      Trivy        release:staging: commits           release:production: opens a merge
-#   format,     gateway      (fails on    "frontend: web, gateway <sha>"     request in deploy; merging it is the
-#   unit tests, images       critical)    to the deploy repository's main    release, its pipeline then applies it
-#   build
+#   test ─────► build ─────────► scan ──────► publish (tag vX.Y.Z only) ──────► release (tag vX.Y.Z only)
+#   lint,       web and gateway  Trivy        publish:web, publish:gateway:      release: a GitLab Release "vX.Y.Z"
+#   format,     images           (fails on    each image gets the tag X.Y.Z      with both image references and
+#   unit tests, :<short sha>     critical)    (no v, SemVer), same digest        digests, and the commits since the
+#   build                                                                        previous version
 #
-# Merge request pipelines run test, build and scan. Pipelines on the default branch also release to staging
-# (automatically) and offer production (manual), each only once that environment is switched on (STAGING_ENABLED,
-# PRODUCTION_ENABLED below); until then they stop after scan. Tag pipelines build and scan.
+# Merge request pipelines and pipelines on the default branch: test, build, scan; the images are
+# registry.gitlab.com/zeiss/frontend/{web,gateway}:<short sha> (builds of that commit, never deployed by a version
+# rule). Tag pipelines, only for tags v<MAJOR>.<MINOR>.<PATCH> or v<MAJOR>.<MINOR>.<PATCH>-rc.<N> (README.md, "How to
+# release a version"): test, build (reusing the main pipeline's images of that commit when they exist), scan, then
+# publish adds the tag <MAJOR>.<MINOR>.<PATCH>[-rc.<N>] to both images, and release creates the GitLab Release. web and
+# gateway always share a version: they are one frontend release. The deploy repository's update:staging job (or Argo
+# CD Image Updater) picks the newest X.Y.Z up for staging; production changes through a merge request there.
 #
 # The end-to-end tests (Playwright, e2e/) are not a job here: they need the whole running system (gateway, API, Redis,
 # PostgreSQL). Run them against an environment: BASE_URL=https://<environment host> npm run e2e (README.md).
 #
-# Project- or group-level CI/CD variables:
-#   STAGING_ENABLED       "true" creates release:staging on the default branch
-#   PRODUCTION_ENABLED    "true" creates release:production (manual); needs STAGING_ENABLED too
-#   DEPLOY_REPO_TOKEN     masked, protected: a project access token of zeiss/deploy with the role Maintainer and the
-#                         scope write_repository; the release jobs push the new tags with it (ci/release.sh)
-# The cluster pulls the images with the zeiss group's deploy token (gitlab-deploy-token, read_registry), which the
-# deploy repository's pipeline stores in the cluster: nothing to set here for that.
-#
-# With Argo CD (see the deploy repository) nothing changes here: Argo CD watches the deploy repository instead of its
-# pipeline doing the applying.
+# No CI/CD variable has to be set in this project: the jobs use only what GitLab provides (CI_REGISTRY_*, the job
+# token). Protect the tags v* (Settings → Repository → Protected tags, allowed to create: Maintainers) so only
+# maintainers release, and turn on tag immutability for the container registry so a version can never be overwritten.
 #
 # Runners: no job has tags, so they all run on gitlab.com's shared runners.
 
@@ -37,11 +35,12 @@ workflow:
     - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
       when: never
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-    - if: $CI_COMMIT_TAG
+    # A version tag (SemVer with a leading v, optionally a release candidate -rc.N); other tags start no pipeline.
+    - if: $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$/
   auto_cancel:
     on_new_commit: interruptible
 
-stages: [test, build, scan, staging, production]
+stages: [test, build, scan, publish, release]
 
 include:
   # GitLab's own analysers (results in the security widget / vulnerability report where the tier has them).
@@ -49,19 +48,18 @@ include:
   - template: Jobs/Secret-Detection.gitlab-ci.yml
 
 variables:
-  # The release: two images, tagged with the commit. Enable tag immutability for this repository in the Container
-  # Registry settings so a tag can never be overwritten.
+  # The builds of this commit. A version tag adds <MAJOR>.<MINOR>.<PATCH> to the same images (publish:*). Enable tag
+  # immutability for this repository in the Container Registry settings so a tag can never be overwritten.
   WEB_IMAGE: $CI_REGISTRY_IMAGE/web:$CI_COMMIT_SHORT_SHA
   GATEWAY_IMAGE: $CI_REGISTRY_IMAGE/gateway:$CI_COMMIT_SHORT_SHA
-  # The repository that holds the environments (ci/release.sh).
-  DEPLOY_REPO_URL: https://gitlab.com/zeiss/deploy.git
   # Tool images, pinned (bump them with Renovate or by hand).
   NODE_IMAGE: node:24.20.0-bookworm-slim                          # = .nvmrc (24)
-  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11                            # bash, git, yq
   DOCKER_IMAGE: docker:29.8.2-cli
   DIND_IMAGE: docker:29.8.2-dind
   BUILDKIT_IMAGE: moby/buildkit:v0.33.1
   TRIVY_IMAGE: aquasec/trivy:0.74.0
+  CRANE_IMAGE: gcr.io/go-containerregistry/crane/debug:v0.20.3   # crane (registry tool) with a busybox shell
+  RELEASE_CLI_IMAGE: registry.gitlab.com/gitlab-org/release-cli:v0.24.0   # release-cli, glab and git; for release:
   npm_config_cache: $CI_PROJECT_DIR/.npm
 
 default:
@@ -79,11 +77,10 @@ default:
       prefix: npm
     paths: [.npm]
 
-# The release jobs exist only on the default branch and once the environment is switched on. Production also needs
-# staging: it is offered only what staging already runs.
-.staging:
+# The publish and release jobs exist only in pipelines of a version tag (the same pattern as in workflow:).
+.version-tag:
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
+    - if: $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$/
 
 # ─── test ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -108,7 +105,9 @@ test:frontend:
 
 # BuildKit through docker:dind: the same Dockerfiles and `docker build` as a local build, with a layer cache kept in
 # the registry (fast rebuilds on fresh runners). The runner must allow privileged containers (gitlab.com's Linux
-# runners do). APP_VERSION is the release the web app reports with its browser errors (the gateway ignores it).
+# runners do). APP_VERSION is the release the web app reports with its browser errors (the gateway ignores it): the
+# commit. In a tag pipeline the commit was normally built already by its pipeline on main: that image is reused (the
+# version is then exactly the bits that were tested on main), and it is built only if it does not exist.
 .build-image:
   stage: build
   image: $DOCKER_IMAGE
@@ -127,15 +126,19 @@ test:frontend:
     # BuildKit shares dind's network (network=host): no second bridge, so the MTU above applies to the build too.
     - docker buildx create --use --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE" --driver-opt network=host
   script:
-    - repository="${IMAGE%:*}"
-    - docker buildx build --pull --push
-      --cache-from "type=registry,ref=$repository:buildcache"
-      --cache-to "type=registry,ref=$repository:buildcache,mode=max,image-manifest=true,oci-mediatypes=true"
-      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
-      --label "org.opencontainers.image.source=$CI_PROJECT_URL"
-      --build-arg "APP_VERSION=$CI_COMMIT_SHORT_SHA"
-      --tag "$IMAGE" ${CI_COMMIT_TAG:+--tag "$repository:$CI_COMMIT_TAG"}
-      "$CONTEXT"
+    - |
+      if [ -n "${CI_COMMIT_TAG:-}" ] && docker buildx imagetools inspect "$IMAGE" >/dev/null 2>&1; then
+        echo "$IMAGE exists (built by the pipeline on main): reusing it"
+      else
+        repository="${IMAGE%:*}"
+        docker buildx build --pull --push \
+          --cache-from "type=registry,ref=$repository:buildcache" \
+          --cache-to "type=registry,ref=$repository:buildcache,mode=max,image-manifest=true,oci-mediatypes=true" \
+          --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \
+          --label "org.opencontainers.image.source=$CI_PROJECT_URL" \
+          --build-arg "APP_VERSION=$CI_COMMIT_SHORT_SHA" \
+          --tag "$IMAGE" "$CONTEXT"
+      fi
 
 build:web:
   extends: .build-image
@@ -188,44 +191,68 @@ scan:gateway:
   variables:
     IMAGE: $GATEWAY_IMAGE
 
-# ─── staging (automatic on the default branch) ──────────────────────────────────────────────────────────────────────
+# ─── publish (version tags only) ────────────────────────────────────────────────────────────────────────────────────
 
-# Commits "frontend: web, gateway <sha>" to the deploy repository's main (environments/staging/kustomization.yaml);
-# the deploy repository's pipeline applies it and smoke-checks staging. Starts again from the new main if it moved
-# meanwhile (e.g. the backend released at the same moment).
-release:staging:
-  extends: .staging
-  stage: staging
-  image: $KUBE_TOOLS_IMAGE
-  needs: [build:web, build:gateway, scan:web, scan:gateway, test:frontend]
+# Publishes the version: the tag <MAJOR>.<MINOR>.<PATCH>[-rc.<N>] (the git tag without its v, SemVer as Argo CD Image
+# Updater's semver strategy and the deploy repository's scripts/versions.sh expect it) on the image this pipeline
+# tested and scanned. `crane tag` adds a tag in the registry, without pulling or pushing the image, so the version has
+# the same digest as the commit's build. The digest goes to the release job (dotenv artifact). Both jobs need every
+# test and scan, so a version is published for both images or for none.
+.publish-image:
+  extends: .version-tag
+  stage: publish
+  needs: [test:frontend, build:web, build:gateway, scan:web, scan:gateway]
+  image:
+    name: $CRANE_IMAGE
+    entrypoint: [""]
   interruptible: false
-  environment:
-    name: staging
-    action: prepare
-  resource_group: staging
   script:
-    - ci/release.sh staging
-      product-management/web="$CI_COMMIT_SHORT_SHA" product-management/gateway="$CI_COMMIT_SHORT_SHA"
+    - echo "$CI_REGISTRY_PASSWORD" | crane auth login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+    - version="${CI_COMMIT_TAG#v}"
+    - crane tag "$IMAGE" "$version"
+    - echo "${DIGEST_VARIABLE}=$(crane digest "${IMAGE%:*}:$version")" > publish.env
+    - echo "Published ${IMAGE%:*}:$version ($(cut -d= -f2 publish.env))"
+  artifacts:
+    reports:
+      dotenv: publish.env
 
-# ─── production (manual, protected) ─────────────────────────────────────────────────────────────────────────────────
+publish:web:
+  extends: .publish-image
+  variables:
+    IMAGE: $WEB_IMAGE
+    DIGEST_VARIABLE: WEB_DIGEST
 
-# The release decision: only users allowed to deploy to the protected `production` environment can start it. Pushes a
-# branch to the deploy repository that sets production's web and gateway tags to these images, with push options that
-# open the merge request "Release web, gateway <sha> to production". Merging it is the release; the deploy
-# repository's pipeline then applies production. Rollback: revert that merge in the deploy repository.
-release:production:
-  stage: production
-  image: $KUBE_TOOLS_IMAGE
-  needs: [release:staging]
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true" && $PRODUCTION_ENABLED == "true"
-      when: manual
-  allow_failure: false
+publish:gateway:
+  extends: .publish-image
+  variables:
+    IMAGE: $GATEWAY_IMAGE
+    DIGEST_VARIABLE: GATEWAY_DIGEST
+
+# ─── release (version tags only) ────────────────────────────────────────────────────────────────────────────────────
+
+# A GitLab Release named after the tag (Deploy → Releases), made by GitLab's `release:` keyword with the official
+# release-cli image. Its description (ci/release-notes.sh) lists the two published images with their digests and the
+# commits since the previous version; GIT_DEPTH 0 and the fetched tags give the script the whole history.
+release:
+  extends: .version-tag
+  stage: release
+  needs:
+    - job: publish:web
+      artifacts: true
+    - job: publish:gateway
+      artifacts: true
+  image: $RELEASE_CLI_IMAGE
   interruptible: false
-  environment:
-    name: production
-    action: prepare
-  resource_group: production
+  variables:
+    GIT_DEPTH: "0"
   script:
-    - ci/release.sh production
-      product-management/web="$CI_COMMIT_SHORT_SHA" product-management/gateway="$CI_COMMIT_SHORT_SHA"
+    - git fetch --tags --force --quiet origin
+    - version="${CI_COMMIT_TAG#v}"
+    - ci/release-notes.sh "$CI_COMMIT_TAG"
+      "$CI_REGISTRY_IMAGE/web:$version@$WEB_DIGEST" "$CI_REGISTRY_IMAGE/gateway:$version@$GATEWAY_DIGEST"
+      > release-notes.md
+    - cat release-notes.md
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: $CI_COMMIT_TAG
+    description: release-notes.md

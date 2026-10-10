@@ -8,7 +8,8 @@ This repository holds two things that are built and released together:
   routing, token checks, rate limits, caching, security headers and tracing.
 
 It contains their code, the unit and end-to-end tests, the two container images and the CI pipeline that tests, builds,
-scans and releases them. The API is in [backend](https://gitlab.com/zeiss/backend); the Kubernetes manifests, the
+scans and publishes them: a version tag (`v2.1.0`) publishes `web:2.1.0` and `gateway:2.1.0`, and the deploy
+repository decides when an environment runs them. The API is in [backend](https://gitlab.com/zeiss/backend); the Kubernetes manifests, the
 environments and the scripts that deploy everything are in [deploy](https://gitlab.com/zeiss/deploy).
 
 ## Contents
@@ -31,7 +32,9 @@ environments and the scripts that deploy everything are in [deploy](https://gitl
 - [Scripts](#scripts)
 - [Tests](#tests)
 - [The images](#the-images)
+  - [Outside Kubernetes: docker run, Docker Compose](#outside-kubernetes-docker-run-docker-compose)
 - [CI](#ci)
+- [How to release a version](#how-to-release-a-version)
 - [Troubleshooting](#troubleshooting)
 
 ## The gateway
@@ -252,7 +255,7 @@ src/
   testing/                      test fixtures (fake auth, sample products)
 e2e/                            Playwright end-to-end tests and the Lighthouse user flow
 gateway/                        the gateway image
-ci/release.sh                   the release jobs' script
+ci/release-notes.sh             the description of a GitLab Release (the release job)
 ```
 
 The dependency rule inside a feature, so each piece has one reason to change:
@@ -363,7 +366,7 @@ paginator's range are announced to screen readers (`aria-live="polite"`); the ta
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `APP_VERSION` (Docker build argument, passed as `ng build --define`) | `dev` | the release the app reports with its errors; the pipeline and the deploy repository's `scripts/deploy.sh local` pass the image tag |
+| `APP_VERSION` (Docker build argument, passed as `ng build --define`) | `dev` | the release the app reports with its errors; the pipeline passes the commit (`<short sha>`: a version reuses that build, so it reports the commit it was built from), the deploy repository's `scripts/deploy.sh local` its local image tag |
 
 **Run time (gateway image):** environment variables, rendered into the nginx configuration when the container starts
 (the official nginx image's template mechanism), so one image serves every environment.
@@ -433,7 +436,7 @@ http://localhost:8080 (on an Ubuntu server also http://&lt;server-ip&gt;:8080).
 | `npm run format` / `npm run format:check` | Prettier: write / check (`src/**/*.{ts,html,scss}`, `e2e/**/*.ts`) |
 | `npm run e2e` | Playwright end-to-end tests against a running system ([Tests](#tests)) |
 | `npm run audit:lighthouse` | Lighthouse user flow, signed in (mobile; `FORM_FACTOR=desktop` for desktop); report in `e2e/reports/` |
-| `ci/release.sh` | the release jobs' script ([CI](#ci)) |
+| `ci/release-notes.sh` | the description of a GitLab Release: images, digests, commits since the previous version ([CI](#ci)) |
 
 ## Tests
 
@@ -483,37 +486,102 @@ docker build --build-arg APP_VERSION=dev -t product-management/web .
 docker build -t product-management/gateway gateway
 ```
 
+### Outside Kubernetes: docker run, Docker Compose
+
+The published images (`registry.gitlab.com/zeiss/frontend/web:<version>` and `.../gateway:<version>`) are plain OCI
+images with no Kubernetes in them: they run on Kubernetes, with `docker run`, Docker Compose or Docker Swarm. Both
+listen on port 8080 as a non-root user.
+
+* **web** needs nothing: `docker run -d -p 8081:8080 registry.gitlab.com/zeiss/frontend/web:2.1.0` serves the app
+  (it calls `/api` on its own origin, so on its own it shows the sign-in page and nothing more; behind the gateway it
+  is the whole application).
+* **gateway** needs to know where the others are ([Configuration](#configuration) lists every variable): `API_UPSTREAM`
+  and `WEB_UPSTREAM` (`host:port`), `JWKS_URL` (the API's public keys) and `COLLECTOR_UPSTREAM` (`""` without a log
+  collector: `/collect` answers 204). Names are resolved through the container's DNS, so Compose service names work.
+
+Next to the API's Compose file (backend README, [Outside Kubernetes](https://gitlab.com/zeiss/backend#outside-kubernetes-docker-run-docker-compose)),
+these two services complete the system on http://localhost:8080:
+
+```yaml
+services:
+  web:
+    image: registry.gitlab.com/zeiss/frontend/web:2.1.0
+  gateway:
+    image: registry.gitlab.com/zeiss/frontend/gateway:2.1.0
+    ports: ["8080:8080"]
+    environment:
+      API_UPSTREAM: api:8080
+      WEB_UPSTREAM: web:8080
+      JWKS_URL: http://api:8080/.well-known/jwks.json
+      COLLECTOR_UPSTREAM: ""          # no log collector; or alloy:12347 (Grafana Alloy's Faro receiver)
+    depends_on: [api, web]
+```
+
+The gateway alone, in front of an API somewhere else:
+`docker run -d -p 8080:8080 -e API_UPSTREAM=api.example.internal:8080 -e WEB_UPSTREAM=web.example.internal:8080 -e JWKS_URL=http://api.example.internal:8080/.well-known/jwks.json -e COLLECTOR_UPSTREAM= registry.gitlab.com/zeiss/frontend/gateway:2.1.0`.
+Behind another proxy, set `GATEWAY_TRUSTED_PROXIES` to its network so rate limits see the real client addresses.
+
 ## CI
 
-[`.gitlab-ci.yml`](.gitlab-ci.yml). The pipeline tests, builds, scans and releases the two images. It never applies
-anything to a cluster: an environment runs the tags in the deploy repository's
-`environments/<env>/kustomization.yaml`, and the deploy repository's pipeline applies them.
+[`.gitlab-ci.yml`](.gitlab-ci.yml). The pipeline only builds and publishes: it tests, builds and scans the two images,
+and for a version tag publishes that version of both and creates a GitLab Release. It never touches an environment or
+the deploy repository: the deploy repository chooses which published version each environment runs (its
+`environments/<env>/kustomization.yaml`) and applies it (the "pull" model, see its README).
 
 | Job | Stage | When | Does |
 | --- | --- | --- | --- |
 | `test:frontend` | test | every pipeline | `npm ci`, lint, format check, unit tests (JUnit report), production build |
 | GitLab SAST, Secret Detection | test | every pipeline | GitLab's own analysers (included templates) |
-| `build:web`, `build:gateway` | build | every pipeline | build and push `registry.gitlab.com/zeiss/frontend/{web,gateway}:<short sha>` (BuildKit on Docker-in-Docker, layer cache in the registry); on a tag pipeline also `:<tag>` |
+| `build:web`, `build:gateway` | build | every pipeline | build and push `registry.gitlab.com/zeiss/frontend/{web,gateway}:<short sha>` (BuildKit on Docker-in-Docker, layer cache in the registry); in a tag pipeline they reuse those images when the pipeline on `main` already built them |
 | `scan:web`, `scan:gateway` | scan | every pipeline | Trivy: full report to GitLab; fails on fixable critical vulnerabilities |
-| `release:staging` | staging | `main`, `STAGING_ENABLED` | `ci/release.sh staging`: commits `frontend: web, gateway <sha>` (both `newTag`s) to the deploy repository's `main` |
-| `release:production` | production | `main`, `STAGING_ENABLED` and `PRODUCTION_ENABLED`, **manual** | `ci/release.sh production`: pushes a branch to the deploy repository and opens the merge request "Release web, gateway `<sha>` to production"; merging it is the release |
+| `publish:web`, `publish:gateway` | publish | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | after every test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `v`) to each image, so a version has the commit build's digest; the digests go to `release` |
+| `release` | release | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | GitLab's `release:` keyword (image `release-cli`): the Release `vX.Y.Z`, with both image references and digests and the commits since the previous version ([`ci/release-notes.sh`](ci/release-notes.sh)) |
 
-**`ci/release.sh`** (the same script is in backend): `ci/release.sh <staging|production> <image>=<tag> ...`. It clones
-the deploy repository with `DEPLOY_REPO_TOKEN` (through a git credential helper, so the token is in no URL or log),
-sets each image's `newTag` with `yq`, and either commits to `main` and pushes (staging; if `main` moved meanwhile,
-for example because the backend released at the same moment, it starts again from the new `main`, up to 5 times) or
-pushes the branch `release/production/<project>-<tag>` with push options that open a merge request (production). It
-does nothing if the tags are already there. `DRY_RUN=1` prints the commit and push without pushing.
+Which pipelines run: merge requests and `main` (test, build, scan), and tags that match
+`v<MAJOR>.<MINOR>.<PATCH>` with an optional `-rc.<N>`; any other tag starts no pipeline. Images on `main` are
+`<image>:<short sha>`: builds of a commit, which the deploy repository never picks up by itself. Only `X.Y.Z` tags are
+versions, and web and gateway always get the same one: they are one frontend release.
 
-| Variable | Scope | What |
+**`ci/release-notes.sh`** (the same in backend; POSIX `sh`, because the release-cli image has no bash):
+`ci/release-notes.sh <tag> <image reference>...` prints the Release's description in Markdown: the images with their
+digests, then `git log --no-merges` since the previous version tag (for a release `X.Y.Z` the previous release,
+skipping release candidates; for a release candidate the previous tag of any kind) and a compare link.
+
+**No CI/CD variable is needed in this project:** the jobs use only what GitLab provides (`CI_REGISTRY_USER` /
+`CI_REGISTRY_PASSWORD`, the job token). Two project settings matter: **protected tags** `v*` (Settings → Repository →
+Protected tags, allowed to create: Maintainers), so only maintainers release; and **tag immutability** of the
+container registry, so a published version can never be overwritten.
+
+## How to release a version
+
+A version is a git tag on a commit of `main` that passed its pipeline, and it versions both images. Versions follow
+[Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
+
+| Change since the previous version | Raise | Example |
 | --- | --- | --- |
-| `STAGING_ENABLED` | project or group | `"true"` creates `release:staging` on `main` |
-| `PRODUCTION_ENABLED` | project or group | `"true"` creates `release:production` (manual); needs `STAGING_ENABLED` too |
-| `DEPLOY_REPO_TOKEN` | project; masked, protected | a project access token of the deploy repository, role Maintainer, scope `write_repository` |
+| a breaking change for whoever runs or uses the images: a gateway variable renamed or removed, a route or header contract dropped, a browser support change, or the app needing an API version that is not deployed yet | MAJOR | 2.1.0 → 3.0.0 |
+| new, backward compatible functionality: a new screen or feature, a new gateway setting with a default | MINOR | 2.1.0 → 2.2.0 |
+| backward compatible fixes only (bugs, styling, performance, base-image or dependency updates) | PATCH | 2.1.0 → 2.1.1 |
+| a version to try first (a release candidate) | `-rc.N` | 2.2.0-rc.1, then 2.2.0 |
 
-Nothing else is needed: the cluster pulls the images with the zeiss group's deploy token, which the deploy
-repository's pipeline stores in the cluster. Until `STAGING_ENABLED` is set the pipeline stops, green, after the scans.
-A rollback is a revert of the release commit (or merge) in the deploy repository.
+1. Merge the changes into `main` and wait for its pipeline (it builds `web:<short sha>` and `gateway:<short sha>`).
+2. Create the tag on that commit, from the UI (Code → Tags → New tag: name `v2.1.0`, create from `main`, a message) or
+   from a clone:
+
+   ```bash
+   git switch main && git pull
+   git tag -a v2.1.0 -m "v2.1.0: stock history filters"
+   git push origin v2.1.0
+   ```
+
+3. The tag's pipeline tests and scans that commit again, publishes `web:2.1.0` and `gateway:2.1.0` and creates the
+   Release `v2.1.0` (Deploy → Releases).
+4. Nothing else here: staging picks `2.1.0` up by itself (the deploy repository's scheduled `update:staging` job takes
+   the newest `X.Y.Z` that both images have), and production changes through a merge request in the deploy repository
+   (`scripts/set-version.sh production frontend 2.1.0`).
+
+A tag is never moved or reused: a fix is a new version (`v2.1.1`). If the app needs a new API, release and deploy the
+backend version first (the API stays backward compatible, so the order is always API, then frontend).
 
 ## Troubleshooting
 
@@ -531,3 +599,6 @@ A rollback is a revert of the release commit (or merge) in the deploy repository
 | Playwright: Chrome not found | no Google Chrome installed | `npx playwright install chromium` and `PLAYWRIGHT_CHANNEL=chromium` |
 | Playwright: browser-errors test skipped | Loki not reachable at `LOKI_URL` | `kubectl -n infra port-forward svc/loki 3100:3100` |
 | `npm run audit:lighthouse` cannot launch Chrome | it uses the macOS Chrome path by default | set `CHROME_PATH` |
+| a tag starts no pipeline | the tag is not `vX.Y.Z` / `vX.Y.Z-rc.N` (e.g. `2.1.0` without `v`, or `v2.1`) | delete it and create `v2.1.0` |
+| `publish:*` fails: the tag cannot be overwritten | the version was published before (tag immutability) | versions are never reused: release `v2.1.1` |
+| staging keeps the previous frontend version | only one of the two images has the new version (a publish job failed), and staging takes the newest version both have | re-run the failed publish job of the tag's pipeline |

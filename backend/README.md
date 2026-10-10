@@ -7,7 +7,8 @@ container image and the CI pipeline. The web app and the gateway are in [fronten
 the Kubernetes manifests, the environments and the deployment scripts are in [deploy](https://gitlab.com/zeiss/deploy).
 
 This README is the API's specification (every endpoint, header, error code and setting) and explains how the code is
-built, why, and how to run, test and release it.
+built, why, and how to run, test and release it. A release is a version tag (`v1.4.0`): the pipeline publishes the
+image `registry.gitlab.com/zeiss/backend/api:1.4.0`, and the deploy repository decides when an environment runs it.
 
 ## Contents
 
@@ -27,9 +28,11 @@ built, why, and how to run, test and release it.
 - [Security](#security)
 - [Configuration](#configuration)
 - [The image and its commands](#the-image-and-its-commands)
+  - [Outside Kubernetes: docker run, Docker Compose](#outside-kubernetes-docker-run-docker-compose)
 - [Run locally](#run-locally)
 - [Tests](#tests)
 - [CI](#ci)
+- [How to release a version](#how-to-release-a-version)
 - [Design decisions](#design-decisions)
 - [Troubleshooting](#troubleshooting)
 
@@ -399,8 +402,8 @@ in the frontend README.
 
 * **Least privilege in the database.** The API connects as `pm_app`, which may read and write rows but not change the
   schema; its statements end after 30 s and idle transactions after 60 s. Migrations run as `pm_migrator`, the schema
-  owner, from the pipeline, before a release. Both users are created by the deploy repository's
-  `scripts/create-database.sh`.
+  owner, from the deploy repository (`scripts/migrate.sh`), before each rollout. Both users are created by the deploy
+  repository's `scripts/create-database.sh`.
 * **Hashed client secrets.** PBKDF2-HMAC-SHA256, 100,000 iterations, 16-byte random salt, 32-byte hash, stored as
   `pbkdf2-sha256$100000$<salt>$<hash>` (Base64). `hash-secret` makes one. Comparison is constant-time.
 * **Asymmetric tokens.** Only the API holds the private key; everyone else verifies with the public key (JWKS).
@@ -467,7 +470,7 @@ image has three commands; each runs and exits:
 
 | Command | Does | Used by |
 | --- | --- | --- |
-| `migrate` | applies pending migrations (and the sample data when `Database:SeedSampleData` is true), exit code 1 on failure; needs only the database (and Redis to invalidate the cache) | the pipeline's migrate jobs (`ci/migrate.sh`) and the deploy repository's `scripts/deploy.sh local`, as a one-off pod with the migrator's credentials |
+| `migrate` | applies pending migrations (and the sample data when `Database:SeedSampleData` is true), exit code 1 on failure; needs only the database (and Redis to invalidate the cache) | the deploy repository's `scripts/migrate.sh`, which its `scripts/deploy.sh` runs for every environment before applying it: a one-off pod with the migrator's credentials and the API version the environment names (with Argo CD: the PreSync hook in its `argocd/hooks/`) |
 | `generate-signing-key` | prints a new ES256 (P-256) private key, PKCS#8 PEM | setting up an environment (`API_SIGNING_KEY`) |
 | `hash-secret <secret>` | prints the `SecretHash` for a client secret | adding a client to `consumers.json` |
 
@@ -475,6 +478,79 @@ image has three commands; each runs and exits:
 docker run --rm product-management/api generate-signing-key
 docker run --rm product-management/api hash-secret <secret>
 ```
+
+### Outside Kubernetes: docker run, Docker Compose
+
+The published image (`registry.gitlab.com/zeiss/backend/api:<version>`) is a plain OCI image with no Kubernetes in
+it: it runs on Kubernetes, with `docker run`, Docker Compose or Docker Swarm, anywhere it can reach a PostgreSQL and a
+Redis. Everything it needs is environment variables (and one optional file):
+
+| Variable | Required | What |
+| --- | --- | --- |
+| `ConnectionStrings__ProductManagement` | yes | PostgreSQL, without the password: `Host=...;Port=5432;Database=...;Username=...` |
+| `PGPASSWORD` | yes | the database password (read by the driver; never inside the connection string) |
+| `ConnectionStrings__Redis` | yes (outside `Development`) | Redis, `host:6379` |
+| `Redis__Password` | when Redis has one | the Redis password |
+| `Authentication__SigningKey` | yes | the ES256 private key, PEM (`generate-signing-key`) |
+| `/app/config/consumers.json` | yes (or `Authentication__Consumers__<n>__*` variables) | the accounts: `{"Authentication":{"Consumers":[{"ClientId":"...","SecretHash":"...","Roles":["viewer"]}]}}` (`hash-secret`) |
+| `Database__SeedSampleData` | no | `true`: the 24 sample products on an empty database (`migrate` only) |
+| `OpenApi__Enabled` | no | `true`: Swagger UI on `/swagger` |
+
+It listens on port 8080 as the non-root user `app` (uid 1654). Apply the migrations first, with the same image and the
+schema owner's credentials (`migrate` exits when it is done), then start the API. Every other setting is in
+[Configuration](#configuration).
+
+```bash
+image=registry.gitlab.com/zeiss/backend/api:1.4.0
+docker run --rm "$image" generate-signing-key > signing-key.pem
+printf '{"Authentication":{"Consumers":[{"ClientId":"viewer","SecretHash":"%s","Roles":["viewer"]}]}}\n' \
+  "$(docker run --rm "$image" hash-secret viewer)" > consumers.json             # one account: viewer / viewer
+
+docker run --rm -e ConnectionStrings__ProductManagement="Host=db.example.internal;Port=5432;Database=product_management;Username=pm_migrator" \
+  -e PGPASSWORD="$MIGRATOR_PASSWORD" -e ConnectionStrings__Redis=redis.example.internal:6379 -e Redis__Password="$REDIS_PASSWORD" \
+  "$image" migrate
+docker run -d --name api -p 5080:8080 \
+  -e ConnectionStrings__ProductManagement="Host=db.example.internal;Port=5432;Database=product_management;Username=pm_app" \
+  -e PGPASSWORD="$APP_PASSWORD" -e ConnectionStrings__Redis=redis.example.internal:6379 -e Redis__Password="$REDIS_PASSWORD" \
+  -e Authentication__SigningKey="$(cat signing-key.pem)" -v "$PWD/consumers.json:/app/config/consumers.json:ro" \
+  "$image"
+curl http://localhost:5080/health/ready
+```
+
+With Docker Compose, the whole system on one machine (the frontend README has the `web` and `gateway` services that
+complete it); `API_SIGNING_KEY="$(cat signing-key.pem)" docker compose up -d`:
+
+```yaml
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment: { POSTGRES_USER: product_management, POSTGRES_PASSWORD: change-me, POSTGRES_DB: product_management }
+    healthcheck: { test: ["CMD", "pg_isready", "-U", "product_management"], interval: 2s, retries: 30 }
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--requirepass", "change-me-too"]
+  migrate:                        # runs once, before the API: the schema of exactly this version
+    image: registry.gitlab.com/zeiss/backend/api:1.4.0
+    command: ["migrate"]
+    environment: &api-env
+      ConnectionStrings__ProductManagement: "Host=postgres;Port=5432;Database=product_management;Username=product_management"
+      PGPASSWORD: change-me
+      ConnectionStrings__Redis: "redis:6379"
+      Redis__Password: change-me-too
+      Database__SeedSampleData: "true"
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started } }
+  api:
+    image: registry.gitlab.com/zeiss/backend/api:1.4.0
+    environment:
+      <<: *api-env
+      Authentication__SigningKey: ${API_SIGNING_KEY:?the PEM of generate-signing-key}
+    volumes: ["./consumers.json:/app/config/consumers.json:ro"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+```
+
+This minimal file uses one database user for brevity; in Kubernetes the API connects as `pm_app` (rows only) and only
+the migrations as the schema owner (deploy repository, `scripts/create-database.sh`). A Swarm stack takes the same
+file (`docker stack deploy`), with the key and the accounts as Docker secrets instead of a variable and a bind mount.
 
 ## Run locally
 
@@ -578,51 +654,78 @@ The integration and acceptance tests start PostgreSQL and Redis containers thems
 
 ## CI
 
-[`.gitlab-ci.yml`](.gitlab-ci.yml). The pipeline tests, builds, scans and releases the image. It never applies
-Kubernetes manifests: an environment runs the API tag in the deploy repository's
-`environments/<env>/kustomization.yaml`, and the deploy repository's pipeline applies it. It does run the database
-migrations, because they must happen before a release.
+[`.gitlab-ci.yml`](.gitlab-ci.yml). The pipeline only builds and publishes: it tests, builds and scans the image, and
+for a version tag publishes that version and creates a GitLab Release. It never touches an environment or the deploy
+repository: the deploy repository chooses which published version each environment runs (its
+`environments/<env>/kustomization.yaml`), applies the database migrations with that image and rolls it out (the
+"pull" model, see its README).
 
 | Job | Stage | When | Does |
 | --- | --- | --- | --- |
 | `test:backend` | test | every pipeline | restore, format check, Release build (warnings are errors), every test suite (Testcontainers on Docker-in-Docker), JUnit report |
 | GitLab SAST, Secret Detection | test | every pipeline | GitLab's own analysers (included templates) |
-| `build:api` | build | every pipeline | builds and pushes `registry.gitlab.com/zeiss/backend/api:<short sha>` (BuildKit, layer cache in the registry); on a tag pipeline also `:<tag>` |
+| `build:api` | build | every pipeline | builds and pushes `registry.gitlab.com/zeiss/backend/api:<short sha>` (BuildKit, layer cache in the registry); in a tag pipeline it reuses that image when the pipeline on `main` already built it |
 | `migrations:sql` | build | every pipeline | the idempotent SQL script of all migrations (`dotnet ef migrations script --idempotent`), as an artifact to review in the merge request |
 | `scan:api` | scan | every pipeline | Trivy: full report to GitLab; fails on fixable critical vulnerabilities |
-| `migrate:staging` | staging | `main`, `STAGING_ENABLED` | [`ci/migrate.sh`](ci/migrate.sh) with this pipeline's image, seeding the sample data into an empty database |
-| `release:staging` | staging | after `migrate:staging` | [`ci/release.sh`](ci/release.sh) `staging`: commits `backend: api <sha>` to the deploy repository's `main` |
-| `migrate:production` | production | `main`, `STAGING_ENABLED` and `PRODUCTION_ENABLED`, **manual** | `ci/migrate.sh` against production, no sample data |
-| `release:production` | production | after `migrate:production` | `ci/release.sh production`: pushes a branch to the deploy repository and opens the merge request "Release api `<sha>` to production"; merging it releases |
+| `publish:api` | publish | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | after test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `v`) to the same image, so the version has the commit build's digest; the digest goes to `release` |
+| `release` | release | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | GitLab's `release:` keyword (image `release-cli`): the Release `vX.Y.Z`, with the image reference and digest and the commits since the previous version ([`ci/release-notes.sh`](ci/release-notes.sh)) |
 
-**`ci/migrate.sh`** runs the image's `migrate` command as a one-off pod in the environment's cluster
-(`kubectl run --rm --attach`: it streams the output, returns the exit code and leaves nothing behind), because the
-database is reachable only inside the cluster. It connects as the migrator with the host, database, user and password
-of the Secret `database-credentials` (none of them on a command line or in a CI/CD variable), creates the image pull
-Secret `gitlab-registry` from the group deploy token if needed, copies the Redis password into `redis-credentials`,
-and restarts the running API if that password changed. Variables: `ENVIRONMENT`, `API_IMAGE`, `KUBE_CONTEXT` or
-`KUBECONFIG`, `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`, `SEED_SAMPLE_DATA`.
+Which pipelines run: merge requests and `main` (test, build, scan), and tags that match
+`v<MAJOR>.<MINOR>.<PATCH>` with an optional `-rc.<N>`; any other tag starts no pipeline. Images on `main` are
+`api:<short sha>`: builds of a commit, which the deploy repository never picks up by itself. Only `api:X.Y.Z` tags are
+versions.
 
-**`ci/release.sh`** is the same script as in frontend: it clones the deploy repository with `DEPLOY_REPO_TOKEN`, sets
-the image's `newTag` with `yq`, and commits to `main` (staging, retrying up to 5 times if `main` moved) or pushes a
-branch with push options that open a merge request (production). `DRY_RUN=1` pushes nothing.
+**`ci/release-notes.sh`** (the same in frontend; POSIX `sh`, because the release-cli image has no bash):
+`ci/release-notes.sh <tag> <image reference>...` prints the Release's description in Markdown: the images with their
+digests, then `git log --no-merges` since the previous version tag (for a release `X.Y.Z` the previous release,
+skipping release candidates; for a release candidate the previous tag of any kind) and a compare link. To see what
+it would write: `ci/release-notes.sh v1.4.0 registry.gitlab.com/zeiss/backend/api:1.4.0` in a clone with the tags.
 
-**Migrations must be backward compatible** (expand/contract): they run while the previous version is still serving,
-and next to the new one during the rollout. A rollback is a revert in the deploy repository and never touches the
-schema; a bad migration is fixed forward.
+**Migrations must be backward compatible** (expand/contract): the deploy repository runs them while the previous
+version is still serving, and next to the new one during the rollout. A rollback (choosing an older version there)
+never touches the schema; a bad migration is fixed forward.
 
-| Variable | Scope | What |
+**No CI/CD variable is needed in this project:** the jobs use only what GitLab provides (`CI_REGISTRY_USER` /
+`CI_REGISTRY_PASSWORD` for the registry, the job token for the release). Two project settings matter:
+
+* **Protected tags** (Settings → Repository → Protected tags): `v*`, allowed to create: Maintainers. Only maintainers
+  can then release, and the publish and release jobs run with protected-branch rights.
+* **Tag immutability** of the container registry (Settings → Packages and registries → Container registry, protected
+  or immutable tags): a published version can never be overwritten or deleted.
+
+## How to release a version
+
+A version is a git tag on a commit of `main` that passed its pipeline. Versions follow
+[Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
+
+| Change since the previous version | Raise | Example |
 | --- | --- | --- |
-| `STAGING_ENABLED` | project or group | `"true"` creates `migrate:staging` and `release:staging` on `main` |
-| `PRODUCTION_ENABLED` | project or group | `"true"` creates the production jobs (manual); needs `STAGING_ENABLED` too |
-| `KUBE_CONTEXT` | staging, production | the cluster for the migrate jobs, through the GitLab agent: `<agent configuration project>:<agent name>` |
-| `KUBECONFIG` | staging, production | File, instead of `KUBE_CONTEXT`: a kubeconfig whose current context is the cluster |
-| `DEPLOY_REPO_TOKEN` | project; masked, protected | a project access token of the deploy repository, role Maintainer, scope `write_repository` |
+| a breaking change for clients: an endpoint, field, error code or behaviour removed or changed incompatibly (a client must change) | MAJOR | 1.4.0 → 2.0.0 |
+| new, backward compatible functionality: a new endpoint, an optional field, a new setting with a default | MINOR | 1.4.0 → 1.5.0 |
+| backward compatible fixes only (bugs, performance, security patches, dependencies) | PATCH | 1.4.0 → 1.4.1 |
+| a version to try first (a release candidate) | `-rc.N` | 1.5.0-rc.1, then 1.5.0 |
 
-The migrate jobs pull the image with the zeiss group's deploy token (`gitlab-deploy-token`, `read_registry`, passed by
-GitLab as `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`). No database or Redis password is a CI/CD variable: they live in the
-cluster (the deploy repository's `create-database.sh` makes `database-credentials` once per environment). Until
-`STAGING_ENABLED` is set the pipeline stops, green, after the scan.
+A database migration does not by itself make a major version: migrations are always backward compatible
+(expand/contract). Removing something clients use does.
+
+1. Merge the changes into `main` and wait for its pipeline (it builds `api:<short sha>`).
+2. Create the tag on that commit, from the UI (Code → Tags → New tag: name `v1.4.0`, create from `main`, a message) or
+   from a clone:
+
+   ```bash
+   git switch main && git pull
+   git tag -a v1.4.0 -m "v1.4.0: stock history export"
+   git push origin v1.4.0
+   ```
+
+3. The tag's pipeline tests and scans that commit again, publishes `registry.gitlab.com/zeiss/backend/api:1.4.0`
+   (`publish:api`) and creates the Release `v1.4.0` (Deploy → Releases), with the image, its digest and the changes.
+4. Nothing else here: staging picks `1.4.0` up by itself (the deploy repository's scheduled `update:staging` job takes
+   the newest `X.Y.Z`; release candidates only when someone sets them), and production changes through a merge request
+   in the deploy repository (`scripts/set-version.sh production api 1.4.0`). Its README has the details.
+
+A tag is never moved or reused: a fix is a new version (`v1.4.1`). Delete a wrong tag only before its pipeline
+published it.
 
 ## Design decisions
 
@@ -638,7 +741,8 @@ cluster (the deploy repository's `create-database.sh` makes `database-credential
 | Fail open on Redis | a cache outage costs speed, not availability |
 | The API issues its own ES256 tokens with a public JWKS | no external identity provider needed for registered clients; the gateway verifies without a secret |
 | Permissions, not roles, on endpoints | the role mapping lives in one place |
-| Migrations as a command of the same image, run before release | the schema and the code that needs it come from the same build; replicas never race to migrate; the app user never needs schema rights |
+| Migrations as a command of the same image, run before each rollout by the deploy repository | the schema and the code that needs it come from the same build; replicas never race to migrate; the app user never needs schema rights |
+| Versions as SemVer tags; the pipeline only publishes, the deploy repository pulls | this repository needs no access to any environment or to the deploy repository; a version is published only after its tests and scan; the same image digest from `main` to production; Argo CD Image Updater can follow the same tags |
 | Problem details (RFC 9457) with `errorCode` | one standard error shape that clients can branch on |
 
 ## Troubleshooting
@@ -655,4 +759,8 @@ cluster (the deploy repository's `create-database.sh` makes `database-credential
 | sign-in `429 too_many_failed_attempts` | 10 failed sign-ins from your IP within a minute | wait for `Retry-After` |
 | `503 idempotency_unavailable` | Redis unreachable and the request has an `Idempotency-Key` | fix Redis; retry with the same key |
 | integration tests fail at startup | Docker is not running (Testcontainers) | start Docker |
-| `migrate` fails with `permission denied for schema public` | it ran as `pm_app` | run it as the schema owner (`pm_migrator`), as `ci/migrate.sh` does |
+| `migrate` fails with `permission denied for schema public` | it ran as `pm_app` | run it as the schema owner (`pm_migrator`), as the deploy repository's `scripts/migrate.sh` does |
+| a tag starts no pipeline | the tag is not `vX.Y.Z` / `vX.Y.Z-rc.N` (e.g. `1.4.0` without `v`, or `v1.4`) | delete it and create `v1.4.0` |
+| `publish:api` fails: the tag cannot be overwritten | the version was published before (tag immutability) | versions are never reused: release `v1.4.1` |
+| `release` fails with `already exists` | a Release with that tag exists (a re-run) | nothing to do, or delete the Release in Deploy → Releases and retry the job |
+| the deploy repository does not see a new version | `publish:api` did not run (the tag pipeline failed before it), or the registry token there cannot read this registry | check the tag's pipeline; in deploy, `scripts/versions.sh api` |

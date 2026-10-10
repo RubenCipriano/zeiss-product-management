@@ -1,0 +1,11 @@
+# Argo CD's objects for this system, prepared but not installed: what `kubectl apply -k argocd/applications` creates in
+# the namespace argocd once Argo CD and Argo CD Image Updater run in the cluster (README.md, "Moving to Argo CD").
+#   staging.yaml         Application product-management-staging: environments/staging, synced automatically
+#   production.yaml      Application product-management-production: environments/production, synced by a person
+#   image-updater.yaml   ImageUpdater: lets Argo CD Image Updater act on the Applications that carry its annotations
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - staging.yaml
+  - production.yaml
+  - image-updater.yaml

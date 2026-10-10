@@ -1,0 +1,24 @@
+# Argo CD Application for production: environments/production on main of this repository, applied only when a person
+# presses Sync (or runs `argocd app sync product-management-production`), instead of the pipeline's deploy:production.
+#
+# Production is NOT updated by Argo CD Image Updater (no annotations here, no automated sync): which version runs in
+# production is a decision. It changes only through a merge request that sets the versions in
+# environments/production/kustomization.yaml (scripts/set-version.sh production ..., or the pipeline's
+# propose:production job); merging it and pressing Sync is the release. Argo CD shows the Application OutOfSync between
+# the merge and the sync, so nobody forgets it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: product-management-production
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://gitlab.com/zeiss/deploy.git
+    targetRevision: main
+    path: environments/production
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: product-management
+  # No `automated`: a person syncs. Pruning is chosen per sync (the Sync dialog), not automatic.
+  syncPolicy: {}
