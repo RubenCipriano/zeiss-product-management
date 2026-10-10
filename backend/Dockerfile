@@ -1,6 +1,6 @@
 # API image. Build from this folder:  docker build -t product-management/api:local .
 # The same image also runs the database migrations (`migrate` command), from the CI/CD pipeline before each rollout
-# (.gitlab-ci.yml) or from deploy/deploy.sh locally: the cluster itself never migrates.
+# (.gitlab-ci.yml) or by the deploy repository's scripts/deploy.sh locally: the cluster itself never migrates.
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src

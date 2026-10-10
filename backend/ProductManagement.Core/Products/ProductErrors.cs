@@ -42,7 +42,7 @@ public static class ProductErrors
             "product.version_mismatch",
             $"Product {id} has been modified since it was retrieved. Reload it and try again.");
 
-    // 503 rather than 409: no change to the request can fix it, only an operator widening the range (docs/adr/0002).
+    // 503 rather than 409: no change to the request can fix it, only an operator widening the range (ADR 0002).
     // As a server-side condition it shows up in 5xx alerting, and a retry with the same idempotency key stays allowed.
     public static Error IdsExhausted() =>
         Error.Unavailable(

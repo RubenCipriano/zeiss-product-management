@@ -1,5 +1,5 @@
 // A small browser-side cache for API reads, so going back to a page already seen is instant. Only GET requests that
-// ask for it are cached; any change sent to the API empties it. Details: docs/guide/03-caching.md.
+// ask for it are cached; any change sent to the API empties it. Details: the project guide, chapter 3 (caching).
 import { HttpContextToken, HttpInterceptorFn, HttpResponse } from '@angular/common/http';
 import { inject } from '@angular/core';
 import { concat, finalize, of, tap } from 'rxjs';

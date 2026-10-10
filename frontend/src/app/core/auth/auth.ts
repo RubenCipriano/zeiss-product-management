@@ -48,7 +48,7 @@ interface TokenResponse {
  *
  * Sign-in calls the API's own token endpoint (`POST /api/auth/token`). The token is a JWT signed by the API; this class
  * only reads its claims to show the user and their roles. The signature is checked by the gateway and the API on every
- * request (docs/guide/04-security.md).
+ * request (the project guide, chapter 4 (security)).
  *
  * The session is a signal: a value that templates and `computed` values re-read automatically when it changes. So
  * signing in or out updates the top bar and every permission check at once.

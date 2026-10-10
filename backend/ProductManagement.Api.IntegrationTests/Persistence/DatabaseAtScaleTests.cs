@@ -4,7 +4,7 @@ using ProductManagement.Api.IntegrationTests.Infrastructure;
 namespace ProductManagement.Api.IntegrationTests.Persistence;
 
 /// <summary>
-/// The physical design the large-catalogue measurements rely on (docs/adr/0022-database-at-scale.md), as the
+/// The physical design the large-catalogue measurements rely on (ADR 0022 (database at scale)), as the
 /// migrations create it: each index serves a query, and the hot tables are vacuumed early enough for index-only scans.
 /// </summary>
 public class DatabaseAtScaleTests(ApiFixture fixture) : ApiTestBase(fixture)

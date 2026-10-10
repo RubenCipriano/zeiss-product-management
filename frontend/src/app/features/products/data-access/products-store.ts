@@ -48,7 +48,7 @@ interface LoadedPage {
  *
  * Data flows one way: a component calls a method (`setFilter`, `setPage`, `update`...), the store changes `query`, and
  * `rxResource` (a signal-driven loader: it re-runs its request whenever its `params` change, cancelling the one in
- * flight) fetches the new page. Background: docs/adr/0007-frontend-state.md, docs/guide/07-frontend.md.
+ * flight) fetches the new page. Background: ADR 0007 (frontend state), the project guide, chapter 7 (frontend).
  */
 @Service({ autoProvided: false })
 export class ProductsStore {

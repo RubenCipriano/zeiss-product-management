@@ -11,7 +11,7 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
         protected override void Up(MigrationBuilder migrationBuilder)
         {
             // Storage parameters only (ALTER TABLE ... SET): metadata, instant on any size, and the lock it takes
-            // (SHARE UPDATE EXCLUSIVE) blocks neither reads nor writes. Why these values: docs/adr/0022-database-at-scale.md.
+            // (SHARE UPDATE EXCLUSIVE) blocks neither reads nor writes. Why these values: ADR 0022 (database at scale).
             migrationBuilder.AlterTable(
                 name: "stock_movements")
                 .Annotation("Npgsql:StorageParameter:autovacuum_vacuum_insert_scale_factor", 0)

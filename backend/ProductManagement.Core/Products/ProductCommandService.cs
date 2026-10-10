@@ -18,7 +18,7 @@ namespace ProductManagement.Core.Products;
 /// <remarks>
 /// Edits and deletes are protected against lost updates: if the product changed after the client read it
 /// (<c>If-Match</c>) or after we loaded it, the change is refused instead of silently overwriting the newer data.
-/// See docs/adr/0004-optimistic-concurrency.md.
+/// See ADR 0004 (optimistic concurrency).
 /// </remarks>
 internal partial class ProductCommandService(
     IProductRepository products,

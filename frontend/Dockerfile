@@ -9,8 +9,8 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
-# The release, reported with the browser's errors (core/observability): deploy/deploy.sh and the pipeline pass the
-# image tag.
+# The release, reported with the browser's errors (core/observability): the deploy repository's
+# scripts/deploy.sh and the pipeline pass the image tag.
 ARG APP_VERSION=dev
 RUN npm run build -- --define "APP_VERSION='${APP_VERSION}'"
 

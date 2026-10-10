@@ -32,7 +32,7 @@ internal class ProductConfiguration : IEntityTypeConfiguration<Product>
         // Autovacuum (PostgreSQL's background clean-up) runs much sooner than its default of 20% of the rows: after
         // ~5,000 changed rows. Every stock change rewrites a product row, and until vacuum has run, the fast
         // index-only reads behind counts and list pages must also visit the table. The table is small, so a vacuum
-        // costs seconds. Measured in docs/adr/0022-database-at-scale.md.
+        // costs seconds. Measured in ADR 0022 (database at scale).
         // Fractions as strings: the provider formats a double with the current culture ("0,005" in Portuguese).
         builder.HasStorageParameter("autovacuum_vacuum_scale_factor", "0.005");
         builder.HasStorageParameter("autovacuum_vacuum_threshold", 1000);
@@ -78,7 +78,7 @@ internal class ProductConfiguration : IEntityTypeConfiguration<Product>
             .HasOperators("gin_trgm_ops");
 
         // stock-level?min=&max= filters on stock and orders by (stock, name, id): with all three in one index, a page
-        // is read in order from the index alone, with no sort. Measured in docs/adr/0022-database-at-scale.md.
+        // is read in order from the index alone, with no sort. Measured in ADR 0022 (database at scale).
         builder.HasIndex(product => new { product.StockQuantity, product.Name, product.Id })
             .HasDatabaseName("ix_products_stock_quantity_name_id");
 

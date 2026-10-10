@@ -52,7 +52,7 @@ public class TokenSigningKey : IDisposable
         {
             throw new InvalidOperationException(
                 $"'{AuthenticationOptions.SectionName}:SigningKey' is missing: a PEM-encoded ECDSA P-256 private key " +
-                "(for `dotnet run`, deploy/local-secrets.sh creates one in the user-secrets).");
+                "(for `dotnet run`, store one in the user-secrets: README.md).");
         }
 
         var key = ECDsa.Create();

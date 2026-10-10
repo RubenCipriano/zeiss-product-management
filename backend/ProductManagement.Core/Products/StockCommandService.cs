@@ -14,7 +14,7 @@ namespace ProductManagement.Core.Products;
 /// </summary>
 /// <remarks>
 /// It deliberately does not load the product, change it and save it back: with many simultaneous requests that would
-/// oversell or fail with needless conflicts. See docs/adr/0003-atomic-stock-updates.md.
+/// oversell or fail with needless conflicts. See ADR 0003 (atomic stock updates).
 /// </remarks>
 internal partial class StockCommandService(
     IProductRepository products,

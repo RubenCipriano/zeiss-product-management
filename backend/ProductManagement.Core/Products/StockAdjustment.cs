@@ -10,7 +10,7 @@ namespace ProductManagement.Core.Products;
 /// <remarks>
 /// The rule is a range, not a check against a loaded product, so the database can check and change the stock in one
 /// conditional <c>UPDATE ... WHERE stock BETWEEN min AND max</c>. Check and write then happen as one step, which keeps
-/// stock correct when many requests change the same product at once. See docs/adr/0003-atomic-stock-updates.md.
+/// stock correct when many requests change the same product at once. See ADR 0003 (atomic stock updates).
 /// </remarks>
 public class StockAdjustment
 {

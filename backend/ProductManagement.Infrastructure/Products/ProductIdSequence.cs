@@ -9,7 +9,7 @@ namespace ProductManagement.Infrastructure.Products;
 /// <remarks>
 /// <c>nextval()</c> is atomic and non-transactional: concurrent callers, from any number of API instances,
 /// never receive the same value, even if their transactions roll back. The range is limited to six-digit
-/// numbers and <c>NO CYCLE</c> guarantees an identifier is never reused. See docs/adr/0002.
+/// numbers and <c>NO CYCLE</c> guarantees an identifier is never reused. See ADR 0002.
 /// </remarks>
 internal static class ProductIdSequence
 {

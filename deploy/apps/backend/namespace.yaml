@@ -1,0 +1,7 @@
+# The application's namespace, for the API (apps/backend) and the web app and gateway (apps/frontend).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: product-management
+  labels:
+    app.kubernetes.io/part-of: product-management

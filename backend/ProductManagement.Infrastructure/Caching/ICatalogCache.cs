@@ -3,7 +3,7 @@ namespace ProductManagement.Infrastructure.Caching;
 /// <summary>
 /// The product cache. Instead of deleting entries when data changes, every key includes one or more "generations"
 /// (change counters), and a write increments them: entries saved under the old numbers are simply never asked for
-/// again, and expire on their own. See docs/adr/0008-redis-cache.md.
+/// again, and expire on their own. See ADR 0008 (redis cache).
 /// </summary>
 /// <remarks>
 /// <para>

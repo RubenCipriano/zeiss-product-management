@@ -42,7 +42,7 @@ const MAX_QUEUED = 10;
 
 /**
  * Sends the errors that happen in users' browsers to the log system (Loki), next to the gateway's and the API's logs,
- * so a developer can see them (docs/guide/08-observability.md). Uses Grafana Faro, a small browser SDK, loaded after
+ * so a developer can see them (the project guide, chapter 8 (observability)). Uses Grafana Faro, a small browser SDK, loaded after
  * the page has rendered.
  *
  * Errors only: whatever reaches Angular's ErrorHandler (ReportingErrorHandler) and `console.error`. No performance

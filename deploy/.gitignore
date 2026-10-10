@@ -1,0 +1,17 @@
+# Local environment files (e.g. LOKI_PASSWORD for another Loki): never committed
+.env
+
+# Made on each machine by scripts/deploy.sh local and scripts/local-secrets.sh: the local signing key, the demo
+# consumers' hashes and the tags of the images built here
+environments/local/generated/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# Local tools: editor settings, AI assistants and their MCP servers (never committed)
+.vscode/
+.claude/
+.mcp.json

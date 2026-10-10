@@ -24,7 +24,7 @@ public enum StockMovementReason
 /// </summary>
 /// <remarks>
 /// Entries are only ever added, never changed, and for every product they add up to its current stock.
-/// See docs/adr/0016-stock-ledger.md.
+/// See ADR 0016 (stock ledger).
 /// </remarks>
 public class StockMovement
 {

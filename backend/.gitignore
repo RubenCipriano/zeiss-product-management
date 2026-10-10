@@ -335,10 +335,6 @@ paket-files/
 __pycache__/
 *.pyc
 
-# Cake - Uncomment if you are using it
-# tools/**
-# !tools/packages.config
-
 # Tabs Studio
 *.tss
 
@@ -478,12 +474,6 @@ $RECYCLE.BIN/
 
 # Reqnroll: code generated from .feature files at build time
 *.feature.cs
-
-# Deployment (deploy/): files generated on each machine, never committed
-# The overlay with this release's image pinned, rendered by deploy/deploy.sh
-deploy/k8s/.build/
-# Local signing key, demo consumers' hashes and local passwords, created by deploy/local-secrets.sh
-deploy/k8s/overlays/local/generated/
 
 # Local tools: editor settings, AI assistants and their MCP servers (never committed)
 .vscode/

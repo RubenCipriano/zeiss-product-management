@@ -22,7 +22,7 @@ internal static class RateLimitingServiceCollectionExtensions
     /// Per-user limits are shared by all replicas (token buckets in Redis), so a user's allowance does not grow as the
     /// autoscaler adds pods. If Redis is unavailable each replica falls back to its own in-memory bucket. The token
     /// endpoint's per-IP limit stays per replica; its cluster-wide guard is the failed-attempt throttle.
-    /// See docs/adr/0010.
+    /// See ADR 0010.
     /// </remarks>
     public static IServiceCollection AddApiRateLimiting(this IServiceCollection services)
     {

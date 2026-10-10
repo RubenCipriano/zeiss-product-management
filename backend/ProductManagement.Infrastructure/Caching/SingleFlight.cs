@@ -5,7 +5,7 @@ namespace ProductManagement.Infrastructure.Caching;
 /// <summary>
 /// Makes simultaneous cache misses for the same key share one database query (per replica). Without it, when a
 /// popular entry expires, every request in flight runs the same expensive query at once (a "cache stampede";
-/// measured in docs/adr/0008-redis-cache.md).
+/// measured in ADR 0008 (redis cache)).
 /// </summary>
 internal class SingleFlight
 {

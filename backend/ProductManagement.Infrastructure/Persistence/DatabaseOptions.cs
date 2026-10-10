@@ -9,8 +9,9 @@ internal class DatabaseOptions
 
     /// <summary>
     /// Applies pending EF Core migrations when the API starts. Convenient for local development and the in-memory test
-    /// host. Deployments instead run migrations once, before the rollout: the CI/CD pipeline (or deploy/deploy.sh
-    /// locally) runs the API image's <c>migrate</c> command with the migrator's database credentials.
+    /// host. Deployments instead run migrations once, before the rollout: the CI/CD pipeline (or the deploy
+    /// repository's scripts/deploy.sh locally) runs the API image's <c>migrate</c> command with the migrator's
+    /// database credentials.
     /// </summary>
     public bool ApplyMigrationsOnStartup { get; init; }
 

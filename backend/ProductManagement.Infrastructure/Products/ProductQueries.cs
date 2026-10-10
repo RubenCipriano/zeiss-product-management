@@ -55,7 +55,7 @@ internal class ProductQueries(ProductManagementDbContext context)
     /// One page of a listing, in three steps: count the matches, find the page's ids, then read just those rows by id
     /// (a "late row lookup"). Finding the ids only walks an index, never the table, so deep pages stay fast; and the
     /// cache can keep the expensive part (count and ids) across stock changes, which only affect the rows (see
-    /// <see cref="Caching.CachingProductQueries"/>). Measured in docs/adr/0022-database-at-scale.md.
+    /// <see cref="Caching.CachingProductQueries"/>). Measured in ADR 0022 (database at scale).
     /// </summary>
     /// <param name="count">The total number of matching products (by default <see cref="CountAsync"/>).</param>
     /// <param name="pageIds">The page's ids, in order (by default <see cref="PageIdsAsync"/>).</param>
@@ -125,7 +125,7 @@ internal class ProductQueries(ProductManagementDbContext context)
 
         // Late row lookup, as for the product lists: find the page's ids in the (product_id, occurred_at, id) index,
         // then read only those rows. A plain OFFSET would read every skipped movement from the table too, and a busy
-        // product's movements are scattered over the whole ledger. Measured in docs/adr/0022-database-at-scale.md.
+        // product's movements are scattered over the whole ledger. Measured in ADR 0022 (database at scale).
         var pageIds = history
             .OrderByDescending(movement => movement.OccurredAt)
             .ThenByDescending(movement => movement.Id)

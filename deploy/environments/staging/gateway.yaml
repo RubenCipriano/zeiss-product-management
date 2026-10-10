@@ -1,0 +1,25 @@
+# The gateway's staging settings: only what differs from apps/frontend/gateway.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: product-management
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            # The API in the same cluster (apps/backend): its headless Service, port 8080.
+            - name: API_UPSTREAM
+              value: api.product-management.svc.cluster.local:8080
+            - name: JWKS_URL
+              value: http://api.product-management.svc.cluster.local:8080/.well-known/jwks.json
+            # The log collector of the shared infrastructure (infra/logs.yaml, namespace infra); ""
+            # drops the browser's error reports.
+            - name: COLLECTOR_UPSTREAM
+              value: alloy-faro.infra.svc.cluster.local:12347
+            # Behind the Ingress controller: trust its pod network (k3s default: 10.42.0.0/16) for the real client
+            # address (X-Forwarded-For).
+            - name: GATEWAY_TRUSTED_PROXIES
+              value: 10.42.0.0/16

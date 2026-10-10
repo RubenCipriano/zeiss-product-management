@@ -1,39 +1,33 @@
-# CI/CD pipeline of the frontend repository (the web app and the gateway) for GitLab. Thin by design: every step is
-# a script in this repository that also runs on a laptop; this file only wires them together, with the images,
-# variables and gates.
+# CI pipeline of the frontend repository (the web app and the gateway) for GitLab. It tests, builds and scans the two
+# images and releases them. It never applies Kubernetes manifests: an environment is what the deploy repository
+# (gitlab.com/zeiss/deploy) holds in environments/<environment>/kustomization.yaml, and the deploy repository's own
+# pipeline applies it (GitOps). Releasing means committing the new image tags there.
 #
-#   test ──► build ──► scan ──► staging ──► verify ──► production
-#   lint,     web and   Trivy    deploy      Playwright  deploy
-#   unit,     gateway   (fail on (automatic) E2E against (manual, protected)
-#   build,    images    critical)            staging
-#   manifests
+#   test ─────► build ─────► scan ──────► staging ─────────────────────────► production (manual)
+#   lint,       web and      Trivy        release:staging: commits           release:production: opens a merge
+#   format,     gateway      (fails on    "frontend: web, gateway <sha>"     request in deploy; merging it is the
+#   unit tests, images       critical)    to the deploy repository's main    release, its pipeline then applies it
+#   build
 #
-# Merge request pipelines run test, build and scan. Pipelines on the default branch also deploy to staging
-# (automatically), verify it in a real browser, and offer production as a manual, protected step, each only once that
-# environment is switched on (STAGING_ENABLED, PRODUCTION_ENABLED below); until then they stop after scan. Tag
-# pipelines build and scan. The API has its own repository and pipeline (backend); the gateway reaches it in the same
-# cluster.
+# Merge request pipelines run test, build and scan. Pipelines on the default branch also release to staging
+# (automatically) and offer production (manual), each only once that environment is switched on (STAGING_ENABLED,
+# PRODUCTION_ENABLED below); until then they stop after scan. Tag pipelines build and scan.
 #
-# Setup (runners, the cluster's access, environments, CI/CD variables): docs/guide/12-from-zero.md.
+# The end-to-end tests (Playwright, e2e/) are not a job here: they need the whole running system (gateway, API, Redis,
+# PostgreSQL). Run them against an environment: BASE_URL=https://<environment host> npm run e2e (README.md).
 #
-# Project- or group-level CI/CD variables (not scoped to an environment: rules cannot see environment-scoped ones):
-#   STAGING_ENABLED             "true" creates the staging jobs (deploy, verify) on the default branch
-#   PRODUCTION_ENABLED          "true" creates the production job (manual); needs STAGING_ENABLED too, production
-#                               deploys only what staging verified
-# A project deploy token named exactly `gitlab-deploy-token` with the read_registry scope (Settings → Repository →
-# Deploy tokens): GitLab passes it to the jobs as CI_DEPLOY_USER / CI_DEPLOY_PASSWORD, and the deploy jobs store it
-# in the cluster as the Secret the pods pull the images with (deploy/ci/deploy-environment.sh).
+# Project- or group-level CI/CD variables:
+#   STAGING_ENABLED       "true" creates release:staging on the default branch
+#   PRODUCTION_ENABLED    "true" creates release:production (manual); needs STAGING_ENABLED too
+#   DEPLOY_REPO_TOKEN     masked, protected: a project access token of zeiss/deploy with the role Maintainer and the
+#                         scope write_repository; the release jobs push the new tags with it (ci/release.sh)
+# The cluster pulls the images with the zeiss group's deploy token (gitlab-deploy-token, read_registry), which the
+# deploy repository's pipeline stores in the cluster: nothing to set here for that.
 #
-# Environment-scoped CI/CD variables (Settings → CI/CD → Variables, one value per environment scope):
-#   KUBE_CONTEXT                <agent configuration project path>:<agent name> (the GitLab agent for Kubernetes), or
-#   KUBECONFIG                  File: a kubeconfig whose current context is the cluster (e.g. a self-hosted runner
-#                               next to a k3s server); one of the two
-#   staging only (verify):      E2E_VIEWER_SECRET, E2E_CLERK_SECRET, E2E_MANAGER_SECRET (masked): the secrets of the
-#                               consumers viewer, clerk and manager registered in staging's API (backend: API_CONSUMERS)
+# With Argo CD (see the deploy repository) nothing changes here: Argo CD watches the deploy repository instead of its
+# pipeline doing the applying.
 #
-# Runners: no job has tags, so they all run on gitlab.com's shared runners. To run them on your own runner instead,
-# register it (Docker executor, privileged for docker:dind) with "Run untagged jobs" and turn off instance runners for
-# the project.
+# Runners: no job has tags, so they all run on gitlab.com's shared runners.
 
 workflow:
   name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
@@ -47,7 +41,7 @@ workflow:
   auto_cancel:
     on_new_commit: interruptible
 
-stages: [test, build, scan, staging, verify, production]
+stages: [test, build, scan, staging, production]
 
 include:
   # GitLab's own analysers (results in the security widget / vulnerability report where the tier has them).
@@ -59,13 +53,11 @@ variables:
   # Registry settings so a tag can never be overwritten.
   WEB_IMAGE: $CI_REGISTRY_IMAGE/web:$CI_COMMIT_SHORT_SHA
   GATEWAY_IMAGE: $CI_REGISTRY_IMAGE/gateway:$CI_COMMIT_SHORT_SHA
-  # Public URLs (the Ingress hosts in deploy/k8s/overlays/<environment>/ingress.yaml); override in the project.
-  STAGING_URL: https://staging.products.example.com
-  PRODUCTION_URL: https://products.example.com
+  # The repository that holds the environments (ci/release.sh).
+  DEPLOY_REPO_URL: https://gitlab.com/zeiss/deploy.git
   # Tool images, pinned (bump them with Renovate or by hand).
   NODE_IMAGE: node:24.20.0-bookworm-slim                          # = .nvmrc (24)
-  PLAYWRIGHT_IMAGE: mcr.microsoft.com/playwright:v1.64.0-noble    # = @playwright/test in package-lock.json
-  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11                            # bash, kubectl 1.34 (Kustomize), kubeconform, yq, jq
+  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11                            # bash, git, yq
   DOCKER_IMAGE: docker:29.8.2-cli
   DIND_IMAGE: docker:29.8.2-dind
   BUILDKIT_IMAGE: moby/buildkit:v0.33.1
@@ -87,9 +79,8 @@ default:
       prefix: npm
     paths: [.npm]
 
-# The environments' jobs exist only on the default branch and once the environment is switched on: without a cluster
-# they would fail, and a red pipeline on main would hide the result of test, build and scan. Production also needs
-# staging: it deploys only what staging verified.
+# The release jobs exist only on the default branch and once the environment is switched on. Production also needs
+# staging: it is offered only what staging already runs.
 .staging:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
@@ -113,17 +104,9 @@ test:frontend:
       junit: reports/junit.xml
     expire_in: 30 days
 
-# The base and every overlay render and are valid; the gateway knows where the API and the collector are.
-test:manifests:
-  stage: test
-  image: $KUBE_TOOLS_IMAGE
-  needs: []
-  script:
-    - deploy/ci/validate-manifests.sh
-
 # ─── build ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-# BuildKit through docker:dind: the same Dockerfiles and `docker build` as deploy/deploy.sh, with a layer cache kept in
+# BuildKit through docker:dind: the same Dockerfiles and `docker build` as a local build, with a layer cache kept in
 # the registry (fast rebuilds on fresh runners). The runner must allow privileged containers (gitlab.com's Linux
 # runners do). APP_VERSION is the release the web app reports with its browser errors (the gateway ignores it).
 .build-image:
@@ -205,77 +188,44 @@ scan:gateway:
   variables:
     IMAGE: $GATEWAY_IMAGE
 
-# ─── deployment, shared by staging and production ───────────────────────────────────────────────────────────────────
+# ─── staging (automatic on the default branch) ──────────────────────────────────────────────────────────────────────
 
-# Selects the cluster (KUBE_CONTEXT or KUBECONFIG), creates the image pull Secret (the deploy token) and rolls out the
-# web app and the gateway with this pipeline's images (deploy/ci/deploy-environment.sh → deploy/deploy.sh). With the
-# GitLab agent for Kubernetes (KUBE_CONTEXT) the cluster's API is never exposed to the runners; a KUBECONFIG suits a
-# self-hosted runner next to the cluster.
-.deploy:
-  image: $KUBE_TOOLS_IMAGE
-  interruptible: false
-  script:
-    - deploy/ci/deploy-environment.sh
-  artifacts:
-    when: always
-    paths: [deploy/k8s/.build/]
-    expire_in: 90 days
-
-# ─── staging ────────────────────────────────────────────────────────────────────────────────────────────────────────
-
-deploy:staging:
-  extends: [.deploy, .staging]
+# Commits "frontend: web, gateway <sha>" to the deploy repository's main (environments/staging/kustomization.yaml);
+# the deploy repository's pipeline applies it and smoke-checks staging. Starts again from the new main if it moved
+# meanwhile (e.g. the backend released at the same moment).
+release:staging:
+  extends: .staging
   stage: staging
-  needs: [build:web, build:gateway, scan:web, scan:gateway, test:frontend, test:manifests]
+  image: $KUBE_TOOLS_IMAGE
+  needs: [build:web, build:gateway, scan:web, scan:gateway, test:frontend]
+  interruptible: false
   environment:
     name: staging
-    url: $STAGING_URL
-    deployment_tier: staging
+    action: prepare
   resource_group: staging
-  variables:
-    ENVIRONMENT: staging
-
-# ─── verify (against staging) ───────────────────────────────────────────────────────────────────────────────────────
-
-# The user journeys in a real browser, desktop and phone, against staging (gateway, API, Redis, PostgreSQL). Needs the
-# consumers viewer, clerk and manager registered in staging's API, with their secrets in E2E_<ROLE>_SECRET, and the
-# sample catalogue (paging needs more than 3 pages). The browser-errors test is skipped: it reads Loki through a port-forward on a laptop.
-verify:e2e:
-  extends: [.npm-cache, .staging]
-  stage: verify
-  image: $PLAYWRIGHT_IMAGE
-  needs: [deploy:staging]
-  environment:
-    name: staging
-    action: verify
-  variables:
-    BASE_URL: $STAGING_URL
-    PLAYWRIGHT_CHANNEL: chromium
   script:
-    - npm ci --no-audit --no-fund
-    - npm run e2e
-  artifacts:
-    when: on_failure
-    paths: [e2e/reports/playwright, test-results]
-    expire_in: 14 days
+    - ci/release.sh staging
+      product-management/web="$CI_COMMIT_SHORT_SHA" product-management/gateway="$CI_COMMIT_SHORT_SHA"
 
 # ─── production (manual, protected) ─────────────────────────────────────────────────────────────────────────────────
 
-# The release decision: only users allowed to deploy to the protected `production` environment can start it.
-# Rollback: Deployments → Environments → production → re-deploy an earlier successful deployment (its images and
-# manifests).
-deploy:production:
-  extends: .deploy
+# The release decision: only users allowed to deploy to the protected `production` environment can start it. Pushes a
+# branch to the deploy repository that sets production's web and gateway tags to these images, with push options that
+# open the merge request "Release web, gateway <sha> to production". Merging it is the release; the deploy
+# repository's pipeline then applies production. Rollback: revert that merge in the deploy repository.
+release:production:
   stage: production
-  needs: [build:web, build:gateway, scan:web, scan:gateway, verify:e2e]
+  image: $KUBE_TOOLS_IMAGE
+  needs: [release:staging]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true" && $PRODUCTION_ENABLED == "true"
       when: manual
   allow_failure: false
+  interruptible: false
   environment:
     name: production
-    url: $PRODUCTION_URL
-    deployment_tier: production
+    action: prepare
   resource_group: production
-  variables:
-    ENVIRONMENT: production
+  script:
+    - ci/release.sh production
+      product-management/web="$CI_COMMIT_SHORT_SHA" product-management/gateway="$CI_COMMIT_SHORT_SHA"

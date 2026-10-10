@@ -40,7 +40,7 @@ internal static partial class ApiCommandLine
         }
 
         // `dotnet ProductManagement.Api.dll migrate`: apply migrations and exit. Run by the CI/CD pipeline (or
-        // deploy/deploy.sh locally) before the rollout, so schema changes run once per deployment, with the schema
+        // the deploy repository's scripts/deploy.sh locally) before the rollout, so schema changes run once per deployment, with the schema
         // owner's credentials, instead of on every replica start.
         if (args.Contains(MigrateCommand, StringComparer.OrdinalIgnoreCase))
         {

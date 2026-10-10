@@ -1,0 +1,147 @@
+# Redis 8 for every service of the platform, in the shared namespace `infra`: a cache, password protected.
+#   scripts/infra.sh up redis          (creates the Secret redis-auth first, then applies this file)
+#
+#   ConfigMap redis-config      the settings (redis.conf)
+#   Service redis               redis.infra.svc.cluster.local:6379, inside the cluster only
+#   Deployment redis            1 replica, memory only
+#
+# The password: Secret redis-auth (key `password`, random, created by infra.sh, never committed). A service copies it
+# into its own namespace (scripts/deploy.sh does: Secret redis-credentials), since a pod can only read
+# Secrets of its own namespace. Services that share this Redis separate their data by key prefix.
+#
+# A Deployment, not a StatefulSet: nothing is persisted (a restart starts with an empty cache, which costs a few
+# database reads, never data), so the pod needs neither a volume nor a stable identity.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/part-of: infra
+data:
+  # Changing it: scripts/infra.sh up redis (restarts Redis, which empties the cache).
+  redis.conf: |
+    # The password is passed on the command line from the Secret redis-auth, never written here.
+    bind 0.0.0.0
+    port 6379
+    protected-mode yes
+
+    # A pure cache: nothing is persisted. Losing it costs a few database reads, never data.
+    save ""
+    appendonly no
+
+    # volatile-lru evicts only keys with a TTL (cached responses, rate-limit buckets, idempotency records), so the
+    # cache-generation counters, which have no TTL, survive memory pressure.
+    maxmemory 256mb
+    maxmemory-policy volatile-lru
+
+    # Commands that wipe the server are not for the applications.
+    rename-command FLUSHALL ""
+    rename-command FLUSHDB ""
+    rename-command DEBUG ""
+
+    # Across untrusted networks also: TLS (tls-port, tls-cert-file, tls-key-file) and ACL users per service instead
+    # of one shared password.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/part-of: infra
+spec:
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/part-of: infra
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  # The old pod stops before the new one starts: never two caches answering at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: redis
+        app.kubernetes.io/part-of: infra
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      # On a cluster with a node labelled infra/role=cache (add-node.sh), Redis prefers it and tolerates its taint;
+      # without one it runs anywhere.
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - { key: infra/role, operator: In, values: [cache] }
+      tolerations:
+        - { key: infra/role, operator: Equal, value: cache, effect: NoSchedule }
+      containers:
+        - name: redis
+          image: redis:8-alpine
+          # $(REDIS_PASSWORD) is replaced by the kubelet with the variable below.
+          args: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "$(REDIS_PASSWORD)"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom: { secretKeyRef: { name: redis-auth, key: password } }
+            # redis-cli (the probes, and `kubectl exec`) reads the password from here.
+            - name: REDISCLI_AUTH
+              valueFrom: { secretKeyRef: { name: redis-auth, key: password } }
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec: { command: [redis-cli, ping] }
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec: { command: [redis-cli, ping] }
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 4
+          # maxmemory (256 MB) plus Redis' own overhead.
+          resources:
+            requests: { cpu: 100m, memory: 300Mi }
+            limits: { cpu: "1", memory: 384Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /usr/local/etc/redis, readOnly: true }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: config
+          configMap:
+            name: redis-config
+        # The working directory; nothing is saved to it (save "", appendonly no).
+        - name: data
+          emptyDir: {}

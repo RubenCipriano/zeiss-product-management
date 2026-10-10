@@ -8,7 +8,7 @@ namespace ProductManagement.Infrastructure.Persistence.Migrations
     /// What the API's database user may do: read and write rows and draw ids, on today's tables and sequences and on
     /// every one a later migration creates. Nothing else: no DDL, so a bug or an injected query cannot change the
     /// schema. The users themselves (pm_migrator owns the schema and runs this; pm_app is the API) are created by the
-    /// platform, not by a migration: <c>infra/create-database.sh product-management product_management pm_app
+    /// platform, not by a migration: <c>scripts/create-database.sh product-management product_management pm_app
     /// pm_migrator</c>.
     /// </summary>
     /// <remarks>

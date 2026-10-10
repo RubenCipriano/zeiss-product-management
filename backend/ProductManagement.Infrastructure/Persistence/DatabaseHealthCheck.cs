@@ -11,7 +11,7 @@ namespace ProductManagement.Infrastructure.Persistence;
 /// Why a pool of its own: a check that waits for a free connection in the busy request pool times out under load, and
 /// Kubernetes then takes busy-but-healthy replicas out of service, several at once, exactly when they are needed. Its
 /// timeouts stay below the probe's 3 s, so an unreachable database is reported as unhealthy rather than as a probe
-/// timeout. See docs/adr/0018-autoscaling-and-scale-testing.md.
+/// timeout. See ADR 0018 (autoscaling and scale testing).
 /// </remarks>
 internal class DatabaseHealthCheck : IHealthCheck, IAsyncDisposable
 {

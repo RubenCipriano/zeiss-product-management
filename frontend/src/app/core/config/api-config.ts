@@ -5,7 +5,7 @@ import { InjectionToken } from '@angular/core';
  * could point it elsewhere.
  *
  * Relative by default: in development the Angular dev server proxies `/api` to the backend
- * (proxy.conf.json), and in Docker nginx does the same. The browser therefore always talks to a
+ * (proxy.conf.mjs), and in Docker nginx does the same. The browser therefore always talks to a
  * single origin and no CORS configuration is needed.
  */
 export const API_BASE_URL = new InjectionToken<string>('API_BASE_URL', {

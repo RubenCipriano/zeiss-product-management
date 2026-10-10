@@ -1,0 +1,1184 @@
+# The logs of everything in the cluster, where they are kept and how they are shown, in the shared namespace `infra`.
+#   scripts/infra.sh up logs           (also loads dashboards/ into the ConfigMap grafana-dashboards)
+#
+#   loki      StatefulSet + PVC: stores the logs, 14 days. Service loki:3100
+#   grafana   Deployment: dashboards (folder "Product Management") and the 12 alert rules. Service grafana:3000
+#             kubectl -n infra port-forward svc/grafana 3000:3000      →  http://localhost:3000
+#   alloy     Deployment: collects the logs of every pod in every namespace, and the browser's error reports
+#             (Service alloy-faro:12347, reachable only from the gateway)
+#
+# Another Loki instead of this one (e.g. Grafana Cloud): LOKI_URL=... scripts/infra.sh up logs. Then only Alloy is applied
+# (`kubectl apply -l app.kubernetes.io/name=alloy`), Loki and Grafana are removed (Loki's volume is kept), and Alloy
+# pushes to LOKI_URL with the credentials of the Secret loki-external.
+#
+# Nothing a service has to do: it writes its logs to stdout and they appear in Loki as
+# {namespace="<its namespace>", app="<its app.kubernetes.io/name label>"}.
+
+# ─── Loki ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+data:
+  # A single process with its data on its volume under /loki: the image's default configuration
+  # (/etc/loki/local-config.yaml in grafana/loki:3.5.5), plus an explicit retention: logs are deleted after 14 days.
+  # Without it Loki keeps everything until the disk is full. Changing it: scripts/infra.sh up logs (restarts Loki).
+  loki.yaml: |
+    auth_enabled: false
+
+    server:
+      http_listen_port: 3100
+
+    common:
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+
+    schema_config:
+      configs:
+        - from: 2020-10-24
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+
+    # Retention is applied by the compactor: every 10 minutes it marks chunks older than retention_period and deletes
+    # them 2 hours later. 14 days covers "what happened last week" and keeps the disk bounded; production would keep
+    # 30 days or more in object storage (docs/guide/08-observability.md).
+    compactor:
+      working_directory: /loki/compactor
+      compaction_interval: 10m
+      retention_enabled: true
+      retention_delete_delay: 2h
+      delete_request_store: filesystem
+
+    limits_config:
+      retention_period: 336h
+
+    # Alerting is done by Grafana (the ConfigMap grafana-alerting), not by Loki's ruler.
+    ruler:
+      alertmanager_url: http://localhost:9093
+
+    # No usage statistics sent to Grafana Labs.
+    analytics:
+      reporting_enabled: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+spec:
+  selector:
+    app.kubernetes.io/name: loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: http
+---
+# A StatefulSet for its volume (data-loki-0, 10 GiB), like PostgreSQL. One replica: Loki in "monolithic" mode with
+# its data on the local disk; at a larger scale Loki keeps its chunks in object storage instead.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loki
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+spec:
+  serviceName: loki
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loki
+        app.kubernetes.io/component: logs
+        app.kubernetes.io/part-of: infra
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: loki
+          image: grafana/loki:3.5.5
+          args: ["-config.file=/etc/loki/loki.yaml"]
+          ports:
+            - name: http
+              containerPort: 3100
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /loki }
+            - { name: config, mountPath: /etc/loki, readOnly: true }
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: loki
+          app.kubernetes.io/component: logs
+          app.kubernetes.io/part-of: infra
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# ─── Grafana ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+# Grafana's only data source: the Loki above. Grafana expands environment variables in this file, so a literal '$'
+# is written '$$'. Derived field: the trace_id that the API and the gateway attach to their log lines (structured
+# metadata) becomes a link in the log details that opens every log line of the same request, gateway and API together.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+data:
+  loki.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        uid: loki
+        type: loki
+        access: proxy
+        url: http://loki:3100
+        isDefault: true
+        editable: false
+        jsonData:
+          maxLines: 1000
+          timeout: 60
+          derivedFields:
+            - name: trace_id
+              matcherType: label
+              matcherRegex: trace_id
+              datasourceUid: loki
+              url: '{namespace="product-management"} | trace_id="$${__value.raw}"'
+              urlDisplayLabel: All logs of this request
+---
+# Every JSON file of the ConfigMap grafana-dashboards (created by infra.sh from dashboards/) is loaded into the
+# folder "Product Management" and reloaded when it changes. Edits in the UI are allowed for experimenting but are not
+# saved back: change the JSON files and run scripts/infra.sh up logs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: Product Management
+        folder: Product Management
+        type: file
+        disableDeletion: true
+        allowUiUpdates: true
+        updateIntervalSeconds: 30
+        options:
+          path: /etc/grafana/dashboards
+          foldersFromFilesStructure: false
+---
+# The alert rules, where their notifications go (contact points) and how they are grouped (policies). All computed
+# from logs (LogQL over Loki), evaluated every minute. Each rule names its runbook (runbook_url, a chapter of the
+# project's guide) and is linked to the dashboard panel that shows the same signal. Rules provisioned from a file are
+# read-only in the UI: change them here and run scripts/infra.sh up logs (restarts Grafana).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-alerting
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+data:
+  rules.yaml: |
+    apiVersion: 1
+    groups:
+      - orgId: 1
+        name: Gateway
+        folder: Product Management
+        interval: 1m
+        rules:
+          - uid: pm-gateway-high-error-rate
+            title: GatewayHighErrorRate
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="product-management", app="gateway"} | status=~"5.." [5m])) or vector(0)'
+                  queryType: instant
+              - refId: B
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: B
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="product-management", app="gateway"} | status!="" [5m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: math
+                  expression: '$B >= 30 && $A / $B > 0.02'
+            dashboardUid: product-management
+            panelId: 11
+            noDataState: OK
+            executionErrorState: Error
+            for: 5m
+            labels:
+              severity: critical
+              service: product-management
+            annotations:
+              summary: 'More than 2% of requests fail with a 5xx status at the gateway'
+              description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} of {{ with $values.B }}{{ humanize .Value }}{{ end }} requests in the last 5 minutes were answered with a 5xx status (threshold 2%). Users are seeing errors.'
+              runbook_url: docs/guide/08-observability.md#gatewayhigherrorrate
+            isPaused: false
+          - uid: pm-gateway-high-latency
+            title: GatewayHighLatency
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'quantile_over_time(0.95, {namespace="product-management", app="gateway"} | json uri, duration | __error__="" | uri=~"/api/.*" | unwrap duration [5m]) by ()'
+                  queryType: instant
+              - refId: B
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: B
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="product-management", app="gateway"} | json uri, duration | __error__="" | uri=~"/api/.*" [5m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: math
+                  expression: '$B >= 30 && $A > 0.5'
+            dashboardUid: product-management
+            panelId: 17
+            noDataState: OK
+            executionErrorState: Error
+            for: 10m
+            labels:
+              severity: warning
+              service: product-management
+            annotations:
+              summary: 'API p95 latency at the gateway above 500 ms'
+              description: 'The 95th percentile of API request time at the gateway is {{ with $values.A }}{{ humanizeDuration .Value }}{{ end }} (threshold 500 ms), for 10 minutes.'
+              runbook_url: docs/guide/08-observability.md#gatewayhighlatency
+            isPaused: false
+          - uid: pm-gateway-no-traffic
+            title: GatewayNoTraffic
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="product-management", app="gateway"} | status!="" [10m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator: { type: lt, params: [1] }
+            dashboardUid: product-management
+            panelId: 10
+            noDataState: OK
+            executionErrorState: Error
+            for: 5m
+            labels:
+              severity: warning
+              service: product-management
+            annotations:
+              summary: 'No request has reached the gateway for 15 minutes'
+              description: 'Not a single gateway access-log line in 15 minutes: the gateway is down or unreachable, or its logs no longer reach Loki (Alloy in the cluster). Expected only when nobody uses the system.'
+              runbook_url: docs/guide/08-observability.md#gatewaynotraffic
+            isPaused: false
+          - uid: pm-rate-limit-surge
+            title: RateLimitSurge
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="product-management", app="gateway"} | status="429" [5m])) or vector(0)'
+                  queryType: instant
+              - refId: B
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: B
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="product-management", app="gateway"} | status!="" [5m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: math
+                  expression: '$A > 300 && $A / $B > 0.1'
+            dashboardUid: product-management
+            panelId: 12
+            noDataState: OK
+            executionErrorState: Error
+            for: 10m
+            labels:
+              severity: warning
+              service: product-management
+            annotations:
+              summary: 'More than 10% of requests are rate limited (429)'
+              description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} requests answered 429 Too Many Requests in the last 5 minutes: a client is looping or misbehaving, or the limits are too low for the real traffic.'
+              runbook_url: docs/guide/08-observability.md#ratelimitsurge
+            isPaused: false
+      - orgId: 1
+        name: Browser
+        folder: Product Management
+        interval: 1m
+        rules:
+          - uid: pm-browser-errors
+            title: BrowserErrors
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="browser"} [5m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator: { type: gt, params: [10] }
+            dashboardUid: logs
+            panelId: 8
+            noDataState: OK
+            executionErrorState: Error
+            for: 5m
+            labels:
+              severity: warning
+              service: product-management
+            annotations:
+              summary: 'Browsers are reporting errors'
+              description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} errors reported by users'' browsers in the last 5 minutes (threshold 10): the web app is failing for someone, most often right after a release.'
+              runbook_url: docs/guide/08-observability.md#browsererrors
+            isPaused: false
+      - orgId: 1
+        name: API
+        folder: Product Management
+        interval: 1m
+        rules:
+          - uid: pm-api-error-logs
+            title: ApiErrorLogs
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="product-management", app="api", level=~"Error|Critical"} [5m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator: { type: gt, params: [10] }
+            dashboardUid: product-management
+            panelId: 23
+            noDataState: OK
+            executionErrorState: Error
+            for: 2m
+            labels:
+              severity: warning
+              service: product-management
+            annotations:
+              summary: 'The API is logging errors'
+              description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} API log lines at Error or Critical in the last 5 minutes (threshold 10).'
+              runbook_url: docs/guide/08-observability.md#apierrorlogs
+            isPaused: false
+          - uid: pm-database-unreachable
+            title: DatabaseUnreachable
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="product-management", app="api", level=~"Error|Critical"} |= "Health check database" [5m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator: { type: gt, params: [10] }
+            dashboardUid: product-management
+            panelId: 23
+            noDataState: OK
+            executionErrorState: Error
+            for: 2m
+            labels:
+              severity: critical
+              service: product-management
+            annotations:
+              summary: 'The API cannot reach PostgreSQL'
+              description: 'The API''s database health check is failing ({{ with $values.A }}{{ humanize .Value }}{{ end }} failures in 5 minutes, threshold 10): replicas are taken out of the load balancer and writes fail. A stopped database writes no logs itself, so this is how its absence shows up.'
+              runbook_url: docs/guide/08-observability.md#databaseunreachable
+            isPaused: false
+          - uid: pm-redis-unreachable
+            title: RedisUnreachable
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="product-management", app="api"} |~ "Redis\\) unavailable|Redis unavailable|Cache unavailable|Cache invalidation failed|Shared rate limits unavailable" [5m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator: { type: gt, params: [20] }
+            dashboardUid: product-management
+            panelId: 23
+            noDataState: OK
+            executionErrorState: Error
+            for: 5m
+            labels:
+              severity: warning
+              service: product-management
+            annotations:
+              summary: 'The API cannot reach Redis and is falling back'
+              description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} API warnings about Redis in 5 minutes: the API reads from PostgreSQL and applies rate limits per replica until Redis answers again.'
+              runbook_url: docs/guide/08-observability.md#redisunreachable
+            isPaused: false
+      - orgId: 1
+        name: Database and cache
+        folder: Product Management
+        interval: 1m
+        rules:
+          - uid: pm-postgres-fatal
+            title: PostgresFatal
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="infra", app="postgres"} |~ "FATAL:|PANIC:|could not connect|No space left on device" [5m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator: { type: gt, params: [0] }
+            dashboardUid: product-management
+            panelId: 27
+            noDataState: OK
+            executionErrorState: Error
+            for: 0s
+            labels:
+              severity: critical
+              service: product-management
+            annotations:
+              summary: 'PostgreSQL logged FATAL or PANIC lines'
+              description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} FATAL/PANIC lines in the PostgreSQL log in the last 5 minutes: refused or dropped connections, a crash, or a full disk.'
+              runbook_url: docs/guide/08-observability.md#postgresfatal
+            isPaused: false
+          - uid: pm-postgres-slow-statements
+            title: PostgresSlowStatements
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="infra", app="postgres"} |= "duration:" [10m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator: { type: gt, params: [100] }
+            dashboardUid: product-management
+            panelId: 27
+            noDataState: OK
+            executionErrorState: Error
+            for: 10m
+            labels:
+              severity: warning
+              service: product-management
+            annotations:
+              summary: 'Many PostgreSQL statements slower than 250 ms'
+              description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} statements slower than 250 ms in the last 10 minutes (threshold 100).'
+              runbook_url: docs/guide/08-observability.md#postgresslowstatements
+            isPaused: false
+          - uid: pm-postgres-lock-waits
+            title: PostgresLockWaits
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="infra", app="postgres"} |~ "still waiting for|deadlock detected" [10m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator: { type: gt, params: [0] }
+            dashboardUid: product-management
+            panelId: 27
+            noDataState: OK
+            executionErrorState: Error
+            for: 0s
+            labels:
+              severity: warning
+              service: product-management
+            annotations:
+              summary: 'PostgreSQL sessions waited more than 1 s for a lock, or deadlocked'
+              description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} lock waits longer than deadlock_timeout (1 s) or deadlocks in the last 10 minutes.'
+              runbook_url: docs/guide/08-observability.md#postgreslockwaits
+            isPaused: false
+          - uid: pm-redis-log-errors
+            title: RedisLogErrors
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange: { from: 900, to: 0 }
+                datasourceUid: loki
+                model:
+                  refId: A
+                  datasource: { type: loki, uid: loki }
+                  expr: 'sum(count_over_time({namespace="infra", app="redis"} |~ " [0-9:.]{12} # |MISCONF|Can.t save|Background saving error|Failed opening" [10m])) or vector(0)'
+                  queryType: instant
+              - refId: C
+                datasourceUid: __expr__
+                model:
+                  refId: C
+                  datasource: { type: __expr__, uid: __expr__ }
+                  type: threshold
+                  expression: A
+                  conditions:
+                    - evaluator: { type: gt, params: [0] }
+            dashboardUid: product-management
+            panelId: 32
+            noDataState: OK
+            executionErrorState: Error
+            for: 0s
+            labels:
+              severity: warning
+              service: product-management
+            annotations:
+              summary: 'Redis logged warnings or errors'
+              description: '{{ with $values.A }}{{ humanize .Value }}{{ end }} warning or error lines in the Redis log in the last 10 minutes.'
+              runbook_url: docs/guide/08-observability.md#redislogerrors
+            isPaused: false
+  contact-points.yaml: |
+    # Where alert notifications go. REPLACE IN PRODUCTION: this is a placeholder so the configuration is complete and
+    # Grafana starts; it points at a local address where nothing listens (notifications fail and are logged by Grafana).
+    # In production: the on-call pager (PagerDuty, Opsgenie, Grafana OnCall) for severity=critical and a team chat
+    # channel (Slack, Microsoft Teams) for severity=warning, with their keys and URLs from the secret store, e.g.
+    #   - uid: pm-oncall
+    #     type: pagerduty
+    #     settings: { integrationKey: $PAGERDUTY_INTEGRATION_KEY }
+    apiVersion: 1
+    contactPoints:
+      - orgId: 1
+        name: product-management-ops
+        receivers:
+          - uid: pm-ops-placeholder
+            type: webhook
+            settings:
+              url: http://127.0.0.1:9/replace-in-production
+              httpMethod: POST
+            disableResolveMessage: false
+  policies.yaml: |
+    # Notification policy: how firing alerts are grouped and to which contact point they go (contact-points.yaml).
+    # Provisioning replaces Grafana's whole default policy tree with this one.
+    #   - Alerts are grouped per rule, so one incident on three replicas is one notification.
+    #   - critical: notified after 30 s and repeated every hour while it lasts; warning: grouped longer, repeated every 4 h.
+    # REPLACE IN PRODUCTION: route severity=critical to the pager and severity=warning to the team channel.
+    apiVersion: 1
+    policies:
+      - orgId: 1
+        receiver: product-management-ops
+        group_by: [grafana_folder, alertname]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+        routes:
+          - receiver: product-management-ops
+            object_matchers:
+              - [severity, =, critical]
+            group_wait: 30s
+            repeat_interval: 1h
+          - receiver: product-management-ops
+            object_matchers:
+              - [severity, =, warning]
+            group_wait: 1m
+            repeat_interval: 4h
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+spec:
+  selector:
+    app.kubernetes.io/name: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+# No volume of its own (emptyDir): everything Grafana shows is provisioned from the ConfigMaps above and the logs are
+# in Loki, so a new pod starts with the same data source, dashboards and alert rules. What a restart forgets is what
+# was made in the UI (unsaved dashboard edits, silences, alert state history). A Grafana that people edit gets a
+# database instead (GF_DATABASE_* pointing at PostgreSQL) and single sign-on.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grafana
+        app.kubernetes.io/component: logs
+        app.kubernetes.io/part-of: infra
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 472
+        runAsGroup: 0
+        fsGroup: 472
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: grafana
+          image: grafana/grafana:12.2.0
+          env:
+            # Locally the login is disabled: whoever reaches it (through a port-forward) is an administrator. A shared
+            # Grafana uses single sign-on (GF_AUTH_GENERIC_OAUTH_*) instead of these three.
+            - { name: GF_AUTH_ANONYMOUS_ENABLED, value: "true" }
+            - { name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Admin }
+            - { name: GF_AUTH_DISABLE_LOGIN_FORM, value: "true" }
+            - { name: GF_ANALYTICS_REPORTING_ENABLED, value: "false" }
+            - { name: GF_ANALYTICS_CHECK_FOR_UPDATES, value: "false" }
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/grafana }
+            - { name: datasources, mountPath: /etc/grafana/provisioning/datasources, readOnly: true }
+            - { name: dashboard-provider, mountPath: /etc/grafana/provisioning/dashboards, readOnly: true }
+            - { name: alerting, mountPath: /etc/grafana/provisioning/alerting, readOnly: true }
+            - { name: dashboards, mountPath: /etc/grafana/dashboards, readOnly: true }
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: alerting
+          configMap:
+            name: grafana-alerting
+        # Created by infra.sh from dashboards/*.json (kubectl create configmap --from-file).
+        - name: dashboards
+          configMap:
+            name: grafana-dashboards
+---
+# ─── Alloy: the collector ────────────────────────────────────────────────────────────────────────────────────────────
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+---
+# Read-only: list pods and read their logs, nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infra-alloy
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, namespaces, nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infra-alloy
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infra-alloy
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: infra
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+data:
+  # Changing it: scripts/infra.sh up logs (restarts Alloy). The pipeline checks it with `alloy validate` and `alloy fmt`.
+  config.alloy: |
+    // Collects the logs of every pod in the cluster, in every namespace (the services, and PostgreSQL, Redis, Loki
+    // and Grafana in `infra`), and sends them to Loki. It reads them through the Kubernetes API (no host paths, nothing
+    // to change in the applications), adds labels to find them again (namespace, app, pod, container) and lifts the
+    // fields that matter out of the JSON lines. It also receives the browser's error reports (Grafana Faro), which the
+    // gateway forwards from /collect.
+
+    discovery.kubernetes "pods" {
+      role = "pod"
+    }
+
+    discovery.relabel "pods" {
+      targets = discovery.kubernetes.pods.targets
+
+      // Not the collector itself: its own logs would feed back into it.
+      rule {
+        source_labels = ["__meta_kubernetes_namespace", "__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+        regex         = "infra;alloy"
+        action        = "drop"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_namespace"]
+        target_label  = "namespace"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_name"]
+        target_label  = "pod"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_container_name"]
+        target_label  = "container"
+      }
+
+      // app = the app.kubernetes.io/name label (api, gateway, web, postgres, redis…), else the container name.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name", "__meta_kubernetes_pod_container_name"]
+        regex         = "^;(.+)$"
+        target_label  = "app"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_name"]
+        regex         = "(.+)"
+        target_label  = "app"
+      }
+    }
+
+    loki.source.kubernetes "pods" {
+      targets    = discovery.relabel.pods.output
+      forward_to = [loki.process.pods.receiver]
+    }
+
+    loki.process "pods" {
+      // API: JSON lines from ASP.NET Core. Level and category become searchable; the trace id (from the logging scope)
+      // becomes structured metadata, which Grafana turns into a link to every line of the same request.
+      stage.match {
+        selector = "{app=\"api\"}"
+
+        stage.json {
+          expressions = {
+            level    = "LogLevel",
+            category = "Category",
+            trace_id = "Scopes[?TraceId] | [0].TraceId",
+          }
+        }
+
+        stage.labels {
+          values = {level = ""}
+        }
+
+        stage.structured_metadata {
+          values = {trace_id = "", category = ""}
+        }
+      }
+
+      // Gateway: one JSON line per request (the frontend repository: gateway/default.conf.template).
+      stage.match {
+        selector = "{app=\"gateway\"}"
+
+        stage.json {
+          expressions = {
+            trace_id = "trace_id",
+            status   = "status",
+            user     = "user",
+          }
+        }
+
+        stage.structured_metadata {
+          values = {trace_id = "", status = "", user = ""}
+        }
+      }
+
+      // PostgreSQL writes a slow statement over several lines (the SQL keeps its line breaks); without this each line
+      // would be a separate entry and the statement would be cut. A new entry starts with the timestamp of
+      // log_line_prefix (postgres.yaml).
+      stage.match {
+        selector = "{namespace=\"infra\", app=\"postgres\"}"
+
+        stage.multiline {
+          firstline     = "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}"
+          max_wait_time = "3s"
+        }
+      }
+
+      forward_to = [loki.write.loki.receiver]
+    }
+
+    // The browser's error reports: the web app's Faro SDK (the frontend repository: src/app/core/observability) posts
+    // them to the gateway's /collect, which forwards them here through the Service alloy-faro. Only the gateway reaches
+    // this port (NetworkPolicy alloy-ingress), and the gateway already limits each client IP; the limits below protect
+    // Loki when many browsers fail at once (a broken release): beyond them reports are refused, and a sample is enough.
+    faro.receiver "browser" {
+      server {
+        listen_address = "0.0.0.0"
+        listen_port    = 12347
+        // Same origin through the gateway: no cross-origin caller is allowed (no CORS headers).
+        cors_allowed_origins     = []
+        max_allowed_payload_size = "64KiB"
+
+        rate_limiting {
+          enabled    = true
+          rate       = 50
+          burst_size = 100
+        }
+      }
+
+      // Production builds ship no source maps; stack traces point at the minified bundles of the reported release.
+      sourcemaps {
+        download = false
+      }
+
+      // JSON lines like the API's and the gateway's. `kind` is a label only until the pipeline below has read it.
+      log_format       = "json"
+      extra_log_labels = {kind = ""}
+
+      output {
+        logs = [loki.process.browser.receiver]
+      }
+    }
+
+    loki.process "browser" {
+      // Errors only: the web app sends nothing else, so events, measurements or logs posted by anyone else are dropped.
+      stage.match {
+        selector = "{kind!=\"exception\"}"
+        action   = "drop"
+      }
+
+      stage.label_drop {
+        values = ["kind"]
+      }
+
+      // Few labels, next to the others: {namespace="browser"} for every browser error. Who, where and which release
+      // become structured metadata, filterable per line without creating a stream per user or page.
+      stage.static_labels {
+        values = {namespace = "browser", app = "browser", level = "error"}
+      }
+
+      stage.json {
+        expressions = {
+          page        = "page_url",
+          user        = "user_id",
+          app_version = "app_version",
+          browser     = "browser_name",
+        }
+      }
+
+      stage.structured_metadata {
+        values = {page = "", user = "", app_version = "", browser = ""}
+      }
+
+      forward_to = [loki.write.loki.receiver]
+    }
+
+    // Where the logs go: the Loki in this namespace, or another one (e.g. Grafana Cloud) when the Secret loki-external
+    // exists (infra.sh creates it from LOKI_URL, LOKI_USERNAME and LOKI_PASSWORD). The credentials are empty for the
+    // local Loki, which ignores them.
+    loki.write "loki" {
+      endpoint {
+        url = coalesce(sys.env("LOKI_URL"), "http://loki.infra.svc.cluster.local:3100/loki/api/v1/push")
+
+        basic_auth {
+          username = sys.env("LOKI_USERNAME")
+          password = sys.env("LOKI_PASSWORD")
+        }
+      }
+    }
+---
+# A Deployment reading every pod's log through the Kubernetes API, not a DaemonSet reading /var/log/pods on each
+# node: no host paths or privileges, the same on Docker Desktop and k3s, and it follows pods on every node of a small
+# cluster (the API server streams their logs from each kubelet). The browser's error reports need one fixed receiver
+# anyway. On a large cluster (dozens of nodes, heavy log volume) a DaemonSet spreads the reading.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alloy
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alloy
+        app.kubernetes.io/component: logs
+        app.kubernetes.io/part-of: infra
+    spec:
+      serviceAccountName: alloy
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 473
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: alloy
+          image: grafana/alloy:v1.10.2
+          args: ["run", "/etc/alloy/config.alloy", "--storage.path=/tmp/alloy", "--server.http.listen-addr=0.0.0.0:12345"]
+          env:
+            # Another Loki (Secret loki-external, created by infra.sh from LOKI_URL, LOKI_USERNAME, LOKI_PASSWORD).
+            # Without the Secret they are empty and Alloy pushes to the Loki in this namespace.
+            - name: LOKI_URL
+              valueFrom: { secretKeyRef: { name: loki-external, key: url, optional: true } }
+            - name: LOKI_USERNAME
+              valueFrom: { secretKeyRef: { name: loki-external, key: username, optional: true } }
+            - name: LOKI_PASSWORD
+              valueFrom: { secretKeyRef: { name: loki-external, key: password, optional: true } }
+          ports:
+            - { name: http, containerPort: 12345 }
+            - { name: faro, containerPort: 12347 }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/alloy, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: config
+          configMap:
+            name: alloy-config
+        - name: tmp
+          emptyDir: {}
+---
+# The browser's error reports (faro.receiver in config.alloy). The gateway's /collect forwards to
+# alloy-faro.infra.svc.cluster.local:12347.
+apiVersion: v1
+kind: Service
+metadata:
+  name: alloy-faro
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+spec:
+  selector:
+    app.kubernetes.io/name: alloy
+  ports:
+    - name: faro
+      port: 12347
+      targetPort: faro
+---
+# Only the gateway may post error reports, so its per-IP limit cannot be bypassed from inside the cluster. Nothing
+# else connects to Alloy (it pushes to Loki; the kubelet's probes are not subject to NetworkPolicies).
+# Enforced only where the network plugin supports NetworkPolicies (Calico, Cilium, k3s' default; not Docker Desktop).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alloy-ingress
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: alloy
+    app.kubernetes.io/component: logs
+    app.kubernetes.io/part-of: infra
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alloy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: product-management } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: gateway } }
+      ports:
+        - port: 12347

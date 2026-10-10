@@ -5,7 +5,7 @@ namespace ProductManagement.Core.Products.Abstractions;
 /// </summary>
 /// <remarks>
 /// Implementations must be safe across processes: several API instances may call this at the same time and must
-/// never receive the same value. See docs/adr/0002-product-id-generation.md.
+/// never receive the same value. See ADR 0002 (product id generation).
 /// </remarks>
 public interface IProductIdGenerator
 {

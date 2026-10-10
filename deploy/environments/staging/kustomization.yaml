@@ -1,0 +1,35 @@
+# Staging environment: the API, the web app and the gateway, with the images of the latest release.
+#
+# Applied by this repository's pipeline (deploy:staging, scripts/deploy.sh staging) whenever main changes this folder
+# or apps/. The backend and frontend pipelines release by changing a newTag below and pushing to main: one commit per
+# release, so `git log environments/staging` is the deployment history and `git revert` is the rollback.
+#
+# No Secret is here: scripts/deploy.sh creates the registry credential (gitlab-registry) and api-secrets from CI/CD
+# variables and copies redis-credentials from the shared Redis; database-credentials is made once by
+# scripts/create-database.sh. Replace the example.* host in ingress.yaml with the real one.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Also on what the environment adds (the Ingress); apps/ labels the rest.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: product-management
+resources:
+  - ../../apps/backend
+  - ../../apps/frontend
+  - ingress.yaml
+patches:
+  - path: api.yaml
+  - path: gateway.yaml
+  - path: registry.yaml
+# The deployed images: updated by the app pipelines (ci/release.sh in backend and frontend), never by hand except to
+# roll back. "unreleased": no release yet; scripts/deploy.sh refuses to apply until every image has a tag.
+images:
+  - name: product-management/api
+    newName: registry.gitlab.com/zeiss/backend/api
+    newTag: unreleased
+  - name: product-management/web
+    newName: registry.gitlab.com/zeiss/frontend/web
+    newTag: unreleased
+  - name: product-management/gateway
+    newName: registry.gitlab.com/zeiss/frontend/gateway
+    newTag: unreleased

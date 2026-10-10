@@ -1,0 +1,23 @@
+# The images are in the frontend project's private registry: the web app and the gateway pull them with the Secret
+# scripts/deploy.sh creates from the group deploy token. Local deployments use local images.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: product-management
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: gitlab-registry
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: product-management
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: gitlab-registry

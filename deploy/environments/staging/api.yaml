@@ -1,0 +1,28 @@
+# The API's staging settings: only what differs from apps/backend/deployment.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: product-management
+spec:
+  template:
+    spec:
+      # The image is in the backend project's private registry: scripts/deploy.sh (and the backend pipeline's migrate
+      # job) create this Secret from the group deploy token.
+      imagePullSecrets:
+        - name: gitlab-registry
+      containers:
+        - name: api
+          env:
+            # The shared PostgreSQL in the cluster's namespace `infra` (scripts/infra.sh up, then
+            # scripts/create-database.sh), as pm_app. The password is PGPASSWORD, from the Secret database-credentials. Any
+            # other server works the same way: its host here (e.g. a managed database, then with SSL Mode=VerifyFull).
+            - name: ConnectionStrings__ProductManagement
+              value: "Host=postgres.infra.svc.cluster.local;Port=5432;Database=product_management;Username=pm_app;Maximum Pool Size=10;GSS Encryption Mode=Disable"
+            # The shared Redis in `infra`. The password is Redis__Password, from the Secret redis-credentials (a copy of
+            # infra/redis-auth made by scripts/deploy.sh). Another Redis: its host here (with TLS append ",ssl=true").
+            - name: ConnectionStrings__Redis
+              value: "redis.infra.svc.cluster.local:6379"
+            # Staging shows Swagger (through a port-forward); production does not.
+            - name: OpenApi__Enabled
+              value: "true"

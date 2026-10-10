@@ -24,7 +24,7 @@ namespace ProductManagement.Api.Idempotency;
 ///   <item>store unavailable: <c>503</c>, because exactly-once can no longer be guaranteed.</item>
 /// </list>
 /// Keys are scoped to the caller (<c>sub</c>), so consumers can never see or block each other's keys. The header is
-/// optional: requests without it behave as before. See docs/adr/0017-idempotency-keys.md.
+/// optional: requests without it behave as before. See ADR 0017 (idempotency keys).
 /// </remarks>
 internal class IdempotencyFilter(IIdempotencyStore store, ProblemDetailsFactory problemDetailsFactory)
     : IAsyncResourceFilter

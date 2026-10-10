@@ -8,7 +8,7 @@ internal static class PostgresErrors
 {
     /// <summary>
     /// The request's idempotency key is already recorded on a ledger row: this request was applied before (see
-    /// docs/adr/0017).
+    /// ADR 0017).
     /// </summary>
     public static bool IsDuplicateRequestKey(PostgresException exception) =>
         exception is

@@ -43,9 +43,6 @@ __screenshots__/
 .DS_Store
 Thumbs.db
 
-# The overlay with this release's images pinned, rendered by deploy/deploy.sh
-/deploy/k8s/.build/
-
 # Local tools: editor settings, AI assistants and their MCP servers (never committed)
 .vscode/
 .claude/

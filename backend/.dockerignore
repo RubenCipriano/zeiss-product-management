@@ -7,7 +7,5 @@
 *.Tests/
 *Tests/
 ProductManagement.Testing/
-deploy/
-load-tests/
-scripts/
+ci/
 .nuget/

@@ -22,7 +22,7 @@ namespace ProductManagement.Infrastructure.Caching;
 /// <para>
 /// Lists and searches cache only the expensive part: the total count (once per list, whatever the page) and the
 /// page's ids. The rows themselves are re-read from the database by id every time, which is cheap, so the stock shown
-/// is always current. Measured in docs/adr/0008-redis-cache.md.
+/// is always current. Measured in ADR 0008 (redis cache).
 /// </para>
 /// <para>
 /// Simultaneous misses for the same entry share one database query per replica (<see cref="SingleFlight"/>).

@@ -1,34 +1,63 @@
 # Product Management — Web
 
-Angular 22 frontend for the Product Management API: Tailwind CSS + Angular CDK for the UI, sign-in against the
-API's token endpoint, role-aware screens. Generated with Angular CLI 22. This folder is self-contained, its own
-repository ([gitlab.com/zeiss/frontend](https://gitlab.com/zeiss/frontend)): the web app, the nginx **gateway** in
-front of the whole application, their Kubernetes manifests, the deploy script, the end-to-end tests and the GitLab
-pipeline. Architecture and decisions are in the
-[guide](../docs/README.md) ([chapter 7](../docs/guide/07-frontend.md)) and [ADR 0007](../docs/adr/0007-frontend-state.md).
+The Angular 22 frontend of the Product Management system (Tailwind CSS and Angular CDK, sign-in against the API's
+token endpoint, role-aware screens) and the nginx **gateway** in front of the whole application. This repository
+holds the code, the unit and end-to-end tests, the two images and their CI pipeline. The Kubernetes manifests and the
+environments are in the [deploy](https://gitlab.com/zeiss/deploy) repository; the API in
+[backend](https://gitlab.com/zeiss/backend).
 
-## Run
+## Run locally
 
-Requires Node 24 LTS (see `.nvmrc`) and the API on http://localhost:5080: the API deployed to the cluster by the
-backend repository plus `kubectl -n product-management port-forward deployment/api 5080:8080`, or `dotnet run` in the
-backend repository.
+Requires Node 24 LTS (`.nvmrc`) and an API to talk to.
 
 ```bash
 npm ci
-npm start          # http://localhost:4200, /api is proxied to http://localhost:5080 (proxy.conf.json)
+npm start                                                  # http://localhost:4200, live reload
 ```
+
+The dev server proxies `/api` ([`proxy.conf.mjs`](proxy.conf.mjs)) to `API_URL`, by default http://localhost:5080:
+
+| The API | How |
+| --- | --- |
+| on this machine | `dotnet run --project ProductManagement.Api` in the backend repository (its README), then `npm start` |
+| the local cluster's | `kubectl -n product-management port-forward deployment/api 5080:8080`, then `npm start`; or through its gateway: `API_URL=http://localhost:8080 npm start` |
+| an environment's | `API_URL=https://staging.products.example.com npm start` (the gateway serves the API under the same `/api`) |
+
+Sign in with a consumer of that API: locally `viewer`/`viewer`, `clerk`/`clerk` or `manager`/`manager`.
+
+The whole system (gateway, web app, API, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes: clone the three
+repositories side by side and follow the deploy repository's README (`scripts/infra.sh up`, then
+`scripts/deploy.sh local`, which builds this folder's two images) → http://localhost:8080.
 
 ## Scripts
 
-| Script                 | Purpose                         |
-| ---------------------- | ------------------------------- |
-| `npm start`            | Dev server with live reload     |
-| `npm test`             | Vitest in watch mode            |
-| `npm run test:ci`      | Vitest, single run              |
-| `npm run lint`         | ESLint (angular-eslint)         |
-| `npm run format`       | Prettier (write)                |
-| `npm run format:check` | Prettier (check)                |
-| `npm run build`        | Production build → `dist/`      |
+| Script                     | Purpose                                                                 |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `npm start`                | dev server with live reload (`API_URL`: where `/api` goes)              |
+| `npm test`                 | unit and component tests (Vitest), watch mode                           |
+| `npm run test:ci`          | the same, single run                                                    |
+| `npm run lint`             | ESLint (angular-eslint)                                                 |
+| `npm run format`           | Prettier (write); `npm run format:check` to check                       |
+| `npm run build`            | production build → `dist/`                                              |
+| `npm run e2e`              | Playwright end-to-end tests against a running system (below)            |
+| `npm run audit:lighthouse` | Lighthouse user flow, signed in (`FORM_FACTOR=desktop` for desktop); report in `e2e/reports/` |
+
+## End-to-end tests
+
+`e2e/` drives a real browser (desktop and phone) through the real gateway, API, Redis and PostgreSQL, so it needs a
+running system; it is not a CI job. By default it targets the local cluster (http://localhost:8080):
+
+```bash
+npx playwright install chromium                            # once, if Chrome is not installed (then PLAYWRIGHT_CHANNEL=chromium)
+npm run e2e                                                # against http://localhost:8080 with the local demo accounts
+kubectl -n infra port-forward svc/loki 3100:3100 &         # optional: the browser-errors test reads Loki (LOKI_URL)
+BASE_URL=https://staging.products.example.com \
+E2E_VIEWER_SECRET=… E2E_CLERK_SECRET=… E2E_MANAGER_SECRET=… npm run e2e     # against an environment
+```
+
+Against an environment the consumers `viewer`, `clerk` and `manager` must be registered in its API, with their
+secrets in `E2E_<ROLE>_SECRET`, and paging needs more than three pages of products (staging seeds the sample
+catalogue). The tests clean up what they create; the browser-errors test is skipped without Loki.
 
 ## Structure
 
@@ -48,6 +77,8 @@ src/app/
     ui/                 presentational: InventorySummary, ProductFilters, ProductTable, StockStatus, pipes
 src/testing/            test fixtures
 e2e/                    Playwright end-to-end tests and the Lighthouse user flow
+gateway/                the gateway image
+ci/                     the script of the pipeline's release jobs
 ```
 
 Dependency rules, so each piece has one reason to change:
@@ -60,108 +91,41 @@ Dependency rules, so each piece has one reason to change:
 Standalone components throughout (no NgModules, the Angular default since v19): each component imports exactly what
 it uses.
 
-## Quality checks
+## The images
 
-| Script                     | What it checks                                                                 |
-| -------------------------- | ------------------------------------------------------------------------------ |
-| `npm run test:ci`          | unit and component tests (Vitest)                                              |
-| `npm run e2e`              | Playwright against the running system (default http://localhost:8080), desktop and mobile; the browser-errors test also reads Loki (`LOKI_URL`, default http://localhost:3100: `kubectl -n infra port-forward svc/loki 3100:3100`) and is skipped without it |
-| `npm run audit:lighthouse` | Lighthouse user flow, signed in (`FORM_FACTOR=desktop` for desktop); report in `e2e/reports/` |
+* `Dockerfile` + `nginx.conf`: the **web** image, the static files only
+  (`docker build --build-arg APP_VERSION=dev -t product-management/web .`).
+* `gateway/`: the **gateway** image (`docker build -t product-management/gateway gateway`), nginx in front of
+  everything: `/api` to the API replicas (per-request balancing, token verification at the edge, rate limiting, a 1 s
+  microcache), the static files with an edge cache, Content-Security-Policy and the other security headers
+  (`security-headers.conf`), and `POST /collect`, the browser's error reports, forwarded to the log collector. Its
+  settings are environment variables (`default.conf.template`, rendered at startup): `API_UPSTREAM`, `JWKS_URL`,
+  `COLLECTOR_UPSTREAM` (`""`: `/collect` answers 204 and drops the report, `gateway/collector.sh`),
+  `GATEWAY_RATE_LIMIT_RPS` / `_BURST`, `GATEWAY_TRUSTED_PROXIES`, `JWT_ISSUER`, `JWT_AUDIENCE`. The deployed values
+  are in the deploy repository (`apps/frontend/gateway.yaml`, `environments/<environment>/gateway.yaml`).
 
+## CI (GitLab)
 
-`npm run e2e` takes `BASE_URL` (default http://localhost:8080) and, against an environment other than the local one,
-`E2E_VIEWER_SECRET`, `E2E_CLERK_SECRET` and `E2E_MANAGER_SECRET` (the demo accounts' secrets otherwise).
+[`.gitlab-ci.yml`](.gitlab-ci.yml). The pipeline builds, checks and releases the images; it never applies Kubernetes
+manifests. An environment runs the image tags in the deploy repository's
+`environments/<environment>/kustomization.yaml`, and the deploy repository's pipeline applies them.
 
-## Deployment
+| Job | When | Does |
+| --- | --- | --- |
+| `test:frontend` | every pipeline | lint, format check, unit tests (JUnit report), production build |
+| `build:web`, `build:gateway` | every pipeline | build and push `registry.gitlab.com/zeiss/frontend/{web,gateway}:<sha>` (BuildKit, registry layer cache) |
+| `scan:web`, `scan:gateway` | every pipeline | Trivy; fail on fixable critical vulnerabilities |
+| `release:staging` | `main`, `STAGING_ENABLED` | [`ci/release.sh`](ci/release.sh): commits `frontend: web, gateway <sha>` (both `newTag`s) to the deploy repository's `main` |
+| `release:production` | `main`, `PRODUCTION_ENABLED`, **manual** | pushes a branch to the deploy repository and opens the merge request "Release web, gateway `<sha>` to production"; merging it releases |
 
-Two images, deployed together to Kubernetes:
+CI/CD variables:
 
-* `Dockerfile` + `nginx.conf`: the **web** image (the static files only).
-* `gateway/`: the **gateway** image, nginx in front of everything: `/api` to the API replicas (per-request balancing,
-  token verification at the edge, rate limiting, a 1 s microcache), the static files with an edge cache,
-  Content-Security-Policy and the other security headers (`security-headers.conf`), and `POST /collect`, the
-  browser's error reports, forwarded to the log collector in the cluster. Its settings are environment variables
-  (`default.conf.template` is rendered at startup); `gateway/collector.sh` (run as
-  `/docker-entrypoint.d/25-collector.sh`) decides what `/collect` does: forward to `COLLECTOR_UPSTREAM`, or, when it
-  is empty, answer 204 and drop the report. It autoscales (HPA, 2–6 replicas).
+| Variable | Scope | What |
+| --- | --- | --- |
+| `STAGING_ENABLED` | project or group | `"true"` creates `release:staging` on `main` |
+| `PRODUCTION_ENABLED` | project or group | `"true"` creates `release:production` (manual); needs `STAGING_ENABLED` too |
+| `DEPLOY_REPO_TOKEN` | project; masked, protected | a project access token of the deploy repository with the role Maintainer and the scope `write_repository` |
 
-### Prerequisites
-
-Docker and `kubectl` with a cluster (Docker Desktop's Kubernetes, context `docker-desktop`). Node is not needed to
-deploy: the images are built in Docker.
-
-**What it expects from the other parts:** the API deployed to the same cluster by the backend repository (its
-Service `api` in the namespace `product-management`) and, optionally, the log collector of the shared infrastructure
-(the infra repository: `infra.sh up logs`; its Service `alloy-faro` in the namespace `infra`).
-
-### Deploy
-
-```bash
-deploy/deploy.sh                  # build the web and gateway images, apply the local overlay, wait → http://localhost:8080
-LOGS=off deploy/deploy.sh         # the same, without a log collector: /collect answers 204
-```
-
-[`deploy/deploy.sh`](deploy/deploy.sh) deploys to the current `kubectl` context from
-`deploy/k8s/overlays/$ENVIRONMENT` (`local` by default). Locally it builds both images, tagged with the commit (plus
-`-dirty-<timestamp>` with uncommitted changes), which Docker Desktop's Kubernetes uses straight from the local
-Docker engine (any other context needs `WEB_IMAGE` and `GATEWAY_IMAGE`, images from a registry), renders the overlay with the
-images pinned into `deploy/k8s/.build/<environment>/` (not committed), applies it and waits for both rollouts. On
-Docker Desktop the gateway is a `LoadBalancer` Service on http://localhost:8080; elsewhere
-`kubectl -n product-management port-forward service/gateway 8080:8080`.
-
-| Variable | Effect |
-| --- | --- |
-| `ENVIRONMENT` | `local` (default), `staging` or `production`: the overlay |
-| `WEB_IMAGE`, `GATEWAY_IMAGE` | images already built and pushed (`registry/name:tag` or `name@sha256:…`): no local build |
-| `LOGS=off` | no log collector: the gateway's `COLLECTOR_UPSTREAM` becomes `""` |
-
-### Configuration
-
-* `deploy/k8s/base/`: the namespace, `web.yaml` (Deployment, Service, PDB, NetworkPolicy: only the gateway may
-  connect) and `gateway.yaml` (Deployment, Service, PDB, HPA). The gateway's settings are environment variables in
-  its Deployment: `GATEWAY_RATE_LIMIT_RPS` / `GATEWAY_RATE_LIMIT_BURST` (per client IP), `GATEWAY_TRUSTED_PROXIES`,
-  `JWT_ISSUER`, `JWT_AUDIENCE`.
-* `deploy/k8s/overlays/<environment>/gateway.yaml`: where the other parts are.
-
-  | Variable | Value (every environment) | What |
-  | --- | --- | --- |
-  | `API_UPSTREAM` | `api.product-management.svc.cluster.local:8080` | the API's headless Service: one DNS record per API pod |
-  | `JWKS_URL` | `http://api.product-management.svc.cluster.local:8080/.well-known/jwks.json` | the API's public keys, to verify tokens |
-  | `COLLECTOR_UPSTREAM` | `alloy-faro.infra.svc.cluster.local:12347` | the log collector; `""` = no collector |
-
-  To use an API elsewhere, put its `host:port` in `API_UPSTREAM` and its key set's URL in `JWKS_URL`, and deploy
-  again. Staging and production also set `GATEWAY_TRUSTED_PROXIES=10.42.0.0/16` (the Ingress controller's pod
-  network) and add `ingress.yaml`: HTTPS for `staging.products.example.com` / `products.example.com` with a
-  cert-manager certificate (replace the `example.*` hosts with the real ones). Locally the overlay makes the gateway's
-  Service a `LoadBalancer`.
-* No Secret: the web app and the gateway need none.
-
-Check the manifests as CI does:
-
-```bash
-deploy/ci/validate-manifests.sh                     # needs kubectl, kubeconform and yq
-docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 deploy/ci/validate-manifests.sh
-```
-
-### CI/CD (GitLab)
-
-[`.gitlab-ci.yml`](.gitlab-ci.yml): test (`test:frontend`: lint, format, unit tests, build; `test:manifests`) →
-build (`build:web`, `build:gateway`) → scan (`scan:web`, `scan:gateway`, Trivy) → staging (`deploy:staging`:
-[`deploy/ci/deploy-environment.sh`](deploy/ci/deploy-environment.sh), which selects the cluster, stores the pull
-Secret and runs `deploy/deploy.sh`) → verify (`verify:e2e`, Playwright against `STAGING_URL`) → production
-(`deploy:production`, manual). The staging jobs exist once the project or group variable `STAGING_ENABLED` is `true`,
-production once `PRODUCTION_ENABLED` is `true` as well; until then the pipeline stops, green, after scan. The deploy
-jobs need a deploy token named `gitlab-deploy-token` (scope `read_registry`): they store it as the Secret
-`gitlab-registry-frontend` the pods pull the images with.
-
-CI/CD variables, scoped to the `staging` and `production` environments:
-
-| Variable | What |
-| --- | --- |
-| `KUBE_CONTEXT` | `<agent configuration project path>:<agent name>` (the GitLab agent for Kubernetes) |
-| `KUBECONFIG` | File, instead of `KUBE_CONTEXT`: a kubeconfig whose current context is the cluster (a self-hosted runner next to it) |
-| `E2E_VIEWER_SECRET`, `E2E_CLERK_SECRET`, `E2E_MANAGER_SECRET` | staging only, masked: the secrets of the consumers `viewer`, `clerk` and `manager` registered in staging's API (the backend's `API_CONSUMERS`) |
-
-`STAGING_URL` and `PRODUCTION_URL` default to the example hosts in `.gitlab-ci.yml`; override them in the project.
-Deploy the backend to an environment before the frontend's first deployment there. Operations and rollbacks:
-[chapter 9](../docs/guide/09-deployment-and-operations.md); full setup: [chapter 12](../docs/guide/12-from-zero.md).
+Nothing else: the cluster pulls the images with the zeiss group's deploy token, which the deploy repository's
+pipeline stores in the cluster. Until `STAGING_ENABLED` is set the pipeline stops, green, after scan. Rollback: revert
+the release commit (or merge) in the deploy repository.

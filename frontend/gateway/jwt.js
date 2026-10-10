@@ -9,7 +9,7 @@
 //
 // Called through `auth_request /_jwt` (an internal sub-request nginx makes before proxying) for every /api request:
 // answers 204 with `X-Jwt-Scope: <roles>` and `X-Jwt-Subject: <client id>` when the token is valid, 401 otherwise.
-// Details: docs/adr/0020-edge-token-verification.md.
+// Details: ADR 0020 (edge token verification).
 
 const KEYS = ngx.shared.jwt_keys; // kid -> public JWK (JSON), from the API's JWKS; expires after 1 h
 const TOKENS = ngx.shared.jwt_tokens; // token -> "roles|exp" for tokens already verified (skip the crypto)

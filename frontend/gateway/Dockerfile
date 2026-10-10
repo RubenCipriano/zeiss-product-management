@@ -12,7 +12,7 @@ COPY jwt.js trace.js /etc/nginx/njs/
 # Run by the image's entrypoint at startup: forward /collect to COLLECTOR_UPSTREAM, or answer 204 when it is empty.
 COPY --chmod=755 collector.sh /docker-entrypoint.d/25-collector.sh
 
-# Defaults; override them in the Kubernetes Deployment (deploy/k8s). COLLECTOR_UPSTREAM="" = no log collector.
+# Defaults; override them in the Kubernetes Deployment (the deploy repository). COLLECTOR_UPSTREAM="" = no log collector.
 ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
     GATEWAY_RATE_LIMIT_RPS=200 \
     GATEWAY_RATE_LIMIT_BURST=400 \

@@ -2,7 +2,7 @@
 #   /api/*   -> API replicas (per-request load balancing, rate limiting, token check, 1 s microcache for reads)
 #   /collect -> the browser's error reports, to the log collector in the cluster (Grafana Alloy), if there is one
 #   /*       -> web (static Angular app), with an edge cache for the immutable bundles
-# The whole picture: docs/guide/02-request-journey.md and docs/adr/0012-gateway.md.
+# The whole picture: the project guide, chapter 2 (request journey) and ADR 0012 (gateway).
 #
 # ${VARIABLES} are filled from the container environment at startup (see Dockerfile).
 

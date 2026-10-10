@@ -24,7 +24,7 @@ internal class StockMovementConfiguration : IEntityTypeConfiguration<StockMoveme
         // The ledger only grows. By default autovacuum would wait for 20% new rows (4 million at 20 million), and until
         // then reading the newest history (the busiest products) is slower. Vacuum every 100,000 new movements
         // instead; on an insert-only table it only visits the new pages.
-        // Measured in docs/adr/0022-database-at-scale.md.
+        // Measured in ADR 0022 (database at scale).
         builder.HasStorageParameter("autovacuum_vacuum_insert_scale_factor", 0);
         builder.HasStorageParameter("autovacuum_vacuum_insert_threshold", 100000);
 

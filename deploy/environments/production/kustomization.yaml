@@ -1,0 +1,34 @@
+# Production environment: the API, the web app and the gateway, with the images promoted from staging.
+#
+# Changed only through merge requests: the backend and frontend pipelines' release:production jobs open one that sets
+# a newTag below to a release staging already runs. Merging it is the release decision; this repository's pipeline
+# then offers deploy:production (manual, scripts/deploy.sh production). Rollback: revert the merge commit.
+#
+# No Secret is here: scripts/deploy.sh creates the registry credential (gitlab-registry) and api-secrets from
+# protected CI/CD variables and copies redis-credentials from the shared Redis; database-credentials is made once by
+# scripts/create-database.sh. Replace the example.* host in ingress.yaml with the real one.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Also on what the environment adds (the Ingress); apps/ labels the rest.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: product-management
+resources:
+  - ../../apps/backend
+  - ../../apps/frontend
+  - ingress.yaml
+patches:
+  - path: api.yaml
+  - path: gateway.yaml
+  - path: registry.yaml
+# The deployed images: changed by merge requests from the app pipelines (ci/release.sh production).
+images:
+  - name: product-management/api
+    newName: registry.gitlab.com/zeiss/backend/api
+    newTag: unreleased
+  - name: product-management/web
+    newName: registry.gitlab.com/zeiss/frontend/web
+    newTag: unreleased
+  - name: product-management/gateway
+    newName: registry.gitlab.com/zeiss/frontend/gateway
+    newTag: unreleased

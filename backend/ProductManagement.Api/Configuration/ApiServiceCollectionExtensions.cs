@@ -47,7 +47,7 @@ internal static class ApiServiceCollectionExtensions
 
     /// <summary>
     /// Every error response is a "problem details" JSON object (RFC 9457, <c>application/problem+json</c>: the
-    /// standard shape for HTTP errors) with an extra machine-readable <c>errorCode</c>. See docs/adr/0005.
+    /// standard shape for HTTP errors) with an extra machine-readable <c>errorCode</c>. See ADR 0005.
     /// </summary>
     private static void AddProblemDetails(IServiceCollection services)
     {

@@ -1,0 +1,148 @@
+# The API. Its whole configuration is in this file, as plain environment variables (ASP.NET Core reads
+# `Section__Key` as `Section:Key`); a change here changes the pod template, so applying it rolls the pods.
+#
+# What differs per environment is in environments/<environment>/api.yaml, always including the two
+# connection strings (where the database and Redis are). No password is in any YAML file: they come from Secrets in
+# this namespace, none of them committed:
+#   database-credentials   made by scripts/create-database.sh (the shared PostgreSQL's users)
+#     app-password         → PGPASSWORD (Npgsql uses it when the connection string has no password)
+#   redis-credentials      a copy of the shared Redis' password (infra/redis-auth), made by scripts/deploy.sh
+#     password             → Redis__Password (added to the Redis connection by the API)
+#   api-secrets            the API's own keys: locally generated from files made by scripts/local-secrets.sh; in
+#                          staging and production created by scripts/deploy.sh from CI/CD variables
+#     signing-key          → Authentication__SigningKey (the ES256 private key that signs access tokens, PEM)
+#     consumers.json       → the file /app/config/consumers.json (registered consumers: client ids, secret hashes, roles)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: product-management
+  labels:
+    app.kubernetes.io/name: api
+spec:
+  # No `replicas`: the HorizontalPodAutoscaler owns the replica count. Setting it here would reset the count on every
+  # `kubectl apply`.
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+    spec:
+      terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        seccompProfile: { type: RuntimeDefault }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
+      containers:
+        - name: api
+          # Pinned to the exact image of the release by each environment's kustomization.yaml (Kustomize `images`).
+          image: product-management/api
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # ConnectionStrings__ProductManagement and ConnectionStrings__Redis (where the database and Redis are)
+            # are set by each environment: environments/<environment>/api.yaml.
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            - name: Authentication__AccessTokenLifetime
+              value: "01:00:00"
+            # Migrations run from the CI/CD pipeline before the rollout, never at startup (several replicas would race).
+            - name: Database__ApplyMigrationsOnStartup
+              value: "false"
+            - name: OpenApi__Enabled
+              value: "false"
+            # Per user (shared by every replica through Redis).
+            - name: RateLimiting__RequestsPerSecond
+              value: "50"
+            - name: RateLimiting__RequestBurst
+              value: "100"
+            - name: RateLimiting__WritesPerSecond
+              value: "10"
+            - name: RateLimiting__WriteBurst
+              value: "20"
+            - name: RateLimiting__TokenRequestsPerMinute
+              value: "20"
+            # Failed sign-ins per client IP per minute, counted cluster-wide in Redis.
+            - name: SignInThrottle__MaxFailures
+              value: "10"
+            - name: SignInThrottle__Window
+              value: "00:01:00"
+            # How long a stored Idempotency-Key response is replayed, and how long an unfinished request holds its
+            # key. 1 hour covers real retries; after that a retry is still never applied twice (the ledger's unique
+            # request key), it is just answered with the current state instead of the stored response.
+            - name: Idempotency__KeyLifetime
+              value: "01:00:00"
+            - name: Idempotency__InProgressTimeout
+              value: "00:01:00"
+            # The secrets (see the top of this file).
+            - name: PGPASSWORD
+              valueFrom: { secretKeyRef: { name: database-credentials, key: app-password } }
+            - name: Redis__Password
+              valueFrom: { secretKeyRef: { name: redis-credentials, key: password } }
+            - name: Authentication__SigningKey
+              valueFrom: { secretKeyRef: { name: api-secrets, key: signing-key } }
+          startupProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          # Readiness includes the database: a pod that cannot reach it should get no traffic. But the database is
+          # shared, so a *slow* database must not take every replica out of the load balancer at once (a cascading
+          # outage). The probe waits up to 3 s and needs 6 failures in a row (30 s) before the pod leaves rotation.
+          # The 1 s default made both replicas flap under load when PostgreSQL was saturated (measured in a load test).
+          # The check itself (`SELECT 1`, 2 s timeout) has its own database connection, so a busy request pool cannot
+          # fail it: 8 replicas x (10 + 1) = 88 connections at most.
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            # Give the gateway time to stop routing to this pod before it stops accepting requests.
+            preStop:
+              sleep: { seconds: 5 }
+          resources:
+            requests: { cpu: 200m, memory: 192Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: consumers
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # Only consumers.json from the Secret becomes a file; the other keys stay environment variables.
+        - name: consumers
+          secret:
+            secretName: api-secrets
+            items:
+              - key: consumers.json
+                path: consumers.json

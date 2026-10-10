@@ -1,43 +1,38 @@
-# CI/CD pipeline of the backend repository (the API) for GitLab. Thin by design: every step is a script in this
-# repository that also runs on a laptop; this file only wires them together, with the images, variables and gates.
+# CI pipeline of the backend repository (the API) for GitLab. It tests, builds and scans the API image, migrates the
+# environments' databases with it and releases it. It never applies Kubernetes manifests: an environment is what the
+# deploy repository (gitlab.com/zeiss/deploy) holds in environments/<environment>/kustomization.yaml, and the deploy
+# repository's own pipeline applies it (GitOps). Releasing means committing the new image tag there.
 #
-#   test ──► build ──► scan ──► staging ──────► verify ──────► production
-#   unit,     image,    Trivy    migrate,        requirements   migrate, deploy
-#   integration, migration (fail on deploy        check against  (manual, protected)
-#   manifests, SQL      critical) (automatic)    staging
-#   SAST
+#   test ─────► build ───────► scan ──────► staging ────────────────────► production (manual)
+#   format,     api image,     Trivy        migrate:staging                migrate:production
+#   build,      migrations     (fails on    release:staging: commits       release:production: opens a merge
+#   every test  SQL (review)   critical)    "backend: api <sha>" to the    request in deploy; merging it is the
+#   suite                                   deploy repository's main       release, its pipeline then applies it
 #
-# Merge request pipelines run test, build and scan. Pipelines on the default branch also deploy to staging
-# (automatically), verify it, and offer production as a manual, protected step, each only once that environment is
-# switched on (STAGING_ENABLED, PRODUCTION_ENABLED below); until then they stop after scan. Tag pipelines build and
-# scan. The web app and the gateway have their own repository and pipeline (frontend), and so does the shared
-# infrastructure (infra: PostgreSQL, Redis and the logs, in the cluster's namespace `infra`).
-#
-# Setup (runners, the cluster's access, environments, every CI/CD variable): docs/guide/12-from-zero.md.
+# Merge request pipelines run test, build and scan. Pipelines on the default branch also migrate and release to
+# staging (automatically) and offer production (manual), each only once that environment is switched on
+# (STAGING_ENABLED, PRODUCTION_ENABLED below); until then they stop after scan. Tag pipelines build and scan.
 #
 # Project- or group-level CI/CD variables (not scoped to an environment: rules cannot see environment-scoped ones):
-#   STAGING_ENABLED           "true" creates the staging jobs (migrate, deploy, verify) on the default branch
-#   PRODUCTION_ENABLED        "true" creates the production jobs (manual); needs STAGING_ENABLED too, production
-#                             deploys only what staging verified
-# A project deploy token named exactly `gitlab-deploy-token` with the read_registry scope (Settings → Repository →
-# Deploy tokens): GitLab passes it to the jobs as CI_DEPLOY_USER / CI_DEPLOY_PASSWORD, and the deploy jobs store it
-# in the cluster as the Secret the pods pull the image with (deploy/ci/deploy-environment.sh).
+#   STAGING_ENABLED       "true" creates the staging jobs (migrate, release) on the default branch
+#   PRODUCTION_ENABLED    "true" creates the production jobs (manual); needs STAGING_ENABLED too
+#   DEPLOY_REPO_TOKEN     masked, protected: a project access token of zeiss/deploy with the role Maintainer and the
+#                         scope write_repository; the release jobs push the new tag with it (ci/release.sh)
+# A group deploy token named exactly `gitlab-deploy-token` with the scope read_registry (zeiss group → Settings →
+# Repository → Deploy tokens): GitLab passes it to every job of the group's projects as CI_DEPLOY_USER /
+# CI_DEPLOY_PASSWORD; the migrate jobs store it in the cluster as the Secret gitlab-registry, to pull the image.
 #
-# Environment-scoped CI/CD variables (Settings → CI/CD → Variables, one value per environment scope):
-#   KUBE_CONTEXT              <agent configuration project path>:<agent name> (the GitLab agent for Kubernetes), or
-#   KUBECONFIG                File: a kubeconfig whose current context is the cluster (e.g. a self-hosted runner
-#                             next to a k3s server); one of the two
-#   API_SIGNING_KEY           File, protected: ES256 private key (PEM)           → Secret api-secrets
-#   API_CONSUMERS             File, protected: consumers.json                    → Secret api-secrets
-#   staging only (verify):    CHECK_CLIENT_ID, CHECK_CLIENT_SECRET (masked)
-# No database or Redis password is a pipeline variable: they are random and live in the cluster (the infra
-# repository's create-database.sh makes the Secret database-credentials, once per environment; deploy/deploy.sh copies
-# the shared Redis' password).
+# Environment-scoped CI/CD variables (staging, production), for the migrate jobs:
+#   KUBE_CONTEXT          <agent configuration project path>:<agent name> (the GitLab agent for Kubernetes), or
+#   KUBECONFIG            File: a kubeconfig whose current context is the cluster; one of the two
+# No database or Redis password is a pipeline variable: they are random and live in the cluster (the deploy
+# repository's create-database.sh makes the Secret database-credentials, once per environment).
 #
-# Runners: every job runs on gitlab.com's shared runners. The migrate and deploy jobs reach the database only through
-# the cluster (kubectl, with the GitLab agent or a kubeconfig), so no runner needs to be inside the private network.
-# To run every job on your own runner instead, register it (Docker executor, privileged for docker:dind) with "Run
-# untagged jobs" and turn off instance runners for the project.
+# With Argo CD (see the deploy repository) nothing changes here: Argo CD watches the deploy repository instead of its
+# pipeline doing the applying, and the migrations stay in this pipeline, before the release commit.
+#
+# Runners: every job runs on gitlab.com's shared runners. The migrate jobs reach the database only through the
+# cluster (kubectl, with the GitLab agent or a kubeconfig), so no runner needs to be inside the private network.
 
 workflow:
   name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
@@ -51,7 +46,7 @@ workflow:
   auto_cancel:
     on_new_commit: interruptible
 
-stages: [test, build, scan, staging, verify, production]
+stages: [test, build, scan, staging, production]
 
 include:
   # GitLab's own analysers (results in the security widget / vulnerability report where the tier has them).
@@ -62,16 +57,15 @@ variables:
   # The release: one image, tagged with the commit. Enable tag immutability for this repository in the Container
   # Registry settings so a tag can never be overwritten.
   API_IMAGE: $CI_REGISTRY_IMAGE/api:$CI_COMMIT_SHORT_SHA
-  # Public URL of staging (the frontend repository's Ingress host); the requirements check goes through its gateway.
-  STAGING_URL: https://staging.products.example.com
+  # The repository that holds the environments (ci/release.sh).
+  DEPLOY_REPO_URL: https://gitlab.com/zeiss/deploy.git
   # Tool images, pinned (bump them with Renovate or by hand).
   DOTNET_SDK_IMAGE: mcr.microsoft.com/dotnet/sdk:10.0.401        # = global.json
-  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11                            # bash, kubectl 1.34 (Kustomize), kubeconform, yq, jq
+  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11                            # bash, kubectl 1.34, git, yq
   DOCKER_IMAGE: docker:29.8.2-cli
   DIND_IMAGE: docker:29.8.2-dind
   BUILDKIT_IMAGE: moby/buildkit:v0.33.1
   TRIVY_IMAGE: aquasec/trivy:0.74.0
-  PYTHON_IMAGE: python:3.13.16-slim
   DOTNET_NOLOGO: "true"
   DOTNET_CLI_TELEMETRY_OPTOUT: "true"
   NUGET_PACKAGES: $CI_PROJECT_DIR/.nuget/packages
@@ -105,8 +99,8 @@ default:
     paths: [.nuget/packages]
 
 # The environments' jobs exist only on the default branch and once the environment is switched on: without a cluster
-# they would fail, and a red pipeline on main would hide the result of test, build and scan. Production also needs
-# staging: it deploys only what staging verified.
+# the migrations would fail, and a red pipeline on main would hide the result of test, build and scan. Production also
+# needs staging: it is offered only what staging already runs.
 .staging:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
@@ -138,17 +132,9 @@ test:backend:
       junit: TestResults/*.junit.xml
     expire_in: 30 days
 
-# The base and every overlay render and are valid; both connection strings are set; no Secret in staging/production.
-test:manifests:
-  stage: test
-  image: $KUBE_TOOLS_IMAGE
-  needs: []
-  script:
-    - deploy/ci/validate-manifests.sh
-
 # ─── build ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-# BuildKit through docker:dind: the same Dockerfile and `docker build` as deploy/deploy.sh, a layer cache kept in the
+# BuildKit through docker:dind: the same Dockerfile and `docker build` as a local build, a layer cache kept in the
 # registry (fast rebuilds on fresh runners), and the privileged runner the integration tests need anyway. Kaniko is
 # archived upstream; Buildah (rootless) is the alternative where privileged runners are not allowed.
 build:api:
@@ -220,35 +206,17 @@ scan:api:
       container_scanning: gl-container-scanning-report.json
     expire_in: 30 days
 
-# ─── deployment jobs, shared by staging and production ──────────────────────────────────────────────────────────────
+# ─── staging (automatic on the default branch) ──────────────────────────────────────────────────────────────────────
 
-# Applies the migrations with the API image itself (`dotnet ProductManagement.Api.dll migrate`), as the schema owner
-# pm_migrator, before the rollout. The database is reachable only inside the cluster, so the job runs the image there
-# as a one-off pod (deploy/ci/deploy-environment.sh migrate → deploy/deploy.sh with MIGRATIONS=only), with the
-# migrator's password from the Secret database-credentials; the job itself only needs kubectl and the cluster.
-# The migration must work with the version still running (expand/contract): the old pods keep serving while it runs,
-# and next to the new pods during the rollout. It also invalidates the cached lists in Redis.
+# Applies the migrations with the API image itself (`dotnet ProductManagement.Api.dll migrate`), as the schema owner,
+# before the image is released. The database is reachable only inside the cluster, so ci/migrate.sh runs the image
+# there as a one-off pod, with the migrator's password from the Secret database-credentials; the job needs only
+# kubectl and the cluster. Migrations must work with the version still running (expand/contract).
 .migrate:
   image: $KUBE_TOOLS_IMAGE
   interruptible: false
   script:
-    - deploy/ci/deploy-environment.sh migrate
-
-# Selects the cluster (KUBE_CONTEXT or KUBECONFIG), creates the image pull Secret (the deploy token) and api-secrets
-# from the environment's CI/CD variables, and rolls out the API with this pipeline's image
-# (deploy/ci/deploy-environment.sh deploy → deploy/deploy.sh). With the GitLab agent for Kubernetes (KUBE_CONTEXT) the
-# cluster's API is never exposed to the runners; a KUBECONFIG suits a self-hosted runner next to the cluster.
-.deploy:
-  image: $KUBE_TOOLS_IMAGE
-  interruptible: false
-  script:
-    - deploy/ci/deploy-environment.sh deploy
-  artifacts:
-    when: always
-    paths: [deploy/k8s/.build/]
-    expire_in: 90 days
-
-# ─── staging ────────────────────────────────────────────────────────────────────────────────────────────────────────
+    - ci/migrate.sh
 
 migrate:staging:
   extends: [.migrate, .staging]
@@ -263,44 +231,30 @@ migrate:staging:
     # Staging is a demo of the system: an empty database gets the sample catalogue (never in production).
     SEED_SAMPLE_DATA: "true"
 
-deploy:staging:
-  extends: [.deploy, .staging]
-  stage: staging
-  needs: [migrate:staging, test:manifests]
-  environment:
-    name: staging
-    url: $STAGING_URL
-    deployment_tier: staging
-  resource_group: staging
-  variables:
-    ENVIRONMENT: staging
-
-# ─── verify (against staging) ───────────────────────────────────────────────────────────────────────────────────────
-
-# The assessment's requirements, one by one, against the deployed system through its gateway (creates and deletes its
-# own products).
-verify:requirements:
+# Commits "backend: api <sha>" to the deploy repository's main (environments/staging/kustomization.yaml); the deploy
+# repository's pipeline applies it and smoke-checks staging. Starts again from the new main if it moved meanwhile.
+release:staging:
   extends: .staging
-  stage: verify
-  image: $PYTHON_IMAGE
-  needs: [deploy:staging]
+  stage: staging
+  image: $KUBE_TOOLS_IMAGE
+  needs: [migrate:staging]
+  interruptible: false
   environment:
     name: staging
-    action: verify
-  variables:
-    BASE_URL: $STAGING_URL
+    action: prepare
+  resource_group: staging
   script:
-    - python3 scripts/check-requirements.py
+    - ci/release.sh staging product-management/api="$CI_COMMIT_SHORT_SHA"
 
 # ─── production (manual, protected) ─────────────────────────────────────────────────────────────────────────────────
 
-# The release decision: starting this job migrates production, and deploy:production follows. Only users allowed to
-# deploy to the protected `production` environment can start it. Because migrations are backward compatible, applying
-# one ahead of the rollout (or of a deployment approval) is safe by construction.
+# The release decision starts here: only users allowed to deploy to the protected `production` environment can start
+# it. It migrates production's database with this image; release:production then opens the merge request. Migrations
+# are backward compatible, so applying one before the merge request is merged (or if it never is) is safe.
 migrate:production:
   extends: .migrate
   stage: production
-  needs: [build:api, verify:requirements]
+  needs: [build:api, release:staging]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true" && $PRODUCTION_ENABLED == "true"
       when: manual
@@ -313,17 +267,18 @@ migrate:production:
     ENVIRONMENT: production
     SEED_SAMPLE_DATA: "false"
 
-# Rollback: Deployments → Environments → production → re-deploy an earlier successful deployment. That re-runs this
-# job from its own pipeline: its image, manifests and the current Secret. Schema changes are never rolled back
-# (expand/contract: the previous release still works on the newer schema); a bad migration is fixed forward.
-deploy:production:
-  extends: [.deploy, .production]
+# Pushes a branch to the deploy repository that sets production's api tag to this image, with push options that open
+# the merge request "Release api <sha> to production". Merging it is the release; the deploy repository's pipeline
+# then applies production. Rollback: revert that merge in the deploy repository (the schema stays: expand/contract).
+release:production:
+  extends: .production
   stage: production
+  image: $KUBE_TOOLS_IMAGE
   needs: [migrate:production]
+  interruptible: false
   environment:
     name: production
-    url: https://products.example.com
-    deployment_tier: production
+    action: prepare
   resource_group: production
-  variables:
-    ENVIRONMENT: production
+  script:
+    - ci/release.sh production product-management/api="$CI_COMMIT_SHORT_SHA"

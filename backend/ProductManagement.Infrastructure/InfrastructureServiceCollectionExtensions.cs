@@ -81,7 +81,7 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddDbContextPool<ProductManagementDbContext>((provider, options) =>
         {
             // No EnableRetryOnFailure: the stock endpoints are not idempotent. If a connection dropped after the
-            // UPDATE committed, an automatic retry would apply it twice. See docs/adr/0003.
+            // UPDATE committed, an automatic retry would apply it twice. See ADR 0003.
             options
                 .UseNpgsql(
                     connectionString,

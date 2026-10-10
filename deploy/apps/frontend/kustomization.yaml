@@ -1,0 +1,12 @@
+# The web app and the gateway in front of the whole application, the same in every environment. What differs per
+# environment (the API's address, the browser-error collector, exposure) is in environments/<environment>. The
+# namespace object is in apps/backend (one object, one place); every environment includes both.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - includeTemplates: true
+    pairs:
+      app.kubernetes.io/part-of: product-management
+resources:
+  - web.yaml
+  - gateway.yaml

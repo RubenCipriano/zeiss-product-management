@@ -36,7 +36,7 @@ public record IdempotencyClaim(IdempotencyClaimStatus Status, StoredResponse? Re
 /// </summary>
 /// <remarks>
 /// It lives here rather than in Core because no use case needs it: its only user is the API's idempotency filter, and
-/// what it stores is an HTTP response. See docs/adr/0017-idempotency-keys.md.
+/// what it stores is an HTTP response. See ADR 0017 (idempotency keys).
 /// </remarks>
 public interface IIdempotencyStore
 {

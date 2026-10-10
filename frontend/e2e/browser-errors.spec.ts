@@ -3,7 +3,7 @@ import { expect, signIn, test } from './support';
 
 /**
  * Browser errors reach Loki: the page's error is reported by the Faro SDK to the gateway's /collect, forwarded to
- * Alloy in the cluster and stored in Loki (the infra repository, namespace infra), where this test reads it back.
+ * Alloy in the cluster and stored in Loki (the deploy repository's infra/, namespace infra), where this test reads it back.
  * Needs Loki at LOKI_URL, by default a port-forward on this machine
  * (`kubectl -n infra port-forward svc/loki 3100:3100`); skipped when Loki is not reachable (e.g. LOGS=off).
  */
