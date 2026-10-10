@@ -69,15 +69,16 @@ feature, no EF Core and no HTTP) ← `Infrastructure` (EF Core, Redis) ← `Api`
 ## Three parts, one place that deploys
 
 The system is in three GitLab repositories: backend, frontend and deploy. The two application repositories hold code,
-tests, Dockerfiles and a pipeline that builds and releases images; the deploy repository holds what runs in every
-environment (GitOps): the Kubernetes manifests, the shared infrastructure and the scripts that apply them. Only its
-pipeline changes the clusters:
+tests, Dockerfiles and a pipeline that builds images and publishes SemVer versions of them (a tag `v1.4.0`); the deploy
+repository holds what runs in every environment (GitOps): the Kubernetes manifests with the chosen versions, the
+shared infrastructure and the scripts that migrate and apply them. Only its pipeline changes the clusters, and it
+pulls new versions in (a pull release model):
 
 | Part | What it holds | Released or deployed by |
 | --- | --- | --- |
-| `backend/` | The .NET solution, its Dockerfile and tests; `ci/migrate.sh` and `ci/release.sh` for its pipeline. | its pipeline migrates the database, then commits the new API image tag to `deploy/environments/staging` (a merge request for production) |
-| `frontend/` | The Angular workspace, the web and gateway Dockerfiles, unit and Playwright tests; `ci/release.sh`. | its pipeline commits the new web and gateway tags to the deploy repository, like the backend |
-| `deploy/` | `apps/backend/` (the API's Deployment, with its configuration as environment variables, the headless Service `api`, autoscaler, disruption budget, network policy) and `apps/frontend/` (the web app and the gateway); `environments/<local, staging, production>/` (one Kustomize folder per environment: connection strings, a few settings, the image tags); `infra/` (the shared infrastructure in the namespace `infra`: PostgreSQL in `postgres.yaml` with its settings, StatefulSet and nightly backup, Redis in `redis.yaml`, the logs in `logs.yaml`: Loki, Grafana with its alert rules, Alloy; the dashboards in `dashboards/`); `scripts/` (`deploy.sh`, `infra.sh`, `create-database.sh` for a service's database, users and the Secret `database-credentials`, `add-node.sh` for a k3s node). | its pipeline (`deploy:staging`, `deploy:production`) runs `scripts/deploy.sh <environment> apps`; locally `deploy/scripts/infra.sh up` and `deploy/scripts/deploy.sh local` |
+| `backend/` | The .NET solution, its Dockerfile and tests; `ci/release-notes.sh` for its GitLab Releases. | its pipeline publishes `api:X.Y.Z` for a tag `vX.Y.Z`; the deploy repository picks it up (staging by schedule, production by merge request) |
+| `frontend/` | The Angular workspace, the web and gateway Dockerfiles, unit and Playwright tests; `ci/release-notes.sh`. | its pipeline publishes `web:X.Y.Z` and `gateway:X.Y.Z` for a tag `vX.Y.Z`, like the backend |
+| `deploy/` | `apps/backend/` (the API's Deployment, with its configuration as environment variables, the headless Service `api`, autoscaler, disruption budget, network policy) and `apps/frontend/` (the web app and the gateway); `environments/<local, staging, production>/` (one Kustomize folder per environment: connection strings, a few settings, the image tags); `infra/` (the shared infrastructure in the namespace `infra`: PostgreSQL in `postgres.yaml` with its settings, StatefulSet and nightly backup, Redis in `redis.yaml`, the logs in `logs.yaml`: Loki, Grafana with its alert rules, Alloy; the dashboards in `dashboards/`); `scripts/` (`deploy.sh`, `migrate.sh`, `infra.sh`, `create-database.sh` for a service's database, users and the Secret `database-credentials`, `versions.sh` and `set-version.sh` for the versions, `add-node.sh` for a k3s node); `argocd/` (prepared for Argo CD). | its pipeline (`update:staging` on a schedule, `deploy:staging`, `deploy:production`) runs `scripts/deploy.sh <environment> apps` (migrations, then apply); locally `deploy/scripts/infra.sh up` and `deploy/scripts/deploy.sh local` |
 
 The documentation (`docs/`) and the local tools (`tools/`: the load tests and the requirements check) are in no
 repository; they sit next to the three.

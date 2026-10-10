@@ -7,8 +7,9 @@
 > at first servers outside the cluster, migrations run by the pipeline with the API image). Later PostgreSQL, Redis
 > and the logs came back into the cluster, as shared infrastructure in their own namespace `infra` (now in the
 > deploy repository: `deploy/infra/`, applied by `deploy/scripts/infra.sh`), and the migrations run as a one-off pod
-> started with `kubectl run` (by the backend pipeline's `ci/migrate.sh`; locally by `deploy/scripts/deploy.sh local`),
-> still without a Job manifest. Still valid: Kubernetes on Docker
+> started with `kubectl run` (by `deploy/scripts/migrate.sh`, which `deploy/scripts/deploy.sh` runs for every
+> environment), still without a Job manifest (a Job exists only as the prepared Argo CD PreSync hook,
+> `deploy/argocd/hooks/`). Still valid: Kubernetes on Docker
 > Desktop locally, one Dockerfile per image, pod hardening, zero-downtime rollouts, NetworkPolicies between the
 > gateway and the applications; the HorizontalPodAutoscalers were added later ([0018](0018-autoscaling-and-scale-testing.md)).
 > The second local cluster option and its VM scripts (`scripts/cluster-up.sh`, `cluster-down.sh`) were removed:

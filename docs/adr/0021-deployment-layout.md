@@ -1,11 +1,13 @@
 # 0021 — Deployment layout: Kustomize overlays, servers outside the cluster, migrations in the pipeline
 
 **Status:** accepted (supersedes the per-project manifests and the migration Job of [0011](0011-kubernetes-deployment.md)),
-amended three times. **Current state:** where things run is
+amended four times. **Current state:** where things run is
 [Update (2026-10-10): the infrastructure moves into Kubernetes](#update-2026-10-10-the-infrastructure-moves-into-kubernetes)
-(PostgreSQL, Redis and the logs in the cluster, in the shared namespace `infra`); the layout and the CI/CD flow are
+(PostgreSQL, Redis and the logs in the cluster, in the shared namespace `infra`); the layout is
 [Revision (2026-10-10): GitOps with a deploy repository](#revision-2026-10-10-gitops-with-a-deploy-repository)
-(every manifest and environment in the deploy repository, whose pipeline is the only one that applies). The servers
+(every manifest and environment in the deploy repository, whose pipeline is the only one that applies); the release
+flow is [Revision (2026-10-10): pull model with SemVer releases](#revision-2026-10-10-pull-model-with-semver-releases)
+(the app pipelines only publish versions; the deploy repository pulls them in and runs the migrations). The servers
 outside the cluster, the Docker Compose files, the private runner for migrations, the password variables and the
 per-repository deploy scripts and manifests described below are history.
 
@@ -374,3 +376,78 @@ jobs (they are run by hand against an environment); the smoke check replaces the
 * **Thinner automated checks after a deployment:** the smoke check (gateway, web app, the API through the gateway,
   optionally a signed-in read) instead of the requirements check and Playwright, which now run by hand.
 * Still no pruning: `kubectl apply` does not delete objects removed from the manifests (Argo CD would).
+
+## Revision (2026-10-10): pull model with SemVer releases
+
+This revision replaces how a new image reaches an environment in the previous revision ("The app pipelines never
+apply": their `ci/release.sh` committing tags into the deploy repository, the backend's `ci/migrate.sh`) and its
+first two trade-offs. The deploy repository's layout, its pipeline as the only one that applies, Kustomize, the
+shared infrastructure and the migration pod are unchanged.
+
+### Context
+
+In the previous revision releases were **pushed**: on every pipeline on `main`, backend and frontend committed their
+new image tag (the commit hash) into `environments/staging` of the deploy repository, and opened merge requests for
+production. That worked, but:
+
+* **The app repositories needed write access to the deploy repository** (`DEPLOY_REPO_TOKEN`, Maintainer, able to push
+  to its protected `main`), and the backend needed **cluster access** for its migrate jobs. A compromised or mistaken
+  app pipeline could change an environment; the credential lived in two projects.
+* **Every commit on `main` went to staging**, identified only by a hash; nothing said what changed between two
+  deployments, and there was no named version to go back to.
+* **Migrations ran in the app pipeline** before the release commit, so production's schema moved when someone started
+  `migrate:production`, not when production actually took the version.
+* It is the opposite of how Argo CD Image Updater works (it watches the registry and writes back to git), so moving to
+  Argo CD would have changed the flow, not only the tool.
+
+### Decision
+
+**App pipelines only build and publish.** backend and frontend: test → build (`<image>:<short sha>`) → scan on every
+merge request and `main`. A git tag `v<MAJOR>.<MINOR>.<PATCH>` (optionally `-rc.<N>`), created by a maintainer
+(protected tags `v*`), runs the same pipeline (reusing `main`'s image of that commit), then `publish:*` adds the tag
+`<MAJOR>.<MINOR>.<PATCH>` (SemVer, no `v`) to the tested and scanned image with `crane tag` (same digest), and
+`release` creates a GitLab Release (`release:` keyword, `release-cli` image) with the image references and digests
+and the commits since the previous version (`ci/release-notes.sh`). They hold no credential of the deploy repository or
+of any cluster. Each app README says which change raises MAJOR, MINOR or PATCH.
+
+**The deploy repository chooses versions.** `environments/<env>/kustomization.yaml` names a SemVer version per image
+(`unreleased` until the first one, which `deploy.sh` refuses). `scripts/versions.sh` lists the published versions from
+the registry's v2 API (curl, with the group deploy token or a `docker login`); `scripts/set-version.sh <env>
+<image|frontend|all> <version|latest>` checks the version exists and edits `newTag` (upgrade and downgrade alike; `latest`
+excludes pre-releases unless `--pre` and never moves backwards; web and gateway move together). Staging is updated by
+the scheduled job `update:staging` (`scripts/update-versions.sh staging`: the newest `X.Y.Z`, committed to `main` as
+"staging: api 1.4.0, ..." with `DEPLOY_PUSH_TOKEN`, a project access token of the deploy repository itself, the same
+thing Image Updater's git write-back does). Production changes only by merge request (`set-version.sh production ...`,
+or the manual `propose:production`, which proposes staging's versions).
+
+**Migrations move to the deploy repository.** `scripts/migrate.sh <env>` reads the API image from the rendered
+environment and runs it as the one-off migration pod; `deploy.sh` calls it for every environment (local included:
+one migration path) right before `kubectl apply`, and a failed migration stops the deploy.
+
+**Argo CD prepared, not installed.** `deploy/argocd/`: one Application per environment (staging automated with prune
+and selfHeal, production manual), Argo CD Image Updater annotations on the staging Application (semver, only `X.Y.Z`,
+git write-back of the kustomization to `main`) with the `ImageUpdater` object that Image Updater 1.x requires, and the
+migration as a PreSync hook Job in a Kustomize Component the environments include on the day of the switch.
+`validate.sh` validates them against the CRDs of the pinned versions on every change; the deploy README has the
+switch procedure.
+
+### Consequences
+
+* **No cross-repository credential.** Backend and frontend have no CI/CD variable at all; the only token that can push
+  to the deploy repository is the deploy repository's own (`DEPLOY_PUSH_TOKEN`), used by its own jobs. Only the deploy
+  project reaches a cluster.
+* **Environments run named versions** with release notes; `git log environments/production` reads "production: api
+  1.4.0, web 2.1.0, gateway 2.1.0". The image of a version is exactly the one tested on `main` (same digest), and tag
+  immutability keeps it so.
+* **Releasing is a deliberate act** (a tag), not every merge. Commit builds still exist for testing, and an environment
+  can be pinned to a release candidate by hand.
+* **The schema moves with the environment**: production's migration runs when production deploys that version, not
+  earlier. Expand/contract still makes it safe for the old pods.
+* **Rollback is the same command** with an older version. In staging the schedule moves forward again, so a rollback
+  there means pausing the schedule (or, better, releasing a fix).
+* **Staging lags a release by up to the schedule interval** (15 minutes), plus the deploy.
+* **Two writers to `main`** (people, `update:staging`); the job starts again from the new `main` when it moved. With
+  Argo CD, Image Updater replaces `update:staging`, never both.
+* **Argo CD readiness.** The switch changes who does each step, not the flow: Argo CD applies instead of `deploy:*`,
+  its PreSync hook migrates instead of `migrate.sh`, Image Updater writes the versions instead of `update:staging`;
+  production stays a merge request plus a manual sync. Releasing in the app repositories does not change at all.

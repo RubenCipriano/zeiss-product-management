@@ -339,8 +339,8 @@ sum by (status) (count_over_time({namespace="product-management", app="gateway"}
 replicas, the API down, PostgreSQL unreachable); `500`/`503` = the API failed (its error lines have the exception and
 the `trace_id`); a bad release (do the errors start at an *API replica started* mark?).
 
-**Do:** if it started with a rollout, roll back: `git revert` the release commit in the deploy repository (its
-pipeline applies the previous tag), or at once `kubectl -n product-management rollout undo deployment/api` until the
+**Do:** if it started with a rollout, roll back: set the previous version in the deploy repository
+(`scripts/set-version.sh <env> api <previous version>`, committed; its pipeline applies it), or at once `kubectl -n product-management rollout undo deployment/api` until the
 revert is applied. If the
 database is the cause, see [DatabaseUnreachable](#databaseunreachable). Otherwise take one failing request's
 `trace_id` and read its API lines.
@@ -563,8 +563,8 @@ outdated tab) rather than everyone; `console.error: …` lines: an error the cod
 `ApiError`/`HttpErrorResponse`: an API failure the page did not handle (find the request in the gateway log at the same
 time and user).
 
-**Do:** if it started with a release and affects many users, roll the web app back (`git revert` the release commit
-in the deploy repository, or at once `kubectl -n product-management rollout undo deployment/web`) and fix it; otherwise reproduce it with the browser and
+**Do:** if it started with a release and affects many users, roll the web app back (`scripts/set-version.sh <env> frontend
+<previous version>` in the deploy repository, or at once `kubectl -n product-management rollout undo deployment/web`) and fix it; otherwise reproduce it with the browser and
 page from the report (the stack trace points at the minified bundle of that release).
 
 ## Following one request

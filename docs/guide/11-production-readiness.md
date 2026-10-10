@@ -126,9 +126,10 @@ Environment work, in order, following the runbook in [chapter 12](12-from-zero.m
    for point-in-time recovery and a standby, PostgreSQL under an operator (CloudNativePG); the logs on a Loki with
    object storage and the company's retention (or outside the cluster through `LOKI_URL`), Grafana behind SSO and
    alerts routed to on-call.
-2. **GitLab:** the agent for Kubernetes (or a `KUBECONFIG`), protected environments, the CI/CD variables of the three
-   projects (with the deploy repository's access token for the release jobs); then a first full pipeline run through
-   staging and a rehearsed rollback (`git revert` in the deploy repository). The shared runners are enough: every job reaches the
+2. **GitLab:** the agent for Kubernetes (or a `KUBECONFIG`), protected environments, protected tags `v*` in backend
+   and frontend, the deploy project's CI/CD variables (with its own access token `DEPLOY_PUSH_TOKEN` for
+   `update:staging`) and the `update:staging` schedule; then a first version released through staging and a rehearsed
+   rollback (`deploy/scripts/set-version.sh` with the older version). The shared runners are enough: every job reaches the
    cluster through `kubectl`.
 3. **TLS:** the certificate for the public names and HSTS; inside the cluster TLS is optional (a database or cache
    outside it would need `SSL Mode=VerifyFull` and the internal CA in the API pods).
@@ -136,7 +137,8 @@ Environment work, in order, following the runbook in [chapter 12](12-from-zero.m
 5. **Multi-node cluster** (k3s, one or three servers for the control plane, and `deploy/scripts/add-node.sh` for nodes with
    the roles database, cache and apps) with a network plugin that enforces NetworkPolicies, Pod Security admission
    (`restricted`), a replicated Redis, and the HPAs' limits re-measured on the real nodes.
-6. **Client IPs** preserved by the load balancer in front of the Ingress controller; Argo CD later.
+6. **Client IPs** preserved by the load balancer in front of the Ingress controller; Argo CD (prepared in
+   `deploy/argocd/`: Applications, Image Updater, the migration as a PreSync hook).
 
 ## How to verify everything
 
