@@ -294,6 +294,29 @@ cluster until it is deleted by hand (`kubectl delete <kind> <name>`), in each en
 `api-secrets-<hash>` Secrets also stay (they let `kubectl rollout undo` go back to the previous keys); delete old ones
 with `kubectl -n product-management get secrets` and `kubectl delete secret`.
 
+## Clean deploy
+
+**Locally, from nothing.** This removes the application, the shared infrastructure with its volumes and passwords,
+and the local keys, then deploys again; an empty database gets the 24-product sample catalogue from the migrations.
+
+```bash
+kubectl config use-context docker-desktop
+kubectl delete namespace product-management --ignore-not-found
+deploy/scripts/infra.sh down --delete-data
+rm -rf deploy/environments/local/generated
+deploy/scripts/infra.sh up
+deploy/scripts/deploy.sh local
+deploy/scripts/smoke.sh http://localhost:8080
+```
+
+Keeping the data and rebuilding only the application is just the last two commands.
+
+**A new environment, the first time:** cluster (k3s, nodes joined with `add-node.sh`), the GitLab variables and the
+group deploy token, `infra:<environment>` then `create-database.sh`, `STAGING_ENABLED` / `PRODUCTION_ENABLED`, then
+a backend and a frontend release; the deploy pipeline refuses the `unreleased` tags until both have released. The
+step-by-step list is in the deploy repository's README ("Clean deploy") and, with every variable, in
+[chapter 12](12-from-zero.md).
+
 ## Image tags
 
 * **Local:** `deploy.sh local` tags each image with its checkout's short commit hash (`git rev-parse --short HEAD`),

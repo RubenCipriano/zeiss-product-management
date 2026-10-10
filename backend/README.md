@@ -80,7 +80,7 @@ connection string uses in-memory replacements (cache, idempotency keys, rate lim
 **1. A PostgreSQL** with those settings, e.g. in Docker:
 
 ```bash
-docker run -d --name pm-postgres -p 5432:5432 \
+docker run -d --name dev-postgres -p 5432:5432 \
   -e POSTGRES_USER=product_management -e POSTGRES_PASSWORD=product_management -e POSTGRES_DB=product_management \
   postgres:18-alpine
 ```
@@ -111,10 +111,10 @@ dotnet run --project ProductManagement.Api           # http://localhost:5080, Sw
 
 Demo accounts: `viewer`/`viewer`, `clerk`/`clerk`, `manager`/`manager` (roles `viewer`, `stock-clerk`, `manager`).
 `ProductManagement.Api.http` signs in and calls every endpoint. Optional, a Redis as in the cluster:
-`docker run -d --name pm-redis -p 6379:6379 redis:8-alpine`, then run with `ConnectionStrings__Redis=localhost:6379`.
+`docker run -d --name dev-redis -p 6379:6379 redis:8-alpine`, then run with `ConnectionStrings__Redis=localhost:6379`.
 
 **Against the cluster's PostgreSQL and Redis** (after the deploy repository's `scripts/deploy.sh local`), as the schema
-owner, since Development applies the migrations; stop `pm-postgres` first, it uses the same port:
+owner, since Development applies the migrations; stop `dev-postgres` first, it uses the same port:
 
 ```bash
 kubectl -n infra port-forward svc/postgres 5432:5432 &

@@ -45,6 +45,9 @@ deploy/scripts/deploy.sh local    # database and keys (first run), api + web + g
 open http://localhost:8080        # sign in as viewer/viewer, clerk/clerk or manager/manager
 ```
 
+To start over from nothing (deletes every row and log line), see [deploy/README.md → Clean deploy](deploy/README.md#clean-deploy);
+the first deployment of staging or production follows the same section.
+
 ## Documentation
 
 The full documentation starts at **[docs/README.md](docs/README.md)**: a guide in thirteen short chapters (a 20-minute
