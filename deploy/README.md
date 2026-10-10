@@ -561,7 +561,7 @@ configuration changes that `kubectl apply` alone does not do.
 | | |
 | --- | --- |
 | Purpose | give a service its own database on the shared PostgreSQL, with two users, and put their passwords in a Secret in the service's namespace |
-| When | once per environment and service (the first `deploy.sh local` does it for you); again after restoring a dump; with `--rotate` to change passwords |
+| When | never by hand for this system: the first `deploy.sh` to a cluster (local, staging or production) runs it when `database-credentials` is missing. By hand: to give **another** service a database, again after restoring a dump, or with `--rotate` to change passwords |
 | Usage | `scripts/create-database.sh <service-namespace> <database> [app-user] [migrator-user] [--rotate]`; for this system: `scripts/create-database.sh product-management product_management pm_app pm_migrator` (defaults for the users: `<database>_app`, `<database>_migrator`) |
 | Needs | `kubectl` only: it runs `psql` inside the PostgreSQL pod (`kubectl exec`); passwords travel on stdin |
 | Idempotent | yes; keeps the existing passwords unless `--rotate` |
@@ -630,7 +630,8 @@ hand.
 **`staging`, `production`**:
 
 1. renders the environment and **refuses** if any image is still `newTag: unreleased` (no version chosen yet);
-2. applies the namespace; requires `database-credentials` (made once with `create-database.sh`);
+2. applies the namespace; if the Secret `database-credentials` does not exist yet (first deploy to this cluster),
+   runs `create-database.sh product-management product_management pm_app pm_migrator`;
 3. with `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`: creates or updates the image pull Secret `gitlab-registry`
    (registry `CI_REGISTRY`, default `registry.gitlab.com`); requires it to exist;
 4. with `API_SIGNING_KEY` and `API_CONSUMERS` (paths of files): checks the key is a PKCS#8 PEM and the JSON has
@@ -1078,8 +1079,9 @@ Staging or production, in this order:
    `docker run --rm registry.gitlab.com/zeiss/backend/api:<version> generate-signing-key > signing-key.pem` and, per
    account, `docker run --rm <api image> hash-secret <secret>` for the `SecretHash` in `consumers.json`
    (format: `{"Authentication":{"Consumers":[{"ClientId":"...","SecretHash":"...","Roles":["viewer"]}]}}`).
-4. **Infrastructure.** Run the manual job `infra:<env>` (or `scripts/infra.sh up` with kubectl on that cluster), then
-   `scripts/create-database.sh product-management product_management pm_app pm_migrator` against that cluster.
+4. **Infrastructure.** Run the manual job `infra:<env>` (or `scripts/infra.sh up` with kubectl on that cluster). The
+   service's database and users are created by the first `deploy:<env>` (it runs `create-database.sh` when they are
+   missing); the migrations then create the tables.
 5. **Switch the environment on.** `STAGING_ENABLED=true` (later `PRODUCTION_ENABLED=true`) in this project, and the
    pipeline schedule for `update:staging`: Build → Pipeline schedules → New schedule, description "update staging",
    interval `*/15 * * * *` (every 15 minutes; any interval works), target branch `main`, active.
@@ -1462,7 +1464,7 @@ a credential of this repository or of a cluster.
 | `update:staging` runs but staging stays on an older version | there is no newer plain `X.Y.Z` (release candidates are skipped), or for web/gateway only one of the two has it | `scripts/versions.sh all`; release the missing image |
 | staging went back up after a downgrade | `update:staging` moves it to the newest version again | deactivate the schedule while staging must stay older; better, release a fix |
 | `deploy:*` fails in `migrate.sh` (the migration pod's output in the log) | a migration failed: nothing was applied, the old version keeps running | fix forward in backend (a new version); the pod is gone, its log is in the job |
-| `No Secret database-credentials in product-management` | the database was never created on this cluster | `scripts/create-database.sh product-management product_management pm_app pm_migrator` |
+| the first deploy stops in `create-database.sh` with `statefulsets.apps "postgres" not found` (or a psql error) | the shared PostgreSQL is not running on that cluster yet | `scripts/infra.sh up postgres` (or the job `infra:<env>`), then run the deploy again |
 | `No Secret gitlab-registry` / `No Secret api-secrets` | the CI/CD variables are missing | create the group deploy token; set `API_SIGNING_KEY`, `API_CONSUMERS` (File type) for the environment |
 | `API_SIGNING_KEY is not a PKCS#8 PEM private key` | wrong key format | `docker run --rm <api image> generate-signing-key` |
 | `No Secret infra/redis-auth` | the shared Redis is not running | `scripts/infra.sh up redis` (or `deploy.sh <env> infra`) |

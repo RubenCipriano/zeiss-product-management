@@ -24,9 +24,10 @@
 #   1. refuses an environment whose kustomization.yaml still names no version for an image (newTag: unreleased);
 #   2. creates the registry credential (Secret gitlab-registry) and the API's own Secret (api-secrets) from the CI/CD
 #      variables below, when they are set (otherwise the existing Secrets are kept);
-#   3. copies the shared Redis' password into the namespace (Secret redis-credentials);
-#   4. applies the database migrations with the API image the environment names (scripts/migrate.sh <environment>);
-#   5. applies environments/<environment> exactly as committed and waits for the rollouts.
+#   3. creates the service's database and users on the first deploy (scripts/create-database.sh);
+#   4. copies the shared Redis' password into the namespace (Secret redis-credentials);
+#   5. applies the database migrations with the API image the environment names (scripts/migrate.sh <environment>);
+#   6. applies environments/<environment> exactly as committed and waits for the rollouts.
 #   Which versions run is chosen in environments/<environment>/kustomization.yaml (scripts/set-version.sh).
 #
 # Variables:
@@ -247,15 +248,23 @@ EOF
   fi
 
   kubectl apply -f "$ROOT/apps/backend/namespace.yaml" >/dev/null
-  if ! kubectl -n "$NAMESPACE" get secret database-credentials >/dev/null 2>&1; then
-    echo "==> The service's database (first deploy)"
-    "$HERE/create-database.sh" "$NAMESPACE" product_management pm_app pm_migrator
-  fi
+  ensure_database
   copy_redis_password
   "$HERE/migrate.sh" local
 
   echo "==> Applying environments/local"
   kubectl apply -k "$ENV_DIR"
+}
+
+# The service's database and its two users, on the first deploy to a cluster. The migrations then create everything
+# inside it (tables, indexes, the app user's permissions) as the schema owner; they cannot create the database or the
+# users themselves: that needs the server's administrator, and the passwords must never be in the code.
+# create-database.sh is idempotent and keeps existing passwords, so this only acts when the Secret is missing.
+ensure_database() {
+  if ! kubectl -n "$NAMESPACE" get secret database-credentials >/dev/null 2>&1; then
+    echo "==> The service's database and users (first deploy to this cluster)"
+    "$HERE/create-database.sh" "$NAMESPACE" product_management pm_app pm_migrator
+  fi
 }
 
 # ─── staging, production: apply what is committed ─────────────────────────────────────────────────────────────────
@@ -274,8 +283,7 @@ deploy_remote_apps() {
   fi
 
   kubectl apply -f "$ROOT/apps/backend/namespace.yaml"
-  require_secret database-credentials \
-    "create the database first: scripts/create-database.sh $NAMESPACE product_management pm_app pm_migrator"
+  ensure_database
 
   # The registries are private: the nodes pull with this credential, also long after this job (a pod moved to another
   # node, a restart), so it is a deploy token, not the job's own short-lived token.
