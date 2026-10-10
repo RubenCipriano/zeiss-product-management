@@ -6,6 +6,45 @@ limiting and idempotency keys. This repository holds the code, the tests, the im
 Kubernetes manifests and the environments are in the [deploy](https://gitlab.com/zeiss/deploy) repository; the web
 app and the gateway in [frontend](https://gitlab.com/zeiss/frontend).
 
+## What it does
+
+The assessment asked for a product API; all of it is here and tested over real HTTP against a real PostgreSQL:
+
+| Requirement | How |
+| --- | --- |
+| CRUD: `GET/POST /api/products`, `GET/PUT/DELETE /api/products/{id}` | lists are paged (`page`, `pageSize` ≤ 100) and every item carries its stock |
+| `POST /api/products/{id}/decrement-stock/{quantity}` and `…/add-to-stock/{quantity}` | `200 OK` with the updated product; never below 0 (`409`), quantity validated (`400`) |
+| `GET /api/products/search?name=` | partial, case-insensitive match (trigram index; `%` and `_` are literal) |
+| `GET /api/products/stock-level?min=&max=` | inclusive range, either bound optional |
+| Unique 6-digit ids, also with several instances | a PostgreSQL sequence 100000–999999: every instance draws from the same counter; `503 product.ids_exhausted` when used up |
+| Validation on create and update | FluentValidation, every invalid field named in one RFC 9457 problem-details response |
+| EF Core code-first migrations and seeding | migrations in `ProductManagement.Infrastructure/Persistence/Migrations`; categories seeded by migration, a sample catalogue on an empty database |
+| Unit tests (BDD optional) | 385 tests: 216 unit, 153 integration (Testcontainers), 16 BDD scenarios (Reqnroll) |
+
+Added because a real deployment needs them: sign-in with ES256 JWTs issued by the API to registered consumers and
+three roles (viewer, stock clerk, manager); optimistic concurrency with `ETag` / `If-Match` (`412` instead of a lost
+update); `Idempotency-Key` so a retried request is applied once (Redis first, a unique key in the stock ledger as the
+backstop); a stock ledger with each product's history (`GET /api/products/{id}/stock-movements`); a Redis read cache;
+per-user rate limits shared by every replica; health checks (`/health/live`, `/health/ready`); JSON logs carrying the
+request's trace id.
+
+## Design decisions
+
+* **Three projects, one rule.** `Core` (what the system does: entities, rules, use cases), `Infrastructure` (how it
+  is stored: EF Core, PostgreSQL, Redis) and `Api` (how it is reached: HTTP, security). `Core` does not reference the
+  database library, so business rules cannot depend on it; the compiler enforces it.
+* **Stock changes are one SQL statement.** A conditional `UPDATE … WHERE stock + change BETWEEN 0 AND max` plus the
+  ledger insert, in one round trip: two requests taking the last unit can never both succeed, and nothing retries.
+* **Expected failures are returned, not thrown.** Use cases return `Result<T>` / `Error`; one place maps the error
+  type to an HTTP status and a stable `errorCode`. Exceptions are left for bugs and outages.
+* **Ids come from the database.** A sequence is atomic across any number of API instances, needs no coordination and
+  never repeats an id, even after a delete.
+* **The cache is added from outside.** `CachingProductQueries` wraps the real queries (a decorator); `Core` knows
+  nothing about Redis. Writes bump a version number instead of deleting keys, so a stale read can never be cached
+  after a change. If Redis is down the API keeps working, slower.
+* **Least privilege in the database.** The API connects as a user that can read and write rows but not change the
+  schema; migrations run as the schema owner, from the pipeline, before the new version is released.
+
 ## Projects
 
 `ProductManagement.sln`, with the solution folders `Source` and `Tests`:

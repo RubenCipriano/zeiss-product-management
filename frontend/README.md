@@ -6,6 +6,38 @@ holds the code, the unit and end-to-end tests, the two images and their CI pipel
 environments are in the [deploy](https://gitlab.com/zeiss/deploy) repository; the API in
 [backend](https://gitlab.com/zeiss/backend).
 
+## What it does
+
+The assessment asked for an Angular app that consumes the API and reflects its changes:
+
+* **Products page:** a paged table with each product's stock and status (in stock, low, out); search by name
+  (partial); filter by stock range; summary cards (total, low stock, out of stock).
+* **Changes:** create, edit and delete (with confirmation); add or remove stock in one click with a chosen step
+  (1, 5, 10, 25 or 100) or by an exact amount; each product's stock history.
+* **Reflects the API:** the page reloads after every change, refreshes itself every 15 seconds so changes made by
+  others appear, and shows when someone else edited a product meanwhile (`412`) instead of overwriting it.
+* **Sign-in and roles:** a viewer only reads, a stock clerk changes stock, a manager does everything; buttons the
+  user may not use are not shown.
+
+Added for a production feel: a browser cache (the cached page appears at once, then the fresh one replaces it), the
+next page loaded ahead of time, a loading bar instead of an emptied table, accessible dialogs and menus (Angular CDK),
+a strict Content-Security-Policy, and the browser's errors reported to the logs (no personal data). The **gateway**
+(nginx) is the single entry point: it serves the app, routes `/api` to the API replicas, checks the token before a
+request reaches the API, rate-limits per client and keeps read answers for one second.
+
+## Design decisions
+
+* **Standalone components and signals** (Angular 22's defaults, no NgModules, no zone.js): the screen updates because
+  a value changed, which keeps updates predictable.
+* **Three layers per feature:** `data-access/` talks to the API and holds the page's state (`ProductsApi`,
+  `ProductsStore`), `feature/` decides what happens when the user acts (`ProductActions`, the dialogs), `ui/` only
+  displays and emits events. A table never calls the API.
+* **One idempotency key per click:** a retried or double-clicked stock change is applied once by the API.
+* **Tailwind + Angular CDK** instead of a component library: small bundle (≈ 94 kB transferred on first load) and
+  accessible behaviour (focus trap, keyboard, screen readers) without fighting a theme.
+* **Same origin through the gateway:** no CORS, one CSP, and the token check and caching in one place for every
+  client.
+
 ## Run locally
 
 Requires Node 24 LTS (`.nvmrc`) and an API to talk to.

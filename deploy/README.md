@@ -11,6 +11,32 @@ them. Each environment is a folder here; what is committed is what runs (GitOps)
 The backend and frontend pipelines build, test and scan their images and then **release** them by committing the new
 image tag to this repository. They never apply anything. This repository's pipeline applies.
 
+## Why this layout
+
+* **One source of truth for what runs where.** Every environment is a folder; the image tags in it are what runs.
+  "What is in production?" is answered by reading a file, and its history is the release history.
+* **Apps build, deploy applies.** Developers change backend and frontend; only this repository (and later Argo CD)
+  changes the clusters. App pipelines need no cluster rights except the backend's migration step.
+* **Promotion and rollback are git operations.** Staging gets every release automatically; production changes through
+  a merge request that someone approves; a rollback is a `git revert`.
+* **Ready for Argo CD.** The pipeline's apply step is exactly what an Argo CD Application per environment would do;
+  switching only moves who applies (see [Argo CD](#argo-cd-next-step)).
+* **Shared infrastructure, plain names.** PostgreSQL, Redis and the logs run once per cluster in the namespace `infra`
+  (`postgres`, `redis`, `loki`, `grafana`) and serve every service; a new service gets its own database with
+  `scripts/create-database.sh`. Dedicated machines are added as Kubernetes nodes with a role
+  (`scripts/add-node.sh`), not as servers outside the cluster.
+* **Configuration you can read.** Every setting is a plain env key in the YAML (connection strings without
+  passwords, the API address, rate limits); only passwords, the signing key and the accounts are Secrets, and none of
+  them is committed.
+
+## Status
+
+| | |
+| --- | --- |
+| Verified locally (Docker Desktop Kubernetes) | `scripts/infra.sh up`, `scripts/deploy.sh local`: the API, web and gateway with the shared infrastructure, 850k products and a 20M-row stock ledger; all of the assessment's requirements, end-to-end tests (Playwright), load tests (k6) and the log pipeline (Loki, Grafana, 12 alert rules) pass against it |
+| Validated, not yet run on a real cluster | `environments/staging` and `environments/production` (rendered and schema-checked by `scripts/validate.sh`), the GitLab pipelines (schema-checked; jobs that need no cluster run on gitlab.com), `scripts/add-node.sh` (dry run) |
+| Still to provide per environment | a k3s (or any) cluster, the hosts in `ingress.yaml` and `STAGING_URL` / `PRODUCTION_URL` (now `*.example.com`), the CI/CD variables below, TLS issuer, off-node backups |
+
 ## Layout
 
 | Path | What it is |
