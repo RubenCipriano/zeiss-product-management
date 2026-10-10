@@ -4,8 +4,9 @@
 
 > **Update (2026-10-10):** each API replica also holds one connection for its readiness check (`SELECT 1` on its
 > own pool, 2 s timeouts), so a saturated request pool cannot fail readiness on every replica at once. At the maximum
-> the database sees 8 × (10 + 1) = 88 connections, within `max_connections = 200`. PostgreSQL now runs on its own
-> server outside the cluster ([0021](0021-deployment-layout.md), [0022](0022-database-at-scale.md)).
+> the database sees 8 × (10 + 1) = 88 connections, within `max_connections = 200`. PostgreSQL ran for a while as a
+> server outside the cluster ([0021](0021-deployment-layout.md), [0022](0022-database-at-scale.md)); it now runs in
+> the cluster again, as a StatefulSet in the shared namespace `infra` with the same settings.
 
 ## Context
 
@@ -25,7 +26,8 @@ duplicated or lost?
 * Fast scale-up (up to 2 pods every 30 s, no stabilisation window) and slow scale-down (3 minutes of lower load,
   then 1 pod a minute): adding capacity late costs errors, removing it late costs only a little CPU.
 * The Deployment has no `replicas` field, so `kubectl apply` never fights the autoscaler.
-* Needs metrics-server: `infra/cluster-addons.sh` installs it on Docker Desktop (k3s and most managed clusters ship it).
+* Needs metrics-server: `infra/infra.sh up` installs it where the cluster has none, as on Docker Desktop (k3s and most
+  managed clusters ship it).
 
 **Data at scale.** `backend/load-tests/seed-bulk.sh` loads 850,000 products (most of the 900,000 six-digit ids, leaving
 room for new ones) with 5 million stock movements, generated in SQL in about two minutes:

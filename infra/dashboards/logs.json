@@ -1,7 +1,7 @@
 {
   "uid": "logs",
   "title": "Logs — where everything goes",
-  "description": "Every log line in one place, side by side: frontend (browser errors, web, gateway), backend (API) and servers (PostgreSQL, Redis, Loki, Grafana). Where each comes from, how it is labelled and how long it is kept. See docs/guide/08-observability.md.",
+  "description": "Every log line in one place, side by side: frontend (browser errors, web, gateway), backend (API) and the shared infrastructure (PostgreSQL, Redis, Loki, Grafana). Where each comes from, how it is labelled and how long it is kept. See docs/guide/08-observability.md.",
   "tags": [
     "product-management",
     "logs"
@@ -129,7 +129,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Where every log goes.** The applications and servers only write to stdout; a collector reads those lines and pushes them to **Loki** on the monitoring server, and Grafana reads Loki. The browser is the exception: it cannot write anywhere we can read, so the web app reports its **errors** (only those) through the gateway.\n\n| Source | Collected by | Query it with |\n| --- | --- | --- |\n| **Browser** (the Angular app): uncaught errors, unhandled rejections, Angular's ErrorHandler, `console.error` | Grafana Faro SDK → gateway `POST /collect` → Alloy `faro.receiver` in the cluster | `{namespace=\"browser\"}`, level `error`; per line: `page` (no query string), `user`, `app_version`, `browser` |\n| **Pods**: gateway, web, API (and load tests, kube-system) | Alloy in the cluster (namespace `observability`), through the Kubernetes API | `{namespace=\"product-management\", app=\"gateway\"}` (or `\"web\"`, `\"api\"`); API label `level`; per line: `trace_id`, gateway `status`, `user`, API `category` |\n| **Servers**: PostgreSQL, Redis, the monitoring server's Loki and Grafana, the agent itself | server agent (container `pm-server-agent`, Alloy), reading the servers' containers | `{namespace=\"servers\", app=\"postgres\"}` (or `\"redis\"`, `\"loki\"`, `\"grafana\"`, `\"agent\"`) |\n\n**Stored:** Loki on the monitoring server: locally the container `pm-loki`, data on the volume `pm-loki-data` (infra: `logs/loki.yaml`), kept **14 days** and then deleted by Loki's compactor. **Variables:** *search* (any text, case-insensitive) and *trace_id* filter every panel; with a trace_id only the gateway and API lines of that request remain. *API level* filters the API panel. Guide: `docs/guide/08-observability.md`."
+        "content": "**Where every log goes.** Every pod only writes to stdout; a collector (Alloy) reads those lines and pushes them to **Loki**, and Grafana reads Loki. All of it runs in the cluster, in the namespace `infra`. The browser is the exception: it cannot write anywhere we can read, so the web app reports its **errors** (only those) through the gateway.\n\n| Source | Collected by | Query it with |\n| --- | --- | --- |\n| **Browser** (the Angular app): uncaught errors, unhandled rejections, Angular's ErrorHandler, `console.error` | Grafana Faro SDK → gateway `POST /collect` → Alloy `faro.receiver` in the cluster | `{namespace=\"browser\"}`, level `error`; per line: `page` (no query string), `user`, `app_version`, `browser` |\n| **Pods**: gateway, web, API (and load tests, kube-system) | Alloy (namespace `infra`), through the Kubernetes API | `{namespace=\"product-management\", app=\"gateway\"}` (or `\"web\"`, `\"api\"`); API label `level`; per line: `trace_id`, gateway `status`, `user`, API `category` |\n| **Shared infrastructure**: PostgreSQL, Redis, Loki, Grafana (and the nightly backup) | the same Alloy: they are pods like any other | `{namespace=\"infra\", app=\"postgres\"}` (or `\"redis\"`, `\"loki\"`, `\"grafana\"`, `\"postgres-backup\"`) |\n\n**Stored:** Loki (StatefulSet `loki`, data on the volume `data-loki-0`; infra: `logs.yaml`), kept **14 days** and then deleted by Loki's compactor. **Variables:** *search* (any text, case-insensitive) and *trace_id* filter every panel; with a trace_id only the gateway and API lines of that request remain. *API level* filters the API panel. Guide: `docs/guide/08-observability.md`."
       }
     },
     {
@@ -154,7 +154,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (namespace, app) (count_over_time({namespace=~\"browser|product-management|servers\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` [$__auto]))",
+          "expr": "sum by (namespace, app) (count_over_time({namespace=~\"browser|product-management|infra\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` [$__auto]))",
           "legendFormat": "{{namespace}} / {{app}}",
           "refId": "A",
           "editorMode": "code",
@@ -392,7 +392,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "### Servers\nPostgreSQL · Redis · Loki · Grafana"
+        "content": "### Shared infrastructure\nPostgreSQL · Redis · Loki · Grafana"
       }
     },
     {
@@ -646,7 +646,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "{namespace=\"servers\", app=\"postgres\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}`",
+          "expr": "{namespace=\"infra\", app=\"postgres\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}`",
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
@@ -685,7 +685,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "{namespace=\"servers\", app=\"redis\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}`",
+          "expr": "{namespace=\"infra\", app=\"redis\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}`",
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
@@ -724,7 +724,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "{namespace=\"servers\", app=\"loki\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` | logfmt level | level!=\"info\"",
+          "expr": "{namespace=\"infra\", app=\"loki\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` | logfmt level | level!=\"info\"",
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
@@ -763,7 +763,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "{namespace=\"servers\", app=\"grafana\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` | logfmt level | level!=\"info\"",
+          "expr": "{namespace=\"infra\", app=\"grafana\"} | trace_id=~\"$trace_id.*\" |~ `(?i)${search:regex}` | logfmt level | level!=\"info\"",
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",

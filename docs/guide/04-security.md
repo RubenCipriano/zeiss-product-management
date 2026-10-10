@@ -151,24 +151,30 @@ the logs.
 | --- | --- |
 | `api-ingress` | the gateway pods, port 8080 (which is why the API may trust `X-Forwarded-For`) |
 | `web-ingress` | the gateway pods, port 8080 |
-| `alloy-ingress` (namespace `observability`) | the gateway pods, port 12347: the browser-error receiver, so the gateway's per-IP limit on `/collect` cannot be bypassed from inside the cluster |
+| `alloy-ingress` (namespace `infra`) | the gateway pods of `product-management`, port 12347: the browser-error receiver, so the gateway's per-IP limit on `/collect` cannot be bypassed from inside the cluster |
 
 **Important:** a NetworkPolicy is only enforced if the cluster's network plugin supports it. **Docker Desktop's
 built-in Kubernetes does not enforce them**: from a `web` pod, `nc -z <api pod IP> 8080` succeeds although
 `api-ingress` admits only the gateway. Production clusters with Calico or Cilium (k3s ships a policy controller too) do
 enforce them. On Docker Desktop the policies document the intended isolation but do not provide it.
 
-PostgreSQL and Redis run outside the cluster ([chapter 9](09-deployment-and-operations.md#what-runs-where)), so their
-access control is the servers' job, not a NetworkPolicy's: PostgreSQL requires its user and password, Redis requires
-a password (`--requirepass`). In production add TLS and a firewall that admits only the cluster's nodes and the CI
-runners.
+PostgreSQL and Redis run in the shared namespace `infra` ([chapter 9](09-deployment-and-operations.md#what-runs-where))
+behind ClusterIP Services: reachable from inside the cluster only, never published on the host or the internet. They
+are shared by every service on the cluster, so their access control is by credentials rather than by NetworkPolicy:
+PostgreSQL requires a user and password per service (`infra/create-database.sh`), Redis a password (`--requirepass`,
+random, in the Secret `infra/redis-auth`). Traffic between pods is plain TCP on the cluster's network; a database or
+cache outside the cluster would get TLS (`SSL Mode=VerifyFull`).
 
-**Least privilege in the database** ([`roles.sql`](../../infra/postgres/roles.sql)). The API connects as
-`pm_app`, which may read and write rows and draw ids from the sequence, nothing else: `CREATE TABLE` fails with "permission
+**Least privilege in the database** (the users from
+[`infra/create-database.sh`](../../infra/create-database.sh), the grants from the migration
+[`GrantAppPermissions`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs)).
+The API connects as `pm_app`, which may read and write rows and draw ids from the sequence, nothing else: `CREATE TABLE` fails with "permission
 denied for schema public", `ALTER` and `DROP` with "must be owner", so a bug or an injected query cannot change the schema. Its sessions end a statement after
-30 s and a transaction left idle after 60 s. Only the migration step, outside the cluster, uses the schema owner
-`pm_migrator`; the cluster holds no credential that can change the schema. On the cache server, `FLUSHALL`, `FLUSHDB`
-and `DEBUG` are disabled ([`redis.conf`](../../infra/redis/redis.conf)).
+30 s and a transaction left idle after 60 s. Only the migration step, a one-off pod started by the deploy, uses the
+schema owner `pm_migrator`; the API's pods receive only `pm_app`'s password (the key `app-password` of the Secret
+`database-credentials`), never the migrator's. The platform creates the database and both users; what `pm_app` may do
+on the service's tables is granted by the service's own migration, as `pm_migrator`. In Redis, `FLUSHALL`, `FLUSHDB`
+and `DEBUG` are disabled (the `redis.conf` in [`infra/redis.yaml`](../../infra/redis.yaml)).
 
 ## Containers
 
@@ -177,24 +183,30 @@ and `DEBUG` are disabled ([`redis.conf`](../../infra/redis/redis.conf)).
 | api | non-root (1654) | ✓ | all dropped, no privilege escalation | ✓ |
 | web | non-root (101) | ✓ | all dropped, no privilege escalation | ✓ |
 | gateway | non-root (101) | no: nginx renders its configuration at start-up | all dropped, no privilege escalation | ✓ |
+| redis (`infra`) | non-root (999) | ✓ | all dropped, no privilege escalation | ✓ |
+| postgres (`infra`) | starts as root to prepare its data directory, then runs the server as `postgres` | no | image defaults, no privilege escalation | ✓ |
 
-Every container has CPU and memory requests and limits. The database and cache servers are plain containers started
-by `infra/infra.sh` (Docker Compose) with CPU and memory limits; on a real system they are dedicated servers or managed
-services, hardened by whoever runs them.
+Every container has CPU and memory requests and limits, PostgreSQL's (4 CPUs, 3 GiB) sized together with its
+`postgresql.conf`. Loki, Grafana and Alloy run as non-root with all capabilities dropped. PostgreSQL and Redis can be
+given nodes of their own (`infra/add-node.sh`, a label and a taint per role), so nothing else is scheduled next to
+them.
 
 ## Secrets
 
-No password, key or secret hash is committed. The API reads one Secret, `api-secrets`: `database-password` (becomes
-`PGPASSWORD`), `redis-password` (`Redis__Password`), `signing-key` and `consumers.json`. The connection strings in the
-overlays hold no password at all. Locally, `backend/deploy/local-secrets.sh` (run by `backend/deploy/deploy.sh`)
-generates a new signing key, the demo consumers' hashes and a `passwords.env` with the local database and Redis
-passwords once per machine, into the gitignored `backend/deploy/k8s/overlays/local/generated/` (mode 600), from which
-the local overlay generates the Secret; the signing key and consumers also go to the .NET user-secrets for
-`dotnet run`. The server passwords in the infra's Compose files are **local development defaults** and say so
-(`infra/database.yaml`, `infra/redis.yaml`; overridable by environment variables). Only the `local` overlay produces a
+No password, key or secret hash is committed, and no password is a default: every one is random and lives only in
+the cluster. The API reads three Secrets in its namespace: `database-credentials` (key `app-password` becomes
+`PGPASSWORD`; made by `infra/create-database.sh`, which also holds the migrator's password for the migration pod),
+`redis-credentials` (`Redis__Password`; a copy of the infra's `redis-auth` that `backend/deploy/deploy.sh` makes on
+every deploy, because a pod reads only Secrets of its own namespace) and `api-secrets` (`signing-key` and
+`consumers.json`). The connection strings in the overlays hold no password at all. The infra's own passwords (the
+PostgreSQL superuser in `postgres-admin`, Redis in `redis-auth`) are generated by `infra/infra.sh up` the first time
+and never changed by it. Locally, `backend/deploy/local-secrets.sh` (run by `backend/deploy/deploy.sh`) generates a
+new signing key and the demo consumers' hashes once per machine, into the gitignored
+`backend/deploy/k8s/overlays/local/generated/` (mode 600), from which the local overlay generates `api-secrets`; the
+signing key and consumers also go to the .NET user-secrets for `dotnet run`. Only the `local` overlay produces a
 Secret, and CI fails if one appears in staging or production (`backend/deploy/ci/validate-manifests.sh`). For those,
-the pipeline creates `api-secrets` from protected, masked CI/CD variables (`backend/deploy/ci/create-secrets.sh`),
-each environment with its own signing key and consumer secrets; a secret
+the pipeline creates `api-secrets` from protected CI/CD variables (`backend/deploy/ci/create-secrets.sh`), each
+environment with its own signing key and consumer secrets; a secret
 manager (External Secrets or Vault) is the next step for audit and automatic rotation. The API refuses to start with a missing or
 malformed signing key, or with a consumer whose secret hash is malformed (options validated at start-up).
 
@@ -224,13 +236,16 @@ malformed signing key, or with a consumer whose secret hash is malformed (option
   [`RedisDistributedRateLimiter.cs`](../../backend/ProductManagement.Infrastructure/Security/RedisDistributedRateLimiter.cs)
 * Front end: [`auth.ts`](../../frontend/src/app/core/auth/auth.ts),
   [`auth-interceptor.ts`](../../frontend/src/app/core/auth/auth-interceptor.ts) (adds the token to `/api` calls only)
-* Manifests: [`backend/deploy/k8s/base`](../../backend/deploy/k8s/base) (the API's Deployment reads `api-secrets`),
+* Manifests: [`backend/deploy/k8s/base`](../../backend/deploy/k8s/base) (the API's Deployment and the three Secrets it reads),
   [`frontend/deploy/k8s/base`](../../frontend/deploy/k8s/base),
   [`overlays/local/kustomization.yaml`](../../backend/deploy/k8s/overlays/local/kustomization.yaml) (the local
   `secretGenerator`), [`backend/deploy/local-secrets.sh`](../../backend/deploy/local-secrets.sh),
   [`backend/deploy/ci/create-secrets.sh`](../../backend/deploy/ci/create-secrets.sh)
-* Servers: [`infra/database.yaml`](../../infra/database.yaml), [`infra/redis.yaml`](../../infra/redis.yaml),
-  [`roles.sql`](../../infra/postgres/roles.sql), [`redis.conf`](../../infra/redis/redis.conf)
+* Database and cache: [`infra/postgres.yaml`](../../infra/postgres.yaml), [`infra/redis.yaml`](../../infra/redis.yaml)
+  (with its `redis.conf`), [`infra/create-database.sh`](../../infra/create-database.sh) (users, passwords, the Secret
+  `database-credentials`),
+  [`GrantAppPermissions`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs)
+  (what `pm_app` may do)
 * Decisions: [ADR 0009](../adr/0009-authentication-authorization.md), [ADR 0010](../adr/0010-rate-limiting.md),
   [ADR 0019](../adr/0019-content-security-policy.md), [ADR 0020](../adr/0020-edge-token-verification.md)
 * Precise diagrams: [flows.md §2 sign-in](../flows.md#2-sign-in),

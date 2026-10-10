@@ -1,32 +1,25 @@
-# CI/CD pipeline of the infra repository (the servers outside the cluster and the cluster's log collector) for
-# GitLab. Every change is validated; deploying is always a manual step, per environment and per component, because
-# these servers hold the data and are changed rarely and deliberately.
+# CI/CD pipeline of the infra repository (the shared infrastructure in the cluster's namespace `infra`: PostgreSQL,
+# Redis, Loki, Grafana, Alloy) for GitLab. Every change is validated; deploying is always a manual step per
+# environment, because this holds the data of every service and is changed rarely and deliberately.
 #
-#   validate ──────────────────────────────► deploy (manual)
-#   compose files, logs/k8s manifests,       servers: ./infra.sh up <component> on a runner on that server
-#   Alloy configuration format               cluster: the log collector (GitLab agent for Kubernetes or kubeconfig)
+#   validate ─────────────────────────────────────────► deploy (manual)
+#   manifests (kubeconform), scripts (shellcheck),       ./infra.sh up in the environment's cluster
+#   the inline Alloy configuration (alloy validate, fmt)
 #
 # Setup: docs/guide/12-from-zero.md.
 #
 # Project- or group-level CI/CD variables (not scoped to an environment: rules cannot see environment-scoped ones):
-#   STAGING_ENABLED, PRODUCTION_ENABLED   "true" creates that environment's deploy jobs (manual) on the default
+#   STAGING_ENABLED, PRODUCTION_ENABLED   "true" creates that environment's deploy job (manual) on the default
 #                             branch; without them the pipeline only validates
 #
 # Environment-scoped CI/CD variables (Settings → CI/CD → Variables):
 #   KUBE_CONTEXT              <agent configuration project path>:<agent name> (the GitLab agent for Kubernetes), or
-#   KUBECONFIG                File: a kubeconfig whose current context is the cluster; one of the two (the
-#                             cluster's log collector)
-#   CLUSTER_LOKI_URL          the Loki the cluster's collector pushes to, e.g.
-#                             http://pm-monitoring.example.internal:3100/loki/api/v1/push, or Grafana Cloud's push URL
-#   LOKI_USERNAME, LOKI_PASSWORD   only for a hosted Loki (masked)
-#   POSTGRES_PASSWORD, PM_MIGRATOR_PASSWORD, PM_APP_PASSWORD, REDIS_PASSWORD   masked, protected; the last three are
-#                             the same values the backend repository's pipeline uses (group-level variables)
-# Runners: validate and cluster-logs run on gitlab.com's shared runners (no tags). The servers jobs run on a shell
-# runner with Docker on each server, tagged pm-<environment>-<component> (e.g. pm-staging-database), registered to
-# this project only: they start containers on that machine, from this checkout. These are not the backend's
-# PRIVATE_RUNNER_TAG runner (product-management-private, Docker executor); on a single machine that hosts every
-# server, one shell runner carries all of that environment's tags (pm-staging-database, pm-staging-redis,
-# pm-staging-logs).
+#   KUBECONFIG                File: a kubeconfig whose current context is the cluster; one of the two
+#   LOKI_URL                  optional: another Loki (e.g. Grafana Cloud's push URL); then no Loki or Grafana runs in
+#                             the cluster and Alloy pushes there
+#   LOKI_USERNAME, LOKI_PASSWORD   only with LOKI_URL, for a hosted Loki (masked)
+# No password of PostgreSQL or Redis is a variable: infra.sh creates them, random, in the cluster.
+# Runners: every job runs on gitlab.com's shared runners (no tags); the deploy job reaches the cluster with kubectl.
 
 workflow:
   name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
@@ -40,9 +33,10 @@ stages: [validate, deploy]
 
 variables:
   # Tool images, pinned (bump them with Renovate or by hand).
-  DOCKER_IMAGE: docker:29.8.2-cli                 # has the Compose plugin
-  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11            # bash, kubectl 1.34 (Kustomize), kubeconform
-  ALLOY_IMAGE: grafana/alloy:v1.10.2              # = the image in logs.yaml and logs/k8s/alloy.yaml
+  KUBE_TOOLS_IMAGE: alpine/k8s:1.34.11            # bash, kubectl 1.34, kubeconform, yq, jq
+  SHELLCHECK_IMAGE: koalaman/shellcheck-alpine:v0.10.0
+  ALLOY_IMAGE: grafana/alloy:v1.10.2              # = the image in logs.yaml
+  KUBERNETES_VERSION: "1.34.0"
 
 default:
   interruptible: true
@@ -60,84 +54,65 @@ default:
 
 # ─── validate ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
-# Every Compose file parses, with every profile (no Docker daemon needed).
-validate:compose:
-  stage: validate
-  image: $DOCKER_IMAGE
-  script:
-    - docker compose -f database.yaml config --quiet
-    - docker compose -f redis.yaml config --quiet
-    - docker compose -f logs.yaml --profile storage config --quiet
-
-# The cluster's log collector renders and is valid against the Kubernetes API schemas.
-validate:logs-k8s:
+# Every object is valid against the Kubernetes API schemas (unknown fields are errors), including the dashboards'
+# ConfigMap as infra.sh renders it; every dashboard is valid JSON. Hands the inline Alloy configuration to the next job.
+validate:manifests:
   stage: validate
   image: $KUBE_TOOLS_IMAGE
   script:
-    - kubectl kustomize logs/k8s | kubeconform -strict -summary -kubernetes-version 1.34.0 -
+    - kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" postgres.yaml redis.yaml logs.yaml
+    - for f in dashboards/*.json; do jq empty "$f"; done
+    - kubectl create configmap grafana-dashboards --namespace infra --from-file=dashboards/ --dry-run=client -o yaml
+      | kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" -
+    - yq 'select(.kind == "ConfigMap" and .metadata.name == "alloy-config") | .data["config.alloy"]' logs.yaml
+      > config.alloy
+    - test -s config.alloy
+  artifacts:
+    paths: [config.alloy]
+    expire_in: 1 day
 
-# Both Alloy configurations are formatted as `alloy fmt` writes them (it also fails on a syntax error).
+# The scripts: shellcheck finds quoting mistakes, unset variables and the like.
+validate:scripts:
+  stage: validate
+  image: $SHELLCHECK_IMAGE
+  script:
+    - shellcheck infra.sh create-database.sh add-node.sh
+
+# The Alloy configuration (inline in logs.yaml): its components and arguments are valid, and it parses.
 validate:alloy:
   stage: validate
+  needs: [validate:manifests]
   image:
     name: $ALLOY_IMAGE
     entrypoint: [""]
   script:
-    - alloy fmt logs/server-agent.alloy | diff logs/server-agent.alloy -
-    - alloy fmt logs/k8s/config.alloy | diff logs/k8s/config.alloy -
+    - alloy validate config.alloy
+    - alloy fmt config.alloy > /dev/null
 
 # ─── deploy (manual) ────────────────────────────────────────────────────────────────────────────────────────────────
 
-# One component on its own server: the runner on that machine runs the same command as a laptop. Data volumes are
-# never touched.
-.deploy-server:
-  stage: deploy
-  tags: [pm-$ENVIRONMENT-$COMPONENT]
-  interruptible: false
-  allow_failure: true
-  parallel:
-    matrix:
-      - COMPONENT: [database, redis, logs]
-  script:
-    - ./infra.sh up "$COMPONENT"
-
-servers:staging:
-  extends: [.deploy-server, .staging]
-  environment:
-    name: staging
-    action: prepare
-  variables:
-    ENVIRONMENT: staging
-
-servers:production:
-  extends: [.deploy-server, .production]
-  environment:
-    name: production
-    action: prepare
-  variables:
-    ENVIRONMENT: production
-
-# The log collector inside the cluster (logs/k8s), pointed at the environment's Loki: ci/cluster-logs.sh selects the
-# cluster (KUBE_CONTEXT or KUBECONFIG) and runs `infra.sh up logs`, which, without Docker in the job's image, applies
-# only the collector.
-.deploy-cluster-logs:
+# Selects the environment's cluster (the GitLab agent's context, or the kubeconfig's current context) and runs the
+# same command as a laptop. Volumes and passwords are never touched by `up`; a new service's database is a separate,
+# deliberate step (./create-database.sh, docs/guide/12-from-zero.md).
+.deploy:
   stage: deploy
   image: $KUBE_TOOLS_IMAGE
   interruptible: false
-  allow_failure: true
-  variables:
-    LOKI_URL: $CLUSTER_LOKI_URL
   script:
-    - ci/cluster-logs.sh
+    - if [ -n "${KUBE_CONTEXT:-}" ]; then kubectl config use-context "$KUBE_CONTEXT"; fi
+    - kubectl config current-context
+    - ./infra.sh up
 
-cluster-logs:staging:
-  extends: [.deploy-cluster-logs, .staging]
+deploy:staging:
+  extends: [.deploy, .staging]
   environment:
     name: staging
     action: prepare
+  resource_group: staging
 
-cluster-logs:production:
-  extends: [.deploy-cluster-logs, .production]
+deploy:production:
+  extends: [.deploy, .production]
   environment:
     name: production
     action: prepare
+  resource_group: production

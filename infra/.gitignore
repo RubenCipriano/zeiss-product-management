@@ -1,7 +1,4 @@
-# Rendered by infra.sh (logs/k8s with this machine's LOKI_URL)
-.build/
-
-# Local environment overrides (passwords, LOKI_URL)
+# Local environment files (e.g. LOKI_PASSWORD for another Loki): never committed
 .env
 
 # OS and editor files

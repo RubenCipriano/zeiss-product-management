@@ -1,12 +1,12 @@
 # Documentation
 
 This is the documentation of the Product Management system: a .NET 10 API (clean architecture, EF Core, PostgreSQL,
-Redis), an Angular 22 front end and an nginx gateway that verifies tokens and caches reads. The stateless parts run on
-Kubernetes; PostgreSQL, Redis and the log server (Grafana and Loki, optional) run on their own servers outside the
-cluster. The system is in three GitLab repositories: [backend](https://gitlab.com/zeiss/backend) (the API and
-this documentation), [frontend](https://gitlab.com/zeiss/frontend) (the web app and the gateway) and
-[deploy](https://gitlab.com/zeiss/deploy) (the servers and the logs), used here as the folders `backend/`, `frontend/`
-and `infra/`. With load tests, end-to-end tests and a CI/CD pipeline per repository.
+Redis), an Angular 22 front end and an nginx gateway that verifies tokens and caches reads. Everything runs on
+Kubernetes: the application in the namespace `product-management`, and PostgreSQL, Redis and the logs (Loki, Grafana
+and Alloy, optional) in the namespace `infra`, shared infrastructure that any service on the cluster can use. The
+system is in three GitLab repositories: [backend](https://gitlab.com/zeiss/backend) (the API and this documentation),
+[frontend](https://gitlab.com/zeiss/frontend) (the web app and the gateway) and [deploy](https://gitlab.com/zeiss/deploy)
+(the shared infrastructure), used here as the folders `backend/`, `frontend/` and `infra/`. With load tests, end-to-end tests and a CI/CD pipeline per repository.
 
 It is organised as a **guide in thirteen chapters**, meant to be read calmly, one at a time. Each chapter stands on its
 own, takes 5 to 10 minutes, starts with what it will explain and an illustration, and ends with the source files to
@@ -42,10 +42,10 @@ than read.
 | 6 | [Scaling and capacity](guide/06-scaling-and-capacity.md) | Autoscaling, why the database is the ceiling, the eight load-test scenarios, what each run found and fixed. |
 | 7 | [Front end](guide/07-frontend.md) | Angular layers and rules, the product page's data flow, loading UX, accessibility, what Lighthouse and Playwright found. |
 | 8 | [Logs, dashboards and alerts](guide/08-observability.md) | Logs only, and why: what is collected (the browser's errors included) and how it reaches Grafana, where it is kept and for how long, the two dashboards, twelve alerts with runbooks, one request followed by its trace id. |
-| 9 | [Deployment and operations](guide/09-deployment-and-operations.md) | What runs where (cluster and servers), the three parts and their deploy scripts, the Kustomize overlays, configuration as env keys and the one Secret, migrations as `pm_migrator` before the rollout, logs as an option, the GitLab pipelines, day-2 commands. |
+| 9 | [Deployment and operations](guide/09-deployment-and-operations.md) | What runs where (the namespaces `product-management` and `infra`), the three parts and their scripts, the Kustomize overlays, configuration as env keys and the Secrets, migrations as `pm_migrator` in a one-off pod before the rollout, logs as an option, the GitLab pipelines, day-2 commands. |
 | 10 | [Testing and quality](guide/10-testing-and-quality.md) | The test pyramid with counts (381 back end, 185 front end, 22 E2E), what each kind proves, the project agents. |
 | 11 | [Production readiness](guide/11-production-readiness.md) | An honest ✅ / ⚠️ / ❌ assessment and the work left for go-live. |
-| 12 | [From zero to production](guide/12-from-zero.md) | A runbook from an empty GitLab group and fresh servers: machines, firewall, TLS, backups, one GitLab project per part, runners, the agent, environments, every CI/CD variable per project, first deployment, day 2, go-live checklist. |
+| 12 | [From zero to production](guide/12-from-zero.md) | A runbook from an empty GitLab group and fresh machines: k3s nodes and their roles, firewall, TLS, backups, one GitLab project per part, the agent, environments, every CI/CD variable per project, first deployment, day 2, go-live checklist. |
 | 13 | [Reading the code](guide/13-reading-the-code.md) | Where to open the code for any question, one click followed file by file, and a plain-words glossary of the C#, Angular and nginx constructs used (`record`, `Result`, dependency injection, signals, interceptors, ETag…). |
 
 ## How to verify each claim
@@ -55,11 +55,13 @@ demo accounts are `viewer`/`viewer`, `clerk`/`clerk` and `manager`/`manager`.
 
 ```bash
 kubectl config use-context docker-desktop
-infra/cluster-addons.sh                               # metrics-server, once per cluster (needed by the autoscalers)
-infra/infra.sh up                                     # PostgreSQL, Redis, Loki + Grafana + agents (and the log collector)
+infra/infra.sh up                                     # namespace infra: PostgreSQL, Redis, Loki + Grafana + Alloy
+                                                      # (and metrics-server, if the cluster has none)
+infra/create-database.sh product-management product_management pm_app pm_migrator   # once: database, users, Secret
 backend/deploy/deploy.sh                              # secrets (first run), API image, migrations, rollout
 frontend/deploy/deploy.sh                             # web + gateway images, rollout; app on http://localhost:8080
-open http://localhost:3000                            # Grafana: logs, dashboards, alerts (chapter 8)
+kubectl -n infra port-forward svc/grafana 3000:3000 & # then http://localhost:3000: logs, dashboards, alerts (chapter 8)
+kubectl -n infra port-forward svc/loki 3100:3100 &    # Loki, for the e2e test that reads a browser error back
 
 python3 backend/scripts/check-requirements.py         # the assessment PDF: 14 checks against the running system
 cd backend && dotnet test --solution ProductManagement.sln     # 381 tests (Docker running: real PostgreSQL + Redis)
@@ -83,7 +85,7 @@ The guide explains; these documents are the precise record it links to.
 | --- | --- |
 | [Architecture decision records](adr/README.md) | One short record per decision (0001–0022): context, decision, consequences. |
 | [flows.md](flows.md) | Every important flow as a precise Mermaid sequence or flow diagram: caching, sign-in, the token check, the read path, stock changes, create/update, rate limiting, the product screen, deployment and CI/CD, autoscaling, load tests, logs. |
-| [architecture.md](architecture.md) | The component catalogue: what runs in the cluster and on the servers, every Service, workload, Secret and policy, and the data model with its indexes. |
+| [architecture.md](architecture.md) | The component catalogue: what runs in each namespace of the cluster, every Service, workload, Secret and policy, and the data model with its indexes. |
 | [load-test-results.md](load-test-results.md) | Every load-test run, with environment, numbers, findings and the commands to reproduce them. |
 | [backend/README.md](../backend/README.md), [frontend/README.md](../frontend/README.md), [infra/README.md](../infra/README.md) | Each part on its own: structure, scripts, configuration, how to run and deploy it, its CI/CD variables. |
 | [images/](images) | The illustrations used by the guide. |

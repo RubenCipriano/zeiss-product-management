@@ -10,8 +10,8 @@ fixed, how far one laptop goes, and which levers come next.
 
 ## Autoscaling
 
-Two HorizontalPodAutoscalers (HPAs) watch CPU through **metrics-server** (installed by `infra/cluster-addons.sh`;
-k3s and most managed clusters ship it).
+Two HorizontalPodAutoscalers (HPAs) watch CPU through **metrics-server** (installed by `infra/infra.sh up`
+where the cluster lacks it, as on Docker Desktop; k3s and most managed clusters ship it).
 
 | | API | Gateway |
 | --- | --- | --- |
@@ -38,7 +38,7 @@ connections are all busy is busy, not broken, and stays ready
 
 ## Why the database is the ceiling
 
-There is one PostgreSQL server (4 CPUs and 3 GiB locally, `max_connections=200`; it runs outside the cluster, see [chapter 9](09-deployment-and-operations.md#what-runs-where)). Each API pod has a connection pool of at most **10**, plus one for its readiness check, so
+There is one PostgreSQL server (4 CPUs and 3 GiB, `max_connections=200`; a StatefulSet in the shared namespace `infra`, see [chapter 9](09-deployment-and-operations.md#what-runs-where)). Each API pod has a connection pool of at most **10**, plus one for its readiness check, so
 at the HPA's maximum the database sees at most **8 × (10 + 1) = 88** connections. A database serves only a few queries per CPU
 core at a time; more connections than that do not add throughput, they make every query slower. Excess requests wait
 in the API's pool instead, which is cheaper. This was measured: 6 replicas × 20 connections on 2 database cores queued
@@ -86,9 +86,10 @@ afterwards: the tests measure capacity with a few accounts, not many distinct us
 
 ## What the tests found, and the fixes
 
-These runs were made while PostgreSQL and Redis still ran as pods inside the cluster. They now run as separate
-containers on the same machine, sharing the same CPUs, so the conclusions hold; the CPU figures quoted for PostgreSQL
-are those of the pod at the time.
+These runs were made while PostgreSQL and Redis ran as pods in the application's namespace. They later ran for a
+while as Docker containers on the same machine, and now run as pods again, in the shared namespace `infra`, with the
+same settings and on the same CPUs, so the conclusions hold; the CPU figures quoted for PostgreSQL are those of the
+pod at the time.
 
 ### Ten teams on 850,000 products: 123 → 281 requests/s
 
@@ -150,7 +151,7 @@ cluster; the comparisons between runs, and the correctness checks, are the point
 
 In order of expected effect for a write-heavy peak:
 
-1. **More nodes**, with PostgreSQL on its own machine. The API and the gateway already scale out.
+1. **More nodes**, with PostgreSQL on a node of its own (`infra/add-node.sh <host> database`). The API and the gateway already scale out.
 2. **Read replicas** for lists and searches; the primary only for writes.
 3. **PgBouncer** in transaction mode, sized to the database, when there are many API pods.
 4. **Keyset pagination** (`?after=`): today a deep page costs time proportional to its depth (page 40,000 takes about
@@ -163,7 +164,7 @@ In order of expected effect for a write-heavy peak:
   `deployment.yaml`), the connection string with `Maximum Pool Size=10`
   ([`overlays/local/api.yaml`](../../backend/deploy/k8s/overlays/local/api.yaml)),
   [`DatabaseHealthCheck.cs`](../../backend/ProductManagement.Infrastructure/Persistence/DatabaseHealthCheck.cs),
-  [`frontend/deploy/k8s/base/gateway.yaml`](../../frontend/deploy/k8s/base/gateway.yaml) (HPA `gateway`), [`infra/database.yaml`](../../infra/database.yaml) (PostgreSQL's CPUs, memory, `pg_stat_statements`)
+  [`frontend/deploy/k8s/base/gateway.yaml`](../../frontend/deploy/k8s/base/gateway.yaml) (HPA `gateway`), [`infra/postgres.yaml`](../../infra/postgres.yaml) (PostgreSQL's CPUs, memory, `pg_stat_statements`)
 * Load tests: [`backend/load-tests/run.sh`](../../backend/load-tests/run.sh), [`teams.js`](../../backend/load-tests/teams.js),
   [`browse.js`](../../backend/load-tests/browse.js), [`seed-bulk.sh`](../../backend/load-tests/seed-bulk.sh),
   [`verify-data.sh`](../../backend/load-tests/verify-data.sh), [`data/verify.sql`](../../backend/load-tests/data/verify.sql)
@@ -175,7 +176,7 @@ In order of expected effect for a write-heavy peak:
 ## How to verify
 
 ```bash
-infra/cluster-addons.sh                                # metrics-server, once per cluster
+infra/infra.sh up                                      # installs metrics-server where the cluster has none
 kubectl -n product-management get hpa -w               # in a second terminal: watch the replica counts
 kubectl -n product-management top pods
 
@@ -186,6 +187,6 @@ RATE=20000 K6_CPU=4 backend/load-tests/run.sh browse   # read capacity at a cons
 backend/load-tests/run.sh rate-limit                   # one user over the limit: 429 + Retry-After
 
 # The slowest queries, as used to find the bottlenecks
-docker exec pm-postgres psql -U product_management -d product_management -c \
+kubectl -n infra exec statefulset/postgres -- psql -U postgres -d product_management -c \
   "SELECT calls, round(total_exec_time) AS ms, left(query, 80) FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 5"
 ```

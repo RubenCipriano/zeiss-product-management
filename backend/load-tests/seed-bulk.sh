@@ -7,14 +7,14 @@
 #   PRODUCTS=0 LEDGER_ROWS=20000000 load-tests/seed-bulk.sh   # only grow the ledger to 20 million rows (~20 minutes)
 #
 # Adds to the existing data; it does not delete anything. To start again from the migration's sample data, recreate
-# the database (or the PostgreSQL server's volume) and run the migrations again.
+# the database and run the migrations again.
 #
-# The servers: by default the PostgreSQL and Redis containers of the local "dedicated server" setup (pm-postgres,
-# pm-redis), reached with `docker exec`. To target other servers, set
-#   PSQL       the psql command, e.g. PSQL='psql -h db.internal -U product_management -d product_management'
+# The servers: by default the shared PostgreSQL and Redis in the cluster (namespace infra), reached with
+# `kubectl exec` (psql as the administrator; redis-cli finds Redis' password in its pod). To target other servers, set
+#   PSQL       the psql command, e.g. PSQL='psql -h db.internal -U postgres -d product_management'
 #              (password from PGPASSWORD or ~/.pgpass);
 #   REDIS_CLI  the redis-cli command, e.g. REDIS_CLI='redis-cli -h cache.internal -a secret --no-auth-warning';
-# or only PG_CONTAINER / PG_USER / PG_DATABASE and REDIS_CONTAINER / REDIS_PASSWORD for other containers.
+# or only PG_USER / PG_DATABASE for another user or database.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PRODUCTS="${PRODUCTS:-850000}"
@@ -22,9 +22,9 @@ LEDGER_ROWS="${LEDGER_ROWS:-}"
 REDIS_KEY_PREFIX="${REDIS_KEY_PREFIX:-product-management}"
 
 if [[ -n "${PSQL:-}" ]]; then read -r -a psql_cmd <<< "$PSQL"
-else psql_cmd=(docker exec -i "${PG_CONTAINER:-pm-postgres}" psql -U "${PG_USER:-product_management}" -d "${PG_DATABASE:-product_management}"); fi
+else psql_cmd=(kubectl -n infra exec -i statefulset/postgres -- psql -U "${PG_USER:-postgres}" -d "${PG_DATABASE:-product_management}"); fi
 if [[ -n "${REDIS_CLI:-}" ]]; then read -r -a redis_cmd <<< "$REDIS_CLI"
-else redis_cmd=(docker exec -i "${REDIS_CONTAINER:-pm-redis}" redis-cli -a "${REDIS_PASSWORD:-local-redis-password}" --no-auth-warning); fi
+else redis_cmd=(kubectl -n infra exec -i deployment/redis -- redis-cli); fi
 
 psql() { "${psql_cmd[@]}" -X "$@"; }
 redis() { "${redis_cmd[@]}" "$@"; }

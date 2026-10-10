@@ -5,13 +5,14 @@ A product and stock management system:
 * **Backend:** .NET 10 / ASP.NET Core Web API, Entity Framework Core and PostgreSQL, with a Redis read cache, JWT
   authentication (tokens issued by the API to registered consumers), role-based authorization and rate limiting.
 * **Frontend:** Angular 22 with Tailwind CSS, served behind an nginx gateway that also caches API reads.
-* **Deployment:** the stateless parts (gateway, web app, API autoscaled 2–8 replicas) on Kubernetes, with Kustomize
-  overlays for local, staging and production; PostgreSQL, Redis and the log servers (Grafana and Loki, optional) on
-  their own servers outside the cluster, as in production (locally: Docker Compose containers). The system lives in
-  three GitLab repositories, each with its own pipeline: **[backend](https://gitlab.com/zeiss/backend)** (the API and
-  the documentation; this README), **[frontend](https://gitlab.com/zeiss/frontend)** (the web app and the gateway) and
-  **[deploy](https://gitlab.com/zeiss/deploy)** (the servers outside the cluster and the logs). Commands here use them
-  as the folders `backend/`, `frontend/` and `infra/` ([Repository layout](#repository-layout)).
+* **Deployment:** everything on Kubernetes, with Kustomize overlays for local, staging and production: the
+  application (gateway, web app, API autoscaled 2–8 replicas) in the namespace `product-management`, and the shared
+  infrastructure that any service on the cluster can use (PostgreSQL, Redis and the logs: Loki, Grafana and Alloy,
+  optional) in the namespace `infra`. The system lives in three GitLab repositories, each with its own pipeline:
+  **[backend](https://gitlab.com/zeiss/backend)** (the API and the documentation; this README),
+  **[frontend](https://gitlab.com/zeiss/frontend)** (the web app and the gateway) and
+  **[deploy](https://gitlab.com/zeiss/deploy)** (the shared infrastructure in the namespace `infra`). Commands here use
+  them as the folders `backend/`, `frontend/` and `infra/` ([Repository layout](#repository-layout)).
 * **At scale:** k6 load tests run inside the cluster, including ten teams on 850,000 products; the stock ledger
   measured at 20 million rows.
 * **Stock ledger and idempotency:** every stock change is recorded with who made it; retried requests
@@ -42,14 +43,14 @@ and a full path).
 9. [Deployment and operations](docs/guide/09-deployment-and-operations.md): what runs where, the three parts and their deploy scripts, CI/CD, day 2
 10. [Testing and quality](docs/guide/10-testing-and-quality.md): the test pyramid and what each layer proves
 11. [Production readiness](docs/guide/11-production-readiness.md): what is done and what is left for go-live
-12. [From zero to production](docs/guide/12-from-zero.md): a runbook for staging and production (servers, GitLab, TLS, backups)
+12. [From zero to production](docs/guide/12-from-zero.md): a runbook for staging and production (machines as k3s nodes, GitLab, TLS, backups)
 13. [Reading the code](docs/guide/13-reading-the-code.md): where to look for what, one click file by file, and a glossary in plain words
 
 ## Contents
 
 - [Documentation](#documentation)
 - [Run it](#run-it) (on Kubernetes) and [without Kubernetes](#run-without-kubernetes)
-- [Deploy each part](#deploy-each-part) (infra, backend, frontend on their own; without logs; staging and production)
+- [Deploy each part](#deploy-each-part) (infra, databases and passwords, backend, frontend on their own; without logs; staging and production; adding nodes)
 - [What runs where](#what-runs-where)
 - [Observability](#observability)
 - [Develop](#develop)
@@ -73,7 +74,7 @@ Needs Docker and `kubectl`. The system is deployed in three parts, each with its
 
 | Part | Script | What it deploys |
 | --- | --- | --- |
-| [`infra/`](infra/README.md) | [`infra/infra.sh`](infra/infra.sh) | the servers outside the cluster (PostgreSQL, Redis, Loki + Grafana; locally Docker Compose containers) and the cluster's log collector |
+| [`infra/`](infra/README.md) | [`infra/infra.sh`](infra/infra.sh), [`infra/create-database.sh`](infra/create-database.sh) | the shared infrastructure in the namespace `infra` (PostgreSQL, Redis, and the logs: Loki, Grafana, Alloy), metrics-server if the cluster has none; then the API's database, its users and their Secret |
 | [`backend/`](backend/README.md) | [`backend/deploy/deploy.sh`](backend/deploy/deploy.sh) | the API: image, database migrations, rollout |
 | [`frontend/`](frontend/README.md) | [`frontend/deploy/deploy.sh`](frontend/deploy/deploy.sh) | the web app and the gateway: images, rollout |
 
@@ -87,21 +88,25 @@ repositories cloned as `backend/`, `frontend/` and `infra/` ([Repository layout]
 
    ```bash
    kubectl config use-context docker-desktop
-   infra/cluster-addons.sh        # once per cluster: metrics-server, which the autoscalers need
-   infra/infra.sh up              # PostgreSQL, Redis, Loki + Grafana + agents (and the cluster's log collector)
+   infra/infra.sh up              # namespace infra: PostgreSQL, Redis, Loki + Grafana + Alloy (+ metrics-server if missing)
+   infra/create-database.sh product-management product_management pm_app pm_migrator   # once: database, users, Secret
    backend/deploy/deploy.sh       # secrets (first run), API image, migrations, rollout
    frontend/deploy/deploy.sh      # web + gateway images, rollout → http://localhost:8080
    ```
 
    In order:
-   * **infra:** starts the servers as containers on this machine, one Docker Compose file per component:
-     PostgreSQL 18 (`infra/database.yaml`, which also creates the least-privilege database users `pm_migrator` and
-     `pm_app`), Redis 8 (`infra/redis.yaml`), and Loki, Grafana and the agent that ships the servers' logs
-     (`infra/logs.yaml`). It then applies the cluster's log collector (Alloy, namespace `observability`);
+   * **infra:** creates the namespace `infra` and, once, random passwords for PostgreSQL's administrator and for Redis
+     (the Secrets `postgres-admin` and `redis-auth`, never committed), installs metrics-server if the cluster has none
+     (the autoscalers need it), then applies one manifest per component: PostgreSQL 18 (`infra/postgres.yaml`: a
+     StatefulSet with its data on a volume, and a nightly backup), Redis 8 (`infra/redis.yaml`) and the logs
+     (`infra/logs.yaml`: Loki, Grafana, and Alloy, which collects the log of every pod in every namespace);
+   * **database (once per cluster):** `infra/create-database.sh` creates the database `product_management` and its
+     least-privilege users `pm_migrator` (owns the schema, runs the migrations) and `pm_app` (the API), with random
+     passwords, and writes them into the Secret `database-credentials` in the namespace `product-management`;
    * **backend, local secrets (first run only):** `backend/deploy/local-secrets.sh` generates this machine's token
-     signing key, the demo consumers' secret hashes and a file with the local database and Redis passwords (never
-     committed);
-   * **backend:** builds `backend/` into an image with an immutable tag, **runs the database migrations with that image
+     signing key and the demo consumers' secret hashes (never committed);
+   * **backend:** builds `backend/` into an image with an immutable tag, copies the Redis password into its namespace
+     (Secret `redis-credentials`), **runs the database migrations with that image in a one-off pod inside the cluster,
      as the schema owner `pm_migrator`** (and seeds sample data into an empty database), then rolls out the API;
    * **frontend:** builds the Angular app and the gateway images and rolls them out.
 
@@ -112,19 +117,22 @@ What you get:
 | What | Where |
 | --- | --- |
 | Application | http://localhost:8080 (the gateway is a `LoadBalancer` Service on localhost) |
-| Grafana: logs, dashboards, alerts | http://localhost:3000 (no login locally; dashboards in the folder *Product Management*) |
-| Loki | http://localhost:3100 |
+| Grafana: logs, dashboards, alerts | `kubectl -n infra port-forward svc/grafana 3000:3000` → http://localhost:3000 (no login locally; dashboards in the folder *Product Management*) |
+| Loki | `kubectl -n infra port-forward svc/loki 3100:3100` → http://localhost:3100 (the Playwright browser-errors test reads it there) |
 | Swagger UI | `kubectl -n product-management port-forward deployment/api 5080:8080` → http://localhost:5080/swagger (*Authorize* with a token) |
-| PostgreSQL | `localhost:5432`, database `product_management`; administrator `product_management` / `product_management` (the API uses `pm_app`) |
-| Redis | `localhost:6379`, password `local-redis-password` |
+| PostgreSQL | `kubectl -n infra exec -it statefulset/postgres -- psql -U postgres -d product_management` (administrator `postgres`; the API uses `pm_app`) |
+| Redis | `kubectl -n infra exec -it deployment/redis -- redis-cli` (the password is already set in the pod) |
 
+Nothing of the shared infrastructure is published on localhost; `infra/infra.sh status` prints the commands for
+Grafana, Loki, PostgreSQL and Redis.
 After changing the API, run `backend/deploy/deploy.sh` again; after changing the web app or the gateway,
-`frontend/deploy/deploy.sh`. Each part also deploys on its own, without Grafana, or against other servers:
+`frontend/deploy/deploy.sh`. Each part also deploys on its own, without Grafana, or against another database:
 [Deploy each part](#deploy-each-part). Staging and production use the same scripts from each part's GitLab pipeline
 ([chapter 9](docs/guide/09-deployment-and-operations.md)).
 
-Stop the servers with `infra/infra.sh down` (data volumes are kept); delete the application with
-`kubectl delete namespace product-management` (`infra/infra.sh down logs` removes the `observability` namespace).
+Remove the shared infrastructure with `infra/infra.sh down` (its volumes and passwords are kept; `--delete-data`
+deletes them too); delete the application with `kubectl delete namespace product-management` (that also deletes the
+Secret `database-credentials`: run `infra/create-database.sh` again before the next `backend/deploy/deploy.sh`).
 
 ### Sign in
 
@@ -151,31 +159,38 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8080/api/products
 
 ### Run without Kubernetes
 
-For working on the code: the API and the Angular dev server run on your machine, against the same database and
-cache servers. Needs the .NET 10 SDK and Node.js 24 ([Develop](#develop)).
+For working on the code: the API and the Angular dev server run on your machine, against the shared database in the
+cluster, reached through a port-forward. Needs the .NET 10 SDK and Node.js 24 ([Develop](#develop)).
 
 ```bash
-infra/infra.sh up database redis                                # the database and cache servers (containers)
+infra/infra.sh up postgres redis                                # the shared database and cache, in the cluster
+infra/create-database.sh product-management product_management pm_app pm_migrator   # once
+kubectl -n infra port-forward svc/postgres 5432:5432 &          # the database on localhost:5432
 
 backend/deploy/local-secrets.sh                                 # once: signing key and demo consumers → user-secrets
+export ConnectionStrings__ProductManagement="Host=localhost;Port=5432;Database=product_management;Username=pm_migrator"
+export PGPASSWORD="$(kubectl -n product-management get secret database-credentials \
+  -o go-template='{{ index .data "migrator-password" | base64decode }}')"
 dotnet run --project backend/ProductManagement.Api              # http://localhost:5080 (Swagger: /swagger)
 cd frontend && npm ci && npm start                              # http://localhost:4200, /api proxied to :5080
 ```
 
 The API runs in the `Development` environment (`appsettings.Development.json`, plus the signing key and the demo
-consumers from the .NET user-secrets that `backend/deploy/local-secrets.sh` wrote): it connects to `localhost:5432`
-as the server's administrator (`product_management`), applies the migrations and seeds the sample data on start-up,
-and uses in-memory replacements for Redis (cache, idempotency keys, rate limits). To use the Redis server as the
-cluster does, start it with the connection string and the password:
+consumers from the .NET user-secrets that `backend/deploy/local-secrets.sh` wrote; the connection string above
+replaces the one in the file). It connects as the schema owner `pm_migrator`, so it can apply the migrations and seed
+the sample data on start-up, as the cluster's migration step does, and it uses in-memory replacements for Redis
+(cache, idempotency keys, rate limits). To use the shared Redis as the cluster does, forward it too and start the API
+with its connection string and password:
 
 ```bash
-ConnectionStrings__Redis="localhost:6379" Redis__Password=local-redis-password dotnet run --project backend/ProductManagement.Api
+kubectl -n infra port-forward svc/redis 6379:6379 &
+ConnectionStrings__Redis="localhost:6379" \
+Redis__Password="$(kubectl -n infra get secret redis-auth -o go-template='{{ .data.password | base64decode }}')" \
+  dotnet run --project backend/ProductManagement.Api
 ```
 
 Check it: `curl localhost:5080/health/ready` answers `Healthy`, and the token command above works against
-`localhost:5080` (or `localhost:4200`, through the dev server's proxy). The demo accounts are the same. Tables created
-this way belong to the administrator; run `infra/infra.sh up database` again before a later
-`backend/deploy/deploy.sh`: its `roles` step hands them to `pm_migrator`.
+`localhost:5080` (or `localhost:4200`, through the dev server's proxy). The demo accounts are the same.
 
 ---
 
@@ -185,11 +200,12 @@ The three parts only meet at a few addresses, so each one deploys on its own. Th
 names (`infra/infra.sh`, `backend/deploy/deploy.sh`, `frontend/deploy/deploy.sh`); in a separate clone of one
 repository, run its command from that repository's root (`./infra.sh up`, `./deploy/deploy.sh`).
 
-* the **backend** needs a PostgreSQL with the users `pm_migrator` and `pm_app` and a Redis
-  ([`infra/postgres/roles.sql`](infra/postgres/roles.sql)); it finds them through the two connection strings in its
-  overlay;
+* the **backend** needs a database with the users `pm_migrator` and `pm_app` and their Secret `database-credentials`
+  in its namespace ([`infra/create-database.sh`](infra/create-database.sh)), and the shared Redis' password (the
+  Secret `redis-auth` in the namespace `infra`, which its deploy script copies); it finds both through the two
+  connection strings in its overlay;
 * the **frontend** needs the API (the gateway's `API_UPSTREAM` and `JWKS_URL`) and, optionally, the log collector
-  (`COLLECTOR_UPSTREAM`);
+  (`COLLECTOR_UPSTREAM`: Alloy's Service `alloy-faro` in the namespace `infra`);
 * the **infra** needs nothing from the others.
 
 ### Prerequisites
@@ -197,65 +213,89 @@ repository, run its command from that repository's root (`./infra.sh up`, `./dep
 | Tool | For |
 | --- | --- |
 | Docker Desktop with Kubernetes enabled, `kubectl` context `docker-desktop` | everything (the deploy scripts use the images they build straight from the local Docker engine; any other cluster takes registry images: `API_IMAGE`, `WEB_IMAGE`, `GATEWAY_IMAGE`) |
-| `openssl` and `python3` | `backend/deploy/local-secrets.sh` (the local signing key, consumers and passwords); `python3` also for the requirements check |
+| `openssl` and `python3` | `backend/deploy/local-secrets.sh` (the local signing key and consumers); `python3` also for the requirements check |
 | .NET 10 SDK | only for `dotnet run` and the backend tests (the deploy script builds in Docker) |
 | Node.js 24 | only for the frontend's dev server, unit tests and Playwright (the deploy script builds in Docker) |
+
+`psql` and `redis-cli` are not needed on your machine: the scripts run them inside the PostgreSQL and Redis pods.
 
 ### Everything, locally
 
 ```bash
-infra/infra.sh up                 # PostgreSQL, Redis, Loki + Grafana + agents (and the cluster's log collector)
+infra/infra.sh up                 # namespace infra: PostgreSQL, Redis, Loki + Grafana + Alloy (+ metrics-server)
+infra/create-database.sh product-management product_management pm_app pm_migrator   # once
 backend/deploy/deploy.sh          # secrets (first run), API image, migrations, rollout
 frontend/deploy/deploy.sh         # web + gateway images, rollout → http://localhost:8080
 ```
 
 ### Infra, by component
 
-`infra/infra.sh up|down|status [database] [redis] [logs]`; no component means all three
-([infra/README.md](infra/README.md)).
+`infra/infra.sh up|down|status [postgres] [redis] [logs] [--delete-data]`; no component means all three
+([infra/README.md](infra/README.md)). Everything goes into the namespace `infra` of the current `kubectl` context.
 
 ```bash
-infra/infra.sh up database redis  # only PostgreSQL and Redis (no Loki, no Grafana)
-infra/infra.sh up logs            # Loki, Grafana, the server agent, and the cluster's log collector
-infra/infra.sh down logs          # remove them again (the in-cluster collector too); data volumes are kept
-infra/infra.sh status             # the server containers and the cluster's collector
+infra/infra.sh up postgres redis             # only PostgreSQL and Redis (no Loki, Grafana or Alloy)
+infra/infra.sh up logs                       # Loki, Grafana and Alloy
+infra/infra.sh down logs                     # remove them again; Loki's volume is kept
+infra/infra.sh down postgres --delete-data   # remove PostgreSQL and delete its volumes and password too
+infra/infra.sh status                        # pods, Services, volumes, and the commands to reach them
 ```
 
-Passwords are local development defaults (`POSTGRES_PASSWORD`, `PM_MIGRATOR_PASSWORD`, `PM_APP_PASSWORD`,
-`REDIS_PASSWORD`); set them in the environment or in `infra/.env` (gitignored) to use others, and give the backend
-the same values (below). The data volumes (`pm-postgres-data`, `pm-loki-data`, `pm-grafana-data`) are created by
-`infra.sh` as external volumes, so neither `down` nor `docker compose down -v` deletes them.
+`up` can be repeated at any time: it creates the random passwords (the Secrets `postgres-admin` and `redis-auth`) only
+when they are missing, installs metrics-server only when the cluster has none (on Docker Desktop with
+`--kubelet-insecure-tls`), applies the manifests, waits for the rollouts, and restarts Redis, Loki, Grafana or Alloy
+when their configuration changed (for PostgreSQL it prints the command to reload or restart it). `down` deletes the
+workloads, Services and configuration but never the volumes (`data-postgres-0`, `postgres-backups`, `data-loki-0`) or
+the passwords, unless `--delete-data` is given; it prints what it kept. The volumes come from the cluster's default
+storage class (`hostpath` on Docker Desktop, `local-path` on k3s). The CronJob `postgres-backup` dumps every database
+each night at 02:30 into the volume `postgres-backups` and keeps 7 days: on the same node as the data, so it protects
+against mistakes, not against losing the node ([chapter 12](docs/guide/12-from-zero.md) ships the dumps off the node).
+
+### Databases and passwords
+
+```bash
+infra/create-database.sh product-management product_management pm_app pm_migrator            # once per cluster
+infra/create-database.sh product-management product_management pm_app pm_migrator --rotate   # new passwords
+```
+
+`infra/create-database.sh <service-namespace> <database> [app-user] [migrator-user] [--rotate]`: one PostgreSQL for
+the platform, one database per service. The script runs `psql` inside the PostgreSQL pod (`kubectl exec`), creates the
+database and its two users if they are missing (the migrator owns the schema; the app user may only use it, with a
+30 s statement timeout and a 60 s idle-in-transaction timeout), and writes the Secret `database-credentials` (`host`,
+`port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password`) into the service's namespace. Run
+again, it keeps the passwords (unless `--rotate`; then `kubectl -n product-management rollout restart deployment/api`)
+and hands tables owned by someone else, e.g. after a restore as the administrator, to the migrator. What `pm_app` may
+do on the tables is granted by the API's own migration `GrantAppPermissions`.
+
+How the passwords reach the API: none is committed, typed or kept in a CI/CD variable. `infra/infra.sh up` generates
+the administrator's and Redis' (Secrets `postgres-admin`, `redis-auth` in `infra`); `infra/create-database.sh`
+generates the two users' (Secret `database-credentials` in `product-management`); `backend/deploy/deploy.sh` copies the
+Redis password into `product-management` on every deploy (Secret `redis-credentials`, because a pod can only read the
+Secrets of its own namespace). The API takes `PGPASSWORD` from `database-credentials` (`app-password`) and
+`Redis__Password` from `redis-credentials`; the migration pod takes the migrator's user and password from
+`database-credentials`.
 
 ### Backend only
 
-With the local infra running (`infra/infra.sh up database redis`):
+With the shared infrastructure running and the database created (above):
 
 ```bash
 backend/deploy/deploy.sh          # secrets (first run), API image, migrations, rollout
 ```
 
-With another database or Redis (another machine, a managed service):
+The migrations run as a one-off pod in the namespace `product-management` (`kubectl run --rm --attach`, with the
+release's image and the migrator's credentials from `database-credentials`), because the database is reachable only
+inside the cluster; `MIGRATIONS=skip` or `MIGRATIONS=only` leaves them out or runs only them.
+
+With another database or Redis (a managed service, a server elsewhere):
 
 1. Edit the two connection strings in `backend/deploy/k8s/overlays/<environment>/api.yaml` (`local` here):
-   `ConnectionStrings__ProductManagement` (host, port, database, user `pm_app`, no password) and
-   `ConnectionStrings__Redis` (`host:port`, no password).
-2. Set the API's passwords. Locally they are in `backend/deploy/k8s/overlays/local/generated/passwords.env`
-   (`database-password=`, `redis-password=`): edit the file, or write it again from the environment:
-
-   ```bash
-   FORCE=1 PM_APP_PASSWORD=... REDIS_PASSWORD=... backend/deploy/local-secrets.sh
-   ```
-
-   `FORCE=1` also generates a new signing key and new consumer hashes, which signs everyone out. In staging and
-   production the passwords come from GitLab variables (below).
-3. Deploy, telling the migration step where the database and Redis are and the migrator's password (the migration
-   runs in a container on this machine, so those hosts must be reachable from Docker):
-
-   ```bash
-   MIGRATION_CONNECTION_STRING="Host=db.example.internal;Port=5432;Database=product_management;Username=pm_migrator" \
-   PM_MIGRATOR_PASSWORD=... MIGRATION_REDIS=cache.example.internal:6379 REDIS_PASSWORD=... \
-   backend/deploy/deploy.sh
-   ```
+   `ConnectionStrings__ProductManagement` (host, port, database, user `pm_app`, no password; outside the cluster add
+   `SSL Mode=VerifyFull`) and `ConnectionStrings__Redis` (`host:port`, no password; with TLS append `,ssl=true`).
+2. Create the Secret `database-credentials` in the namespace `product-management` with the keys listed above, for
+   users made as `create-database.sh` makes them: the API reads `app-password`, the migration pod the rest.
+3. `deploy.sh` copies Redis' password from the Secret `redis-auth` in the namespace `infra`: put that Redis' password
+   there, and deploy with `MIGRATION_REDIS=<host:port>` so the migration reaches the same Redis.
 
 More in [backend/README.md](backend/README.md).
 
@@ -273,7 +313,8 @@ deploy again. More in [frontend/README.md](frontend/README.md).
 ### Without Grafana (no logs)
 
 ```bash
-infra/infra.sh up database redis
+infra/infra.sh up postgres redis
+infra/create-database.sh product-management product_management pm_app pm_migrator
 backend/deploy/deploy.sh
 LOGS=off frontend/deploy/deploy.sh
 ```
@@ -285,67 +326,96 @@ answers. Turn the logs on later with `infra/infra.sh up logs` and `frontend/depl
 
 ### With another Grafana / Loki
 
-To ship the logs to another Loki (e.g. Grafana Cloud) instead of the local containers:
+To ship the logs to another Loki (e.g. Grafana Cloud) instead of the one in the cluster:
 
 ```bash
 LOKI_URL=https://<host>/loki/api/v1/push LOKI_USERNAME=<user> LOKI_PASSWORD=<token> infra/infra.sh up logs
 ```
 
-No Loki or Grafana container starts; the server agent and the cluster's collector push to `LOKI_URL` (the
-credentials go into the Secret `loki-credentials` in the `observability` namespace). The dashboards and alert rules
-in `infra/logs/grafana/` can be imported into that Grafana.
+Loki and Grafana are not deployed (or are removed; Loki's volume `data-loki-0` is kept), and only Alloy runs: it
+pushes every pod's log, the shared infrastructure's included, and the browser's error reports to `LOKI_URL` (the
+credentials go into the Secret `loki-external` in the namespace `infra`). Running `infra/infra.sh up logs` without
+`LOKI_URL` switches back. The dashboards ([`infra/dashboards/`](infra/dashboards)) and the alert rules (the ConfigMap
+`grafana-alerting` in [`infra/logs.yaml`](infra/logs.yaml)) can be imported into that Grafana.
 
 ### Staging and production (GitLab)
 
 Each part is its own GitLab project with its own pipeline (`backend/.gitlab-ci.yml`, `frontend/.gitlab-ci.yml`,
-`infra/.gitlab-ci.yml`). Test, build and scan run on gitlab.com's shared runners; the staging and production jobs
-appear once the project or group variables `STAGING_ENABLED` / `PRODUCTION_ENABLED` are `true`. Backend and frontend
-need a deploy token named `gitlab-deploy-token` (`read_registry`), which their deploy jobs store in the cluster to pull
-the private images. CI/CD variables, scoped to the `staging` and `production` environments (`KUBECONFIG`, a File
-variable, can replace `KUBE_CONTEXT`):
+`infra/.gitlab-ci.yml`). Every job runs on gitlab.com's shared runners: the deploy and migrate jobs reach the cluster
+with `kubectl`, through the GitLab agent for Kubernetes or a kubeconfig, so no runner has to be inside the private
+network. The staging and production jobs appear once the project or group variables `STAGING_ENABLED` /
+`PRODUCTION_ENABLED` are `true`. Backend and frontend need a deploy token named `gitlab-deploy-token`
+(`read_registry`), which their deploy jobs store in the cluster to pull the private images. CI/CD variables, scoped to
+the `staging` and `production` environments (`KUBECONFIG`, a File variable, can replace `KUBE_CONTEXT`):
 
 | Project | Variables |
 | --- | --- |
-| infra | `KUBE_CONTEXT`, `CLUSTER_LOKI_URL`, `LOKI_USERNAME` / `LOKI_PASSWORD` (hosted Loki only), `POSTGRES_PASSWORD`, `PM_MIGRATOR_PASSWORD`, `PM_APP_PASSWORD`, `REDIS_PASSWORD` |
-| backend | `KUBE_CONTEXT`, `DB_SERVER`, `REDIS_SERVER`, `PM_MIGRATOR_PASSWORD`, `PM_APP_PASSWORD`, `REDIS_PASSWORD`, `API_SIGNING_KEY` (File), `API_CONSUMERS` (File); staging only: `CHECK_CLIENT_ID`, `CHECK_CLIENT_SECRET` |
+| infra | `KUBE_CONTEXT`; optional `LOKI_URL` and `LOKI_USERNAME` / `LOKI_PASSWORD` (another Loki, e.g. Grafana Cloud) |
+| backend | `KUBE_CONTEXT`, `API_SIGNING_KEY` (File), `API_CONSUMERS` (File); staging only: `CHECK_CLIENT_ID`, `CHECK_CLIENT_SECRET` |
 | frontend | `KUBE_CONTEXT`; staging only: `E2E_VIEWER_SECRET`, `E2E_CLERK_SECRET`, `E2E_MANAGER_SECRET` |
 
-`PM_MIGRATOR_PASSWORD`, `PM_APP_PASSWORD` and `REDIS_PASSWORD` must be the same in infra and backend: define them
-once as group-level variables. Deploy in the same order: infra (manual jobs, per component), then the backend
-pipeline (migrate, deploy, verify, manual production), then the frontend pipeline. The full setup (runners, the
-GitLab agent, environments) is [chapter 12](docs/guide/12-from-zero.md).
+No database or Redis password is a CI/CD variable: they are generated in each cluster and read from its Secrets
+([Databases and passwords](#databases-and-passwords)). Deploy in the same order: infra (a manual job per environment,
+`./infra.sh up`), then once per environment `create-database.sh product-management product_management pm_app
+pm_migrator` with `kubectl` access to that cluster, then the backend pipeline (migrate, deploy, verify, manual
+production), then the frontend pipeline. The full setup (the GitLab agent, environments, the machines) is
+[chapter 12](docs/guide/12-from-zero.md).
+
+### Adding nodes
+
+On a k3s cluster, [`infra/add-node.sh`](infra/add-node.sh) turns a machine into a node with a role, so the database
+and the cache can have machines of their own:
+
+```bash
+infra/add-node.sh admin@db-1 database             # PostgreSQL's node: label and taint infra/role=database
+infra/add-node.sh admin@cache-1 cache             # Redis' node: label and taint infra/role=cache
+infra/add-node.sh admin@app-1 apps                # an ordinary node for the services: label only
+infra/add-node.sh admin@db-1 database --dry-run   # print the steps, change nothing
+```
+
+Over ssh it installs the k3s agent (a pinned version), joins it to the server (the join token is read from the server
+over ssh, or from `--token-file`), labels the node `infra/role=<role>` and, for `database` and `cache`, taints it
+`infra/role=<role>:NoSchedule` so nothing else runs there. PostgreSQL prefers the `database` node and Redis the
+`cache` node, and both tolerate its taint; without such a node they run on any node. A volume stays on the node where
+it was created: add the database node before the first `infra/infra.sh up postgres`, or move an existing database
+with a dump and restore. This cannot be tried on Docker Desktop, whose Kubernetes is one fixed node (`--dry-run` shows
+the steps). The production layout: [chapter 12](docs/guide/12-from-zero.md).
 
 ### Swagger, Grafana and the demo accounts
 
 * Swagger (local and staging): `kubectl -n product-management port-forward deployment/api 5080:8080` →
   http://localhost:5080/swagger.
-* Grafana: http://localhost:3000, dashboards in the folder *Product Management*; Loki at http://localhost:3100.
+* Grafana: `kubectl -n infra port-forward svc/grafana 3000:3000` → http://localhost:3000, dashboards in the folder
+  *Product Management*; Loki: `kubectl -n infra port-forward svc/loki 3100:3100` → http://localhost:3100.
 * Demo accounts: `viewer`/`viewer`, `clerk`/`clerk`, `manager`/`manager` (roles `viewer`, `stock-clerk`, `manager`).
 
 ---
 
 ## What runs where
 
-![What runs where: the cluster with the gateway, web, API and Alloy; outside it the CI/CD pipeline, the database, cache and log servers and the server agent](docs/images/kubernetes-map.svg)
+![What runs where: everything inside the Kubernetes cluster, the namespace product-management with the gateway, web and API, and the namespace infra with PostgreSQL, Redis, Loki, Grafana and Alloy](docs/images/kubernetes-map.svg)
 
-| Where | What | Part | Locally |
+Everything runs in the cluster, in two namespaces: `product-management` (this application) and `infra` (the shared
+infrastructure any service on the cluster can use). Only the gateway is reachable from outside.
+
+| Where | What | Part | Defined in |
 | --- | --- | --- | --- |
-| Cluster, namespace `product-management` | **gateway** (nginx, 2–6 pods, HPA): the only way in; per-IP rate limit, token check, 1 s microcache per role, routing | frontend | Service `gateway`, `LoadBalancer` on localhost:8080 (staging/production: an Ingress with TLS) |
-| | **web** (nginx, 2 pods): the Angular files | frontend | |
-| | **api** (ASP.NET Core, 2–8 pods, HPA): its only Service, `api`, is headless, so the gateway balances per request and new pods get traffic at once. Its configuration is plain environment variables in the Deployment; the connection strings name the database and Redis servers directly | backend | connection strings to `host.docker.internal` |
-| | **Secret `api-secrets`**: the database and Redis passwords, the token signing key, the registered consumers | backend | generated by `backend/deploy/local-secrets.sh` |
-| Cluster, namespace `observability` | **alloy**: reads every pod's log and pushes it to Loki (`LOKI_URL`); also receives the browser's error reports (`faro.receiver`, reachable only from the gateway's `/collect`). Optional | infra | Loki at `host.docker.internal:3100` |
-| Cluster, `kube-system` | **metrics-server**: CPU per pod for the autoscalers | infra | `infra/cluster-addons.sh` |
-| Database server | **PostgreSQL 18**: users `pm_migrator` (owns the schema, runs migrations) and `pm_app` (the API: rows only, 30 s statement timeout) | infra | container `pm-postgres`, port 5432 (`infra/database.yaml`) |
-| Cache server | **Redis 8**: cache, idempotency keys, rate limits, failed sign-ins; memory only, password | infra | container `pm-redis`, port 6379 (`infra/redis.yaml`) |
-| Log server (optional) | **Loki** (stores the logs, 14 days) and **Grafana** (two dashboards, 12 alert rules) | infra | containers `pm-loki` (3100, volume `pm-loki-data`), `pm-grafana` (3000) (`infra/logs.yaml`) |
-| On the servers | **server agent** (Alloy): ships PostgreSQL's and Redis' logs to Loki | infra | container `pm-server-agent` (`infra/logs.yaml`) |
-| CI/CD runner | **migrations**: the API image run with `migrate` as `pm_migrator`, before every rollout | backend | `backend/deploy/deploy.sh` does it with `docker run` |
+| Namespace `product-management` | **gateway** (nginx, 2–6 pods, HPA): the only way in; per-IP rate limit, token check, 1 s microcache per role, routing | frontend | Service `gateway`, `LoadBalancer` on localhost:8080 locally (staging/production: an Ingress with TLS) |
+| | **web** (nginx, 2 pods): the Angular files | frontend | `frontend/deploy/k8s/` |
+| | **api** (ASP.NET Core, 2–8 pods, HPA): its only Service, `api`, is headless, so the gateway balances per request and new pods get traffic at once. Its configuration is plain environment variables in the Deployment; the connection strings name `postgres.infra.svc.cluster.local:5432` and `redis.infra.svc.cluster.local:6379` | backend | `backend/deploy/k8s/` (the same addresses in every overlay) |
+| | **Secrets**: `api-secrets` (the token signing key, the registered consumers), `database-credentials` (the database users and passwords), `redis-credentials` (a copy of the Redis password) | backend, infra | `api-secrets`: `backend/deploy/local-secrets.sh` locally, the pipeline elsewhere; `database-credentials`: `infra/create-database.sh`; `redis-credentials`: `backend/deploy/deploy.sh` |
+| | **migrate pod** (temporary): the API image run with `migrate` as `pm_migrator`, before every rollout | backend | `backend/deploy/deploy.sh` (in CI/CD: the migrate jobs) |
+| Namespace `infra` | **postgres** (StatefulSet, 1 pod): PostgreSQL 18, one database per service, data on the volume `data-postgres-0` (20 GiB); users `pm_migrator` (owns the schema, runs migrations) and `pm_app` (the API: rows only, 30 s statement timeout) | infra | `infra/postgres.yaml`, `infra/create-database.sh` |
+| | **postgres-backup** (CronJob): every night at 02:30 a `pg_dump` of every database into the volume `postgres-backups`, kept 7 days | infra | `infra/postgres.yaml` |
+| | **redis** (Deployment, 1 pod): Redis 8 for cache, idempotency keys, rate limits, failed sign-ins; memory only, password | infra | `infra/redis.yaml` |
+| | **loki** (StatefulSet; stores the logs, 14 days, volume `data-loki-0`) and **grafana** (Deployment; two dashboards, 12 alert rules, all provisioned from ConfigMaps). Optional | infra | `infra/logs.yaml`, `infra/dashboards/` |
+| | **alloy** (Deployment): reads the log of every pod in every namespace and pushes it to Loki; also receives the browser's error reports (Service `alloy-faro`, `faro.receiver`, reachable only from the gateway pods). Optional | infra | `infra/logs.yaml` |
+| `kube-system` | **metrics-server**: CPU per pod for the autoscalers | infra | installed by `infra/infra.sh up` when missing (k3s ships it) |
 
 Every object, Secret and policy: [docs/architecture.md](docs/architecture.md). Every flow (sign-in, token check at the
 gateway, the cache layers, stock changes with idempotency, rate limiting, deployment, CI/CD, logs, autoscaling, load
-tests) as a diagram: [docs/flows.md](docs/flows.md). Why the servers are outside the cluster and how the overlays and
-the three parts work: [ADR 0021](docs/adr/0021-deployment-layout.md).
+tests) as a diagram: [docs/flows.md](docs/flows.md). How the overlays and the three parts work:
+[ADR 0021](docs/adr/0021-deployment-layout.md).
 
 The API scales on its own (HorizontalPodAutoscaler, 2–8 replicas at 60 % CPU; the gateway 2–6 at 70 %). Change its
 range without touching the frontend:
@@ -363,27 +433,28 @@ minutes), checked by `backend/load-tests/verify-data.sh`.
 
 ## Observability
 
-Logs only, in one place: **Loki** on the log server, kept for **14 days** (locally in the Docker volume
-`pm-loki-data`). What goes there:
+Logs only, in one place: **Loki** in the namespace `infra`, kept for **14 days** (on its volume `data-loki-0`).
+What goes there:
 
 | Source | How it gets to Loki | Query |
 | --- | --- | --- |
-| **Browser** (the Angular app): errors only | Grafana Faro SDK in the page → gateway `POST /collect` (same origin) → Alloy's `faro.receiver` in the cluster | `{namespace="browser"}` |
-| **Gateway and web** (nginx) and the **API** | they write JSON to stdout; Alloy in the cluster reads every pod's log | `{namespace="product-management", app="gateway"}` (or `"web"`, `"api"`) |
-| **Servers**: PostgreSQL, Redis, Loki, Grafana | the server agent (Alloy) reads the containers' logs | `{namespace="servers", app="postgres"}` (or `"redis"`, …) |
+| **Browser** (the Angular app): errors only | Grafana Faro SDK in the page → gateway `POST /collect` (same origin) → Alloy's `faro.receiver` | `{namespace="browser"}` |
+| **Gateway and web** (nginx) and the **API** | they write JSON to stdout; Alloy reads every pod's log | `{namespace="product-management", app="gateway"}` (or `"web"`, `"api"`) |
+| **Shared infrastructure**: PostgreSQL, Redis, Loki, Grafana, the nightly backup | the same Alloy: they are pods too | `{namespace="infra", app="postgres"}` (or `"redis"`, `"loki"`, `"grafana"`, `"postgres-backup"`) |
 
-**Grafana** (http://localhost:3000) has two dashboards: **Product Management** (traffic, errors, latency and
-microcache from the gateway's access log, the API's warnings and errors, PostgreSQL's slow statements and lock waits,
-Redis) and **Logs — where everything goes** (the raw lines of the frontend, backend and servers side by side), plus
-**12 LogQL alert rules**, each with a runbook. The gateway gives every request a W3C trace id and logs it; the API's
-JSON log lines carry the same id, so one id finds every line of a request. Browser reports carry the error, the route
-without its query string, the release, the browser and the user id; never the token, form values or a session id.
+**Grafana** (`kubectl -n infra port-forward svc/grafana 3000:3000` → http://localhost:3000) has two dashboards:
+**Product Management** (traffic, errors, latency and microcache from the gateway's access log, the API's warnings and
+errors, PostgreSQL's slow statements and lock waits, Redis) and **Logs — where everything goes** (the raw lines of the
+frontend, backend and shared infrastructure side by side), plus **12 LogQL alert rules**, each with a runbook. The
+gateway gives every request a W3C trace id and logs it; the API's JSON log lines carry the same id, so one id finds
+every line of a request. Browser reports carry the error, the route without its query string, the release, the
+browser and the user id; never the token, form values or a session id.
 
-Why logs only, why on its own server, what each browser report contains, the runbooks and what would come next
-(traces and metrics): [chapter 8](docs/guide/08-observability.md).
+Why logs only, what each browser report contains, the runbooks and what would come next (traces and metrics):
+[chapter 8](docs/guide/08-observability.md).
 
-**The logs are optional.** Loki, Grafana and the collectors are the infra's `logs` component: without it
-(`infra/infra.sh up database redis`, and the frontend deployed with `LOGS=off frontend/deploy/deploy.sh`) the
+**The logs are optional.** Loki, Grafana and Alloy are the infra's `logs` component: without it
+(`infra/infra.sh up postgres redis`, and the frontend deployed with `LOGS=off frontend/deploy/deploy.sh`) the
 application works the same, the pods log to stdout (`kubectl logs`), and the gateway answers the browser's error
 reports with 204 and drops them. To use another Loki (e.g. Grafana Cloud), start the logs with `LOKI_URL`:
 [Deploy each part](#with-another-grafana--loki).
@@ -396,13 +467,14 @@ reports with 204 and drops them. To use another Loki (e.g. Grafana Cloud), start
 | --------- | ------- |
 | .NET SDK  | 10.0.401+ (pinned in `backend/global.json`) |
 | Node.js   | 24 LTS (`frontend/.nvmrc`; 22.22+ also supported) |
-| Docker    | the servers, the images, and the integration tests (Testcontainers) |
-| kubectl   | for deployment (Kustomize is built in) |
+| Docker    | the images, Docker Desktop's Kubernetes, and the integration tests (Testcontainers) |
+| kubectl   | for deployment (Kustomize is built in) and to reach the shared PostgreSQL and Redis |
 
 **Backend:** open `backend/ProductManagement.sln` in **Visual Studio 2026** (the release that supports .NET 10) or
 JetBrains Rider. Projects sit directly under `backend/`, grouped by the `Source` and `Tests` solution folders.
 `ProductManagement.Api.http` has a request for every endpoint. Run the API from the IDE (profile `http`, port 5080)
-against the servers, as in [Run without Kubernetes](#run-without-kubernetes).
+against the shared database through a port-forward, with the connection string and password of
+[Run without Kubernetes](#run-without-kubernetes).
 
 **Frontend:**
 
@@ -445,11 +517,14 @@ The GitLab pipelines run the same scripts, one per repository:
 
 * `backend/.gitlab-ci.yml`: test (build with warnings as errors, `dotnet format --verify-no-changes`, unit,
   integration and acceptance tests, manifests) → build (API image, migration SQL) → scan (Trivy) → staging (migrate,
-  then deploy) → verify (the PDF check against staging) → production (manual migrate, then deploy);
+  then deploy) → verify (the PDF check against staging) → production (manual migrate, then deploy); the migrate jobs
+  run the release's image as a one-off pod inside the cluster (`deploy/ci/deploy-environment.sh migrate`), so every
+  job runs on gitlab.com's shared runners;
 * `frontend/.gitlab-ci.yml`: test (ESLint and Prettier, unit, build, manifests) → build (web and gateway images) →
   scan → staging (deploy) → verify (Playwright against staging) → production (manual deploy);
-* `infra/.gitlab-ci.yml`: validate (Compose files, the log collector's manifests, Alloy configuration) → manual
-  deploy jobs per environment and component.
+* `infra/.gitlab-ci.yml`: validate (the manifests and the dashboards' ConfigMap with kubeconform, the dashboards'
+  JSON, the scripts with shellcheck, the Alloy configuration with `alloy validate` and `alloy fmt`) → a manual deploy
+  job per environment (`./infra.sh up`).
 
 The manifests step is each part's `deploy/ci/validate-manifests.sh` (kubeconform, the settings each overlay must set,
 no Secret where there must be none). The pipelines are **not yet run on a GitLab instance**: each file is validated
@@ -476,7 +551,7 @@ creates over the replicas → 40 unique 6-digit ids, validation, stock in every 
 | Unique 6-digit id, no duplicates across instances           | PostgreSQL sequence `100000–999999 NO CYCLE` ([ADR 0002](docs/adr/0002-product-id-generation.md)); tested with two API hosts, with 40 concurrent creates over the replicas (`check-requirements.py`) and on 850,000 products (`verify-data.sh`) |
 | Validation of create/update                                 | FluentValidation + domain guards + database check constraints ([ADR 0005](docs/adr/0005-error-handling.md)) |
 | Stock included in every list response                       | `stockQuantity` on every `ProductResponse` |
-| EF Core code-first migrations                               | `backend/ProductManagement.Infrastructure/Persistence/Migrations` (generated by `dotnet ef`), applied once per deployment, before the rollout, by the API image's `migrate` command as the schema owner (`backend/deploy/deploy.sh` locally, a pipeline job in CI/CD) |
+| EF Core code-first migrations                               | `backend/ProductManagement.Infrastructure/Persistence/Migrations` (generated by `dotnet ef`), applied once per deployment, before the rollout, by the API image's `migrate` command as the schema owner, in a one-off pod inside the cluster (`backend/deploy/deploy.sh` locally, a pipeline job in CI/CD) |
 | Database seeding                                            | Categories via `HasData`; sample products via `UseSeeding`/`UseAsyncSeeding` |
 | Angular frontend; reflects changes made through the API     | `frontend/`: every endpoint used; refetch after changes + background refresh ([ADR 0007](docs/adr/0007-frontend-state.md)) |
 | Unit tests for various scenarios                            | 212 backend unit tests + 185 frontend tests (plus 153 integration tests, 16 BDD scenarios and 22 end-to-end tests) |
@@ -633,9 +708,9 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
 | Authorization  | Permission policies (`products:read`, `stock:write`, `products:write`) mapped from roles (`viewer`, `stock-clerk`, `manager`) in one place. Secure by default: an endpoint without a policy still requires a signed-in user. The UI hides what a role can't do, and the API enforces it. |
 | Brute force    | Failed sign-ins are counted per IP in Redis across all replicas: 10 per minute, then `429` even with the right secret. |
 | Rate limiting  | The gateway limits per IP; the API per user (stricter for writes), with token buckets **shared by all replicas in Redis**, so the limit does not grow as the autoscaler adds pods. Both answer `429` + `Retry-After` ([ADR 0010](docs/adr/0010-rate-limiting.md)). |
-| Network        | NetworkPolicies: the API and the web app accept connections only from the gateway. PostgreSQL and Redis are separate servers outside the cluster, protected by credentials (production adds TLS and a firewall that admits only the cluster's nodes and the CI runner). |
-| Database users | Least privilege ([`roles.sql`](infra/postgres/roles.sql)): the API connects as `pm_app` (read and write rows, use the id sequence; no `CREATE`, `ALTER` or `DROP`, 30 s statement timeout, 60 s idle-in-transaction timeout); only the migration step uses the schema owner `pm_migrator`. |
-| Cache server   | Redis with a password, no persistence, `volatile-lru`, and `FLUSHALL`, `FLUSHDB` and `DEBUG` disabled ([`redis.conf`](infra/redis/redis.conf)). |
+| Network        | NetworkPolicies: the API and the web app accept connections only from the gateway; Alloy's browser-error receiver only from the gateway pods. PostgreSQL and Redis run in the namespace `infra` behind cluster-internal Services, never published outside the cluster, and protected by random passwords that live only in Secrets (production's firewall opens only the k3s ports between the nodes). |
+| Database users | Least privilege: [`infra/create-database.sh`](infra/create-database.sh) creates the users with random passwords, and the API's migration [`GrantAppPermissions`](backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs) grants `pm_app` what it may do. The API connects as `pm_app` (read and write rows, use the id sequence; no `CREATE`, `ALTER` or `DROP`, 30 s statement timeout, 60 s idle-in-transaction timeout); only the migration step uses the schema owner `pm_migrator`. |
+| Cache server   | Redis with a password, no persistence, `volatile-lru`, and `FLUSHALL`, `FLUSHDB` and `DEBUG` disabled (the ConfigMap `redis-config` in [`infra/redis.yaml`](infra/redis.yaml)). |
 | Containers     | Non-root, read-only root filesystem where possible, no capabilities, no privilege escalation, `RuntimeDefault` seccomp, resource limits. |
 | Edge           | Strict **Content-Security-Policy** (`'self'` only, no inline scripts, no framing), `Permissions-Policy`, COOP/CORP, `nosniff`, `X-Frame-Options: DENY`, referrer policy, 1 MB body limit, `server_tokens off` ([ADR 0019](docs/adr/0019-content-security-policy.md)). |
 | Privacy        | No third-party requests: the font is self-hosted (no user IPs sent to Google), and browser error reports go to the same origin (`/collect`). The browser cache lives in memory only and is cleared on sign-out. Error reports carry the user id but never the token, form values, query strings or a session id. |
@@ -712,7 +787,7 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 | [0018](docs/adr/0018-autoscaling-and-scale-testing.md) | Autoscaling and testing at scale |
 | [0019](docs/adr/0019-content-security-policy.md) | Strict Content Security Policy, no third-party assets |
 | [0020](docs/adr/0020-edge-token-verification.md) | Token verification at the gateway, microcache shared per role |
-| [0021](docs/adr/0021-deployment-layout.md) | Kustomize overlays, servers outside the cluster, migrations in the pipeline |
+| [0021](docs/adr/0021-deployment-layout.md) | Kustomize overlays, three parts deployed on their own, migrations before the rollout |
 | [0022](docs/adr/0022-database-at-scale.md) | The database at scale: indexes, vacuum, the ledger beyond 20 million rows |
 
 ---
@@ -757,8 +832,10 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 * hardened non-root containers, immutable image tags;
 * authentication, RBAC, rate limiting, caching, optimistic concurrency, database constraints;
 * least-privilege database users; migrations as a pipeline step, before the rollout, with the image being released;
+* a nightly `pg_dump` of every database (CronJob `postgres-backup`, 7 days), on the database's node;
 * Kustomize overlays for local, staging and production (Ingress with a cert-manager certificate in staging and
-  production), Secrets created by the pipeline from CI/CD variables, never stored in the repository;
+  production); Secrets created by the pipeline from CI/CD variables or, for the database and Redis passwords,
+  generated at random in the cluster; none stored in the repository;
 * logs of every component, the browser's errors included, in Grafana (Loki, 14 days' retention), with two
   dashboards, 12 alert rules and their runbooks;
 * CI with an end-to-end deployment, load tests with SLO thresholds, and one GitLab pipeline per part through staging
@@ -767,13 +844,15 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 **Next** (full assessment: [chapter 11](docs/guide/11-production-readiness.md); runbook: [chapter 12](docs/guide/12-from-zero.md)):
 
 * **Secrets** from a secret manager (External Secrets or Vault) instead of CI/CD variables, for audit and rotation.
-* **TLS to the servers verified**: the internal CA mounted in the API pods, then `SSL Mode=VerifyFull`.
-* **Backups and restores** of PostgreSQL rehearsed (pgBackRest to object storage, the procedure is in chapter 12);
-  later PgBouncer and read replicas.
+* **Backups off the node** and restores rehearsed: the nightly dumps shipped to object storage, or volume snapshots
+  (chapter 12); for a standby and point-in-time recovery, a PostgreSQL operator such as CloudNativePG
+  ([ADR 0006](docs/adr/0006-postgresql.md)); later PgBouncer and read replicas.
+* **TLS inside the cluster** if required (today the API reaches PostgreSQL and Redis over the pod network; a database
+  outside the cluster would use `SSL Mode=VerifyFull`).
 * **Client IPs** preserved by the load balancer in front of the Ingress controller (`externalTrafficPolicy: Local` /
   PROXY protocol), so per-IP limits apply per caller; a `jti` deny-list (checked at the gateway too) for revocation.
-* **Traces and metrics** if logs stop being enough: OpenTelemetry in the API, database and cache exporters on the
-  servers ([chapter 8](docs/guide/08-observability.md#what-we-would-add-next)).
+* **Traces and metrics** if logs stop being enough: OpenTelemetry in the API, exporters for PostgreSQL and Redis
+  ([chapter 8](docs/guide/08-observability.md#what-we-would-add-next)).
 * **Keyset pagination** (`?after=`) for constant-time deep pages; monthly partitions for `stock_movements` past
   50–100 million rows ([ADR 0022](docs/adr/0022-database-at-scale.md)).
 * A replicated Redis, so idempotency claims survive a Redis restart.
@@ -790,7 +869,7 @@ its own:
 | --- | --- | --- |
 | [gitlab.com/zeiss/backend](https://gitlab.com/zeiss/backend) | the API, its tests, load tests and deploy scripts; the documentation (`docs/`) and this README | `backend/`, `docs/` |
 | [gitlab.com/zeiss/frontend](https://gitlab.com/zeiss/frontend) | the web app, the gateway, the Playwright tests and their deploy script | `frontend/` |
-| [gitlab.com/zeiss/deploy](https://gitlab.com/zeiss/deploy) | the servers outside the cluster (PostgreSQL, Redis) and the logs (Loki, Grafana, the collectors) | `infra/` |
+| [gitlab.com/zeiss/deploy](https://gitlab.com/zeiss/deploy) | the shared infrastructure in the namespace `infra`: PostgreSQL, Redis and the logs (Loki, Grafana, Alloy) | `infra/` |
 
 To run the commands as written, clone them side by side:
 
@@ -816,7 +895,7 @@ The tree below uses those folder names:
 │   ├── ProductManagement.Testing/            # shared test infrastructure
 │   ├── deploy/
 │   │   ├── deploy.sh                         # ENVIRONMENT=local|staging|production deploy/deploy.sh: image, migrations, rollout
-│   │   ├── local-secrets.sh                  # local signing key, demo consumers, local passwords (generated, gitignored)
+│   │   ├── local-secrets.sh                  # local signing key and demo consumers (generated, gitignored)
 │   │   ├── k8s/base/                         # namespace, Deployment (configuration as env keys), Service api, HPA, PDB, NetworkPolicy
 │   │   ├── k8s/overlays/{local,staging,production}/   # api.yaml: connection strings and per-environment settings
 │   │   └── ci/                               # validate-manifests.sh, create-secrets.sh, deploy-environment.sh
@@ -833,15 +912,16 @@ The tree below uses those folder names:
 │   │   ├── k8s/overlays/{local,staging,production}/   # gateway.yaml (API and collector addresses), ingress.yaml
 │   │   └── ci/validate-manifests.sh
 │   └── .gitlab-ci.yml                        # test → build → scan → staging → verify → production
-├── infra/                                    # the servers outside the cluster and the logs (repository deploy)
-│   ├── infra.sh                              # infra.sh up|down|status [database] [redis] [logs]
-│   ├── database.yaml · redis.yaml · logs.yaml   # one Docker Compose file per component
-│   ├── postgres/                             # postgresql.conf, roles.sql (the least-privilege users)
-│   ├── redis/                                # redis.conf
-│   ├── logs/                                 # loki.yaml, grafana/ (dashboards, alert rules), server-agent.alloy,
-│   │                                         # k8s/ (the cluster's log collector: Alloy)
-│   ├── cluster-addons.sh                     # metrics-server
-│   └── .gitlab-ci.yml                        # validate → manual deploy per environment and component
+├── infra/                                    # the shared infrastructure, namespace infra (repository deploy)
+│   ├── postgres.yaml                         # PostgreSQL 18: StatefulSet, postgresql.conf, nightly backup CronJob
+│   ├── redis.yaml                            # Redis 8: Deployment, redis.conf
+│   ├── logs.yaml                             # Loki, Grafana (data source, 12 alert rules), Alloy (collector)
+│   ├── dashboards/                           # the two Grafana dashboards (JSON)
+│   ├── infra.sh                              # infra.sh up|down|status [postgres] [redis] [logs] [--delete-data]
+│   ├── create-database.sh                    # a service's database, its two users, their Secret
+│   ├── add-node.sh                           # a k3s node with a role: database, cache or apps
+│   ├── .gitlab-ci.yml                        # validate → manual deploy per environment
+│   └── README.md
 └── docs/                                     # guide, ADRs, flows, architecture, load test results (repository backend)
 ```
 
@@ -854,5 +934,5 @@ The tree below uses those folder names:
 | Security | JWT (ES256) issued by the API and verified at the gateway (nginx njs), PBKDF2 secret hashes, ASP.NET Core authorization and rate limiting |
 | Frontend | Angular 22 (standalone, zoneless, signals), Tailwind CSS 4, Angular CDK, Vitest, ESLint, Prettier |
 | Testing  | xUnit v3 (Microsoft Testing Platform), Shouldly, NSubstitute, Testcontainers, Respawn, Reqnroll, k6 |
-| Delivery | Docker, Docker Compose (the servers), Kubernetes (Docker Desktop locally; k3s as the production target), Kustomize, nginx, GitLab CI/CD, Trivy |
+| Delivery | Docker (images), Kubernetes for everything (Docker Desktop locally; k3s as the production target), Kustomize, nginx, GitLab CI/CD, Trivy |
 | Operations | Grafana 12, Loki 3, Grafana Alloy (logs only), Grafana Faro (browser errors) |

@@ -2,10 +2,12 @@
 
 **Status:** accepted
 
-> **Update (2026-10-10):** Redis is now a server outside the cluster (locally the container `pm-redis`), reached
-> by the API's connection string (first through an ExternalName Service `redis`, removed later the same day:
-> [0021, update](0021-deployment-layout.md#update-2026-10-10)); "in-cluster" round trips below mean
-> round trips on the private network, still well under a millisecond locally. A Redis command that times out or is
+> **Update (2026-10-10):** Redis left the application's namespace: for a while it was a server outside the cluster
+> (first through an ExternalName Service `redis`, removed later the same day:
+> [0021, update](0021-deployment-layout.md#update-2026-10-10)); it now runs in the cluster's shared namespace `infra`
+> (a Deployment, `redis.infra.svc.cluster.local:6379`, [`infra/redis.yaml`](../../infra/redis.yaml)), shared by every
+> service and reached by the API's connection string. The round trips below are in-cluster round trips again, well
+> under a millisecond locally. A Redis command that times out or is
 > cancelled is treated like a Redis outage: the cache falls back to the database. The MCP server mentioned below was
 > removed ([0014](0014-mcp-server.md)); the read load it stood for (other clients issuing many lookups) is unchanged.
 

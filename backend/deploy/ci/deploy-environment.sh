@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# What the pipeline's deploy job runs for staging and production (.gitlab-ci.yml): selects the environment's cluster,
-# stores the registry credential the pods pull the image with, creates the API's Secret from CI/CD variables, then
-# runs deploy/deploy.sh with the image the pipeline built, scanned and already migrated the database for.
+# What the pipeline's migrate and deploy jobs run for staging and production (.gitlab-ci.yml): selects the
+# environment's cluster, stores the registry credential the pods pull the image with, then
+#   migrate   applies the database migrations with the release's image, in a one-off pod inside the cluster
+#             (deploy/deploy.sh with MIGRATIONS=only): the database is reachable only from there;
+#   deploy    creates the API's Secret from CI/CD variables and rolls out the image the migrate job already migrated
+#             the database for (deploy/deploy.sh with MIGRATIONS=skip).
 #
-#   ENVIRONMENT=staging API_IMAGE=... KUBE_CONTEXT=... deploy/ci/deploy-environment.sh
+#   ENVIRONMENT=staging API_IMAGE=... KUBE_CONTEXT=... deploy/ci/deploy-environment.sh migrate|deploy
 #
 #   ENVIRONMENT          staging | production (deploy/k8s/overlays/<environment>)
 #   API_IMAGE            the release's image (registry/name:tag or name@sha256:digest)
@@ -16,14 +19,18 @@
 #   CI_DEPLOY_PASSWORD   to the jobs by itself → Secret gitlab-registry-backend (the Deployment's imagePullSecrets in
 #                        the staging and production overlays)
 #   CI_REGISTRY          the registry (GitLab sets it; default: the image's host)
-#   plus the variables of deploy/ci/create-secrets.sh
-#
-# The migrations are not run here: the pipeline's migrate job ran them, with the same API image, before this job.
+#   plus, for deploy, the variables of deploy/ci/create-secrets.sh
+#   migrate also reads SEED_SAMPLE_DATA (deploy/deploy.sh)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NAMESPACE=product-management
 PULL_SECRET=gitlab-registry-backend
+STEP="${1:-}"
+case "$STEP" in
+  migrate | deploy) ;;
+  *) echo "usage: $0 migrate|deploy" >&2; exit 1 ;;
+esac
 : "${ENVIRONMENT:?ENVIRONMENT is not set (staging or production)}"
 : "${API_IMAGE:?API_IMAGE is not set}"
 if [[ "$ENVIRONMENT" == local ]]; then
@@ -61,6 +68,11 @@ kubectl -n "$NAMESPACE" create secret docker-registry "$PULL_SECRET" \
   | kubectl label --local -f - -o yaml \
       app.kubernetes.io/part-of=product-management app.kubernetes.io/managed-by=ci \
   | kubectl apply -f -
+
+if [[ "$STEP" == migrate ]]; then
+  MIGRATIONS=only "$HERE/../deploy.sh"
+  exit 0
+fi
 
 echo "==> Secret api-secrets: from the $ENVIRONMENT CI/CD variables"
 changed="$("$HERE/create-secrets.sh")"

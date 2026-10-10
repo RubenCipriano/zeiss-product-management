@@ -119,7 +119,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Production overview**, computed from logs only (Loki). Traffic, errors, latency and the microcache come from the gateway's access log (one JSON line per request); errors from the API's JSON logs; the database and cache from their servers' logs. The **URIs** variable chooses API calls only (default) or every request (web app files included). To follow one request, paste its `trace_id` in the **trace_id** box and open the last row. Runbooks for every alert: `docs/guide/08-observability.md`."
+        "content": "**Production overview**, computed from logs only (Loki). Traffic, errors, latency and the microcache come from the gateway's access log (one JSON line per request); errors from the API's JSON logs; the database and cache from their own logs. The **URIs** variable chooses API calls only (default) or every request (web app files included). To follow one request, paste its `trace_id` in the **trace_id** box and open the last row. Runbooks for every alert: `docs/guide/08-observability.md`."
       }
     },
     {
@@ -498,7 +498,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({namespace=\"servers\", app=\"postgres\"} |= \"duration:\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({namespace=\"infra\", app=\"postgres\"} |= \"duration:\" [$__range])) or vector(0)",
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
@@ -1833,7 +1833,7 @@
     {
       "id": 26,
       "type": "row",
-      "title": "Database server (PostgreSQL logs)",
+      "title": "Database (PostgreSQL logs)",
       "gridPos": {
         "x": 0,
         "y": 74,
@@ -1865,7 +1865,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({namespace=\"servers\", app=\"postgres\"} |= \"duration:\" [1m]))",
+          "expr": "sum(count_over_time({namespace=\"infra\", app=\"postgres\"} |= \"duration:\" [1m]))",
           "legendFormat": "slow statements",
           "refId": "A",
           "editorMode": "code",
@@ -1876,7 +1876,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({namespace=\"servers\", app=\"postgres\"} |~ \"still waiting for|deadlock detected\" [1m]))",
+          "expr": "sum(count_over_time({namespace=\"infra\", app=\"postgres\"} |~ \"still waiting for|deadlock detected\" [1m]))",
           "legendFormat": "lock waits / deadlocks",
           "refId": "B",
           "editorMode": "code",
@@ -1887,7 +1887,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({namespace=\"servers\", app=\"postgres\"} |~ \"ERROR:\" [1m]))",
+          "expr": "sum(count_over_time({namespace=\"infra\", app=\"postgres\"} |~ \"ERROR:\" [1m]))",
           "legendFormat": "ERROR",
           "refId": "C",
           "editorMode": "code",
@@ -1898,7 +1898,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({namespace=\"servers\", app=\"postgres\"} |~ \"FATAL:|PANIC:\" [1m]))",
+          "expr": "sum(count_over_time({namespace=\"infra\", app=\"postgres\"} |~ \"FATAL:|PANIC:\" [1m]))",
           "legendFormat": "FATAL / PANIC",
           "refId": "D",
           "editorMode": "code",
@@ -2031,7 +2031,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (reason) (count_over_time({namespace=\"servers\", app=\"postgres\"} |= \"checkpoint starting\" | regexp `checkpoint starting: (?P<reason>.+)` [5m]))",
+          "expr": "sum by (reason) (count_over_time({namespace=\"infra\", app=\"postgres\"} |= \"checkpoint starting\" | regexp `checkpoint starting: (?P<reason>.+)` [5m]))",
           "legendFormat": "{{reason}}",
           "refId": "A",
           "editorMode": "code",
@@ -2042,7 +2042,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({namespace=\"servers\", app=\"postgres\"} |= \"checkpoints are occurring too frequently\" [5m]))",
+          "expr": "sum(count_over_time({namespace=\"infra\", app=\"postgres\"} |= \"checkpoints are occurring too frequently\" [5m]))",
           "legendFormat": "too frequent",
           "refId": "B",
           "editorMode": "code",
@@ -2113,7 +2113,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "topk(15, max_over_time({namespace=\"servers\", app=\"postgres\"} |= \"duration:\" | regexp `duration: (?P<ms>[0-9.]+) ms\\s+(?:statement|execute|bind|parse)[^:]*: (?P<stmt>.{0,120})` | unwrap ms [$__range]) by (stmt))",
+          "expr": "topk(15, max_over_time({namespace=\"infra\", app=\"postgres\"} |= \"duration:\" | regexp `duration: (?P<ms>[0-9.]+) ms\\s+(?:statement|execute|bind|parse)[^:]*: (?P<stmt>.{0,120})` | unwrap ms [$__range]) by (stmt))",
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
@@ -2217,7 +2217,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "{namespace=\"servers\", app=\"postgres\"} |~ `duration:|still waiting for|deadlock|ERROR:|FATAL:|PANIC:|WARNING:|HINT:`",
+          "expr": "{namespace=\"infra\", app=\"postgres\"} |~ `duration:|still waiting for|deadlock|ERROR:|FATAL:|PANIC:|WARNING:|HINT:`",
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",
@@ -2238,7 +2238,7 @@
     {
       "id": 31,
       "type": "row",
-      "title": "Cache server (Redis logs)",
+      "title": "Cache (Redis logs)",
       "gridPos": {
         "x": 0,
         "y": 94,
@@ -2270,7 +2270,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({namespace=\"servers\", app=\"redis\"} |~ \" [0-9:.]12 # |MISCONF|Can.t save|Background saving error|Failed opening\" [5m])) or vector(0)",
+          "expr": "sum(count_over_time({namespace=\"infra\", app=\"redis\"} |~ \" [0-9:.]12 # |MISCONF|Can.t save|Background saving error|Failed opening\" [5m])) or vector(0)",
           "legendFormat": "warnings and errors",
           "refId": "A",
           "editorMode": "code",
@@ -2341,7 +2341,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "{namespace=\"servers\", app=\"redis\"}",
+          "expr": "{namespace=\"infra\", app=\"redis\"}",
           "legendFormat": "",
           "refId": "A",
           "editorMode": "code",

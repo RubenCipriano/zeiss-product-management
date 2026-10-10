@@ -19,9 +19,11 @@ request can end early, and what one real request looks like on the wire.
 | **ClusterIP** | The default Service type: one virtual IP reachable only inside the cluster. The node's networking (kube-proxy) picks a pod **per TCP connection**. |
 | **LoadBalancer** | A Service that is also reachable from outside. Docker Desktop publishes it on `localhost`; a cloud provider would create a real load balancer. Only the `gateway` Service has this type. |
 | **Headless Service** | A Service with `clusterIP: None`: no virtual IP. Its DNS name returns the IP of **every ready pod**, so the caller can choose a pod itself. |
+| **StatefulSet, PersistentVolumeClaim** | A StatefulSet keeps one pod with a stable name (`postgres-0`) attached to its own volume, a PersistentVolumeClaim that outlives the pod: PostgreSQL and Loki run this way. |
+| **Namespace** | A named group of objects. The application lives in `product-management`; PostgreSQL, Redis and the logs, shared by every service, in `infra`. A Service in another namespace is reached by its full name, `<service>.<namespace>.svc.cluster.local`. |
 
-The database and cache servers are outside the cluster and have no Service: the API's connection strings name them
-directly (locally `host.docker.internal`, your own machine; elsewhere their private DNS names).
+The database and the cache are in the namespace `infra`, behind ordinary ClusterIP Services: the API's connection
+strings name them `postgres.infra.svc.cluster.local:5432` and `redis.infra.svc.cluster.local:6379`.
 
 What is running at a typical moment (`kubectl -n product-management get pods,svc`; names and addresses vary):
 
@@ -199,7 +201,8 @@ WWW-Authenticate: Bearer error="invalid_token"
   [`service.yaml`](../../backend/deploy/k8s/base/service.yaml): the headless Service `api`),
   [`frontend/deploy/k8s/base`](../../frontend/deploy/k8s/base) (`gateway`, `web`),
   the connection strings in [`backend/deploy/k8s/overlays/local/api.yaml`](../../backend/deploy/k8s/overlays/local/api.yaml),
-  [`infra/infra.sh`](../../infra/infra.sh) (the servers themselves)
+  [`infra/postgres.yaml`](../../infra/postgres.yaml) and [`infra/redis.yaml`](../../infra/redis.yaml) (the database
+  and the cache themselves, started by [`infra/infra.sh`](../../infra/infra.sh))
 * API pipeline: [`Program.cs`](../../backend/ProductManagement.Api/Program.cs),
   [`ProductsController.cs`](../../backend/ProductManagement.Api/Controllers/ProductsController.cs),
   [`CachingProductQueries.cs`](../../backend/ProductManagement.Infrastructure/Caching/CachingProductQueries.cs)

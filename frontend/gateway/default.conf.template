@@ -26,7 +26,7 @@ upstream web {
   keepalive 16;
 }
 
-# Grafana Alloy's Faro receiver in the observability namespace: it turns the browser's error reports into log lines
+# Grafana Alloy's Faro receiver in the infra namespace: it turns the browser's error reports into log lines
 # in Loki. Written at startup from COLLECTOR_UPSTREAM by collector.sh: the `collector` upstream, or nothing when
 # COLLECTOR_UPSTREAM is empty (no log collector).
 include /etc/nginx/collector-upstream.conf;

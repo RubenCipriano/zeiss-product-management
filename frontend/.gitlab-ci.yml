@@ -31,9 +31,9 @@
 #   staging only (verify):      E2E_VIEWER_SECRET, E2E_CLERK_SECRET, E2E_MANAGER_SECRET (masked): the secrets of the
 #                               consumers viewer, clerk and manager registered in staging's API (backend: API_CONSUMERS)
 #
-# Runners: no job has tags, so they all run on gitlab.com's shared runners. To run them on your own runner instead
-# (the backend's PRIVATE_RUNNER_TAG runner, product-management-private), register it (Docker executor, privileged for
-# docker:dind) with "Run untagged jobs" and turn off instance runners for the project.
+# Runners: no job has tags, so they all run on gitlab.com's shared runners. To run them on your own runner instead,
+# register it (Docker executor, privileged for docker:dind) with "Run untagged jobs" and turn off instance runners for
+# the project.
 
 workflow:
   name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
@@ -236,7 +236,7 @@ deploy:staging:
 
 # The user journeys in a real browser, desktop and phone, against staging (gateway, API, Redis, PostgreSQL). Needs the
 # consumers viewer, clerk and manager registered in staging's API, with their secrets in E2E_<ROLE>_SECRET, and the
-# sample catalogue (paging needs more than 3 pages). The browser-errors test is skipped: it reads a local Loki.
+# sample catalogue (paging needs more than 3 pages). The browser-errors test is skipped: it reads Loki through a port-forward on a laptop.
 verify:e2e:
   extends: [.npm-cache, .staging]
   stage: verify

@@ -1,129 +1,159 @@
-# Product Management — Infra
+# Shared infrastructure
 
-The servers the Product Management system needs outside its Kubernetes cluster, and the cluster's log collector.
-This folder is self-contained, its own repository ([gitlab.com/zeiss/deploy](https://gitlab.com/zeiss/deploy)).
-Locally every server is a Docker Compose container on this machine; on real machines the same configuration files run
-on each server, or a managed service (Amazon RDS, ElastiCache, Grafana Cloud) replaces it.
+PostgreSQL, Redis and the logs (Loki, Grafana, Alloy) for every service on the cluster, all in Kubernetes, in one
+namespace: `infra`. This folder is self-contained, its own repository ([gitlab.com/zeiss/deploy](https://gitlab.com/zeiss/deploy)).
+The same files run on Docker Desktop's Kubernetes on a laptop and on a k3s cluster in production.
 
-| Component | What | Files |
-| --- | --- | --- |
-| `database` | PostgreSQL 18 on port 5432, with the least-privilege users `pm_migrator` and `pm_app` | [`database.yaml`](database.yaml), [`postgres/`](postgres) |
-| `redis` | Redis 8 on port 6379, password protected, memory only | [`redis.yaml`](redis.yaml), [`redis/`](redis) |
-| `logs` (optional) | Loki on port 3100 (14 days), Grafana on http://localhost:3000 (dashboards, 12 alert rules), the server agent that ships the servers' logs, and the cluster's log collector | [`logs.yaml`](logs.yaml), [`logs/`](logs) |
+| File | What it is |
+| --- | --- |
+| [`postgres.yaml`](postgres.yaml) | the namespace `infra`; PostgreSQL 18 (StatefulSet, one replica, 20 GiB volume), its settings inline (`postgresql.conf`), Service `postgres:5432`; a nightly `pg_dump` of every database (CronJob `postgres-backup`, 7 days, on its own volume) |
+| [`redis.yaml`](redis.yaml) | Redis 8 (Deployment, one replica, memory only), its settings inline (`redis.conf`), Service `redis:6379` |
+| [`logs.yaml`](logs.yaml) | Loki (StatefulSet, 10 GiB volume, 14 days), Grafana (data source, dashboard provider, the 12 alert rules, contact points and policies inline), Alloy (collects the logs of every pod in every namespace, and the browser's error reports behind Service `alloy-faro:12347`) |
+| [`dashboards/`](dashboards) | the two Grafana dashboards, as JSON files; `infra.sh` loads them into the ConfigMap `grafana-dashboards` |
+| [`infra.sh`](infra.sh) | starts, stops and shows the components |
+| [`create-database.sh`](create-database.sh) | gives a service its database, users and a Secret with their passwords |
+| [`add-node.sh`](add-node.sh) | joins a machine to a k3s cluster as a node for the database, the cache or the services |
+| [`.gitlab-ci.yml`](.gitlab-ci.yml) | validates every change; deploys with `infra.sh up` (manual) |
 
-Why the servers are outside the cluster: [ADR 0021](../docs/adr/0021-deployment-layout.md). What the logs contain
-and how to read them: [chapter 8](../docs/guide/08-observability.md). Deployment and operations:
-[chapter 9](../docs/guide/09-deployment-and-operations.md).
+Why everything is in the cluster: [ADR 0021](../docs/adr/0021-deployment-layout.md). What the logs contain and how to
+read them: [chapter 8](../docs/guide/08-observability.md). Operations: [chapter 9](../docs/guide/09-deployment-and-operations.md).
+Production: [chapter 12](../docs/guide/12-from-zero.md).
 
 ## Prerequisites
 
-* Docker with the Compose plugin (Docker Desktop locally).
-* `kubectl` with a context (e.g. `docker-desktop`) for the cluster's log collector; without a context that step is
-  skipped.
+`kubectl` with a context: Docker Desktop's Kubernetes (`docker-desktop`) locally, or a k3s cluster. Nothing else:
+`psql` and `redis-cli` run inside the pods (`kubectl exec`).
 
 ## Usage
 
 ```bash
-./infra.sh up                     # everything: database, redis, logs
-./infra.sh up database redis      # only these two (no Loki, no Grafana)
-./infra.sh up logs                # Loki, Grafana, the server agent and the cluster's log collector
-./infra.sh down logs              # stop one component (and remove the cluster's collector); data volumes are kept
-./infra.sh down                   # stop everything
-./infra.sh status                 # the server containers and the cluster's collector
+./infra.sh up                          # everything: postgres, redis, logs
+./infra.sh up postgres redis           # only these two (no logs)
+./infra.sh down logs                   # remove a component; its volumes and passwords are kept
+./infra.sh down postgres --delete-data # ... and delete its volumes and password too
+./infra.sh status                      # pods, services, volumes, and how to reach them
 ```
 
-`infra.sh up|down|status [database] [redis] [logs]`; no component means all three. Each component is its own Compose
-project (`pm-database`, `pm-redis`, `pm-logs`), so starting or stopping one never touches the others.
+`infra.sh up|down|status [postgres] [redis] [logs] [--delete-data]`; no component means all three.
 
-* **`up database`** creates the volume `pm-postgres-data`, starts `pm-postgres` (4 CPUs, 3 GB, 1 GB shared memory,
-  [`postgres/postgresql.conf`](postgres/postgresql.conf)), and waits for the one-shot `roles` service
-  (`pm-postgres-roles`), which on every `up` creates the `pg_stat_statements` extension and applies
-  [`postgres/roles.sql`](postgres/roles.sql): the users `pm_migrator` (owns the schema, runs migrations) and `pm_app`
-  (the API: rows only, 30 s statement timeout). It is idempotent, so it also applies a changed password and hands
-  tables created by the administrator over to `pm_migrator`.
-* **`up redis`** starts `pm-redis` (384 MB, [`redis/redis.conf`](redis/redis.conf), the password from
-  `REDIS_PASSWORD` on the command line, never in the file).
-* **`up logs`** creates the volumes `pm-loki-data` and `pm-grafana-data`, starts `pm-loki`, `pm-grafana` (anonymous
-  administrator locally; dashboards in the folder *Product Management*) and `pm-server-agent` (Alloy, reads the logs
-  of every container labelled `com.product-management.role=server`), then applies the cluster's log collector
-  ([`logs/k8s/`](logs/k8s)) to the current `kubectl` context: Alloy in the namespace `observability`, reading every
-  pod's log, and the Service `alloy-faro:12347` that receives the browser's error reports from the gateway.
+* **`up`** creates, once, what must never be committed: the namespace and the random passwords (Secrets
+  `postgres-admin`, the superuser `postgres`; `redis-auth`, Redis). It installs metrics-server (pinned, v0.8.0) when
+  the cluster has none: the services' autoscalers need it; k3s ships it, Docker Desktop does not. Then it applies the
+  component's file and waits until it is ready. A changed `redis.conf`, Loki, Grafana or Alloy configuration restarts
+  that component; a changed `postgresql.conf` prints how to reload (or, for memory settings, restart) PostgreSQL.
+* **`down`** deletes a component's workloads, Services and configuration. Its PersistentVolumeClaims
+  (`data-postgres-0`, `postgres-backups`, `data-loki-0`) and password Secrets stay, and `down` lists them: `up` brings the
+  component back with its data. Only `--delete-data` deletes them.
+* **`status`** shows the pods, Services and volumes, and the commands to reach them from this machine.
 
-The data volumes are created by `infra.sh` and declared `external` in the Compose files, so neither `infra.sh down`
-nor `docker compose down -v` deletes them. To start from an empty database:
-`./infra.sh down database && docker volume rm pm-postgres-data && ./infra.sh up database`.
+Nothing is published on the host. From a laptop:
 
-## Passwords
+```bash
+kubectl -n infra port-forward svc/grafana 3000:3000       # Grafana → http://localhost:3000 (folder "Product Management")
+kubectl -n infra port-forward svc/loki 3100:3100          # Loki → http://localhost:3100
+kubectl -n infra exec -it statefulset/postgres -- psql -U postgres -d product_management
+kubectl -n infra exec -it deployment/redis -- redis-cli   # the pod has the password (REDISCLI_AUTH)
+```
 
-Local development defaults; set any of these in the environment, or in `.env` in this folder (read by Compose,
-gitignored), to use others:
+## A service's database
 
-| Variable | Default | Used by |
-| --- | --- | --- |
-| `POSTGRES_PASSWORD` | `product_management` | the server's administrator (`product_management`): for this repository and for people only |
-| `PM_MIGRATOR_PASSWORD` | `local-migrator-password` | `pm_migrator`: the backend's migration step |
-| `PM_APP_PASSWORD` | `local-app-password` | `pm_app`: the API |
-| `REDIS_PASSWORD` | `local-redis-password` | Redis |
+One PostgreSQL for the platform, one database per service:
 
-The backend repository's `deploy/local-secrets.sh` uses the same defaults for the API's Secret. When you change
-`PM_APP_PASSWORD` or `REDIS_PASSWORD` here, give the backend the same values (its `generated/passwords.env`, or
-`FORCE=1 PM_APP_PASSWORD=... REDIS_PASSWORD=... deploy/local-secrets.sh` there), and `PM_MIGRATOR_PASSWORD` to its
-`deploy/deploy.sh`.
+```bash
+./create-database.sh <service-namespace> <database> [app-user] [migrator-user] [--rotate]
+./create-database.sh product-management product_management pm_app pm_migrator
+```
 
-## Logs are optional
+It creates, idempotently:
 
-Without the `logs` component the application works the same: the pods still log to stdout (`kubectl logs`), and the
-frontend is deployed with `LOGS=off deploy/deploy.sh` so the gateway answers the browser's error reports with 204
-instead of forwarding them.
+* the database (nobody may connect to it but its two users);
+* the **migrator** user (default `<database>_migrator`): owns the schema, runs the service's migrations, may create
+  trusted extensions;
+* the **app** user (default `<database>_app`): what the service runs as. It may only use the schema; its statements end
+  after 30 s and an idle open transaction after 60 s. Which tables it may read and write is granted by the service's own
+  migrations, which create those tables (product-management: the migration `GrantAppPermissions`);
+* `pg_stat_statements` in the database;
+* the Secret `database-credentials` in the service's namespace: `host`, `port`, `database`, `app-user`, `app-password`,
+  `migrator-user`, `migrator-password`.
 
-**Another Loki** (e.g. Grafana Cloud) instead of the local one:
+The passwords are random. Running it again keeps them (and hands tables owned by someone else, e.g. after a restore as
+the administrator, over to the migrator); `--rotate` makes new ones, after which the service's pods are restarted to
+read them.
+
+The service then points its connection string at `postgres.infra.svc.cluster.local:5432` and reads the password from
+the Secret (`PGPASSWORD` from `app-password` for Npgsql and libpq).
+
+## A service's cache and logs
+
+* **Redis:** `redis.infra.svc.cluster.local:6379`, one password for every service (Secret `redis-auth`). A pod can only
+  read Secrets of its own namespace, so the service copies it into its namespace when it deploys (the backend's
+  `deploy/deploy.sh` makes `redis-credentials`). Services separate their keys by prefix.
+* **Logs:** nothing to do. Alloy collects the stdout of every pod in every namespace; in Loki they are
+  `{namespace="<namespace>", app="<app.kubernetes.io/name label>"}`. The shared infrastructure's own logs are
+  `{namespace="infra", app="postgres"}` (or `redis`, `loki`, `grafana`, `postgres-backup`).
+* **Browser errors** (optional): the gateway forwards them to `alloy-faro.infra.svc.cluster.local:12347`. A
+  NetworkPolicy admits only the gateway pods of `product-management`; another service's gateway is added there.
+
+## Another Loki
 
 ```bash
 LOKI_URL=https://<host>/loki/api/v1/push LOKI_USERNAME=<user> LOKI_PASSWORD=<token> ./infra.sh up logs
 ```
 
-No Loki or Grafana container starts (the Compose profile `storage` is left out); the server agent and the cluster's
-collector push to `LOKI_URL`. For the collector, `infra.sh` renders `.build/logs-k8s/` (not committed) with a patch
-that sets `LOKI_URL` in [`logs/k8s/alloy.yaml`](logs/k8s/alloy.yaml) (default
-`http://host.docker.internal:3100/loki/api/v1/push`, the local Loki) and puts the credentials in the Secret
-`loki-credentials` (after changing them: `kubectl -n observability rollout restart deployment/alloy`). Running
-`./infra.sh up logs` again without `LOKI_URL` switches back. The dashboards and alert rules in
-[`logs/grafana/`](logs/grafana) can be imported into that Grafana.
+Then Loki and Grafana are not deployed (Loki's volume is kept), only Alloy is applied, and it pushes to `LOKI_URL` with
+the credentials of the Secret `loki-external`. `./infra.sh up logs` without `LOKI_URL` switches back. The dashboards in
+[`dashboards/`](dashboards) and the alert rules in [`logs.yaml`](logs.yaml) can be imported into that Grafana.
 
-## What the other parts expect from this one
+Without logs at all (`./infra.sh up postgres redis`) the services work the same: `kubectl logs` still shows every pod,
+and the frontend is deployed with `LOGS=off` so the gateway answers the browser's error reports with 204.
 
-| Part | Expects | Where it is configured there |
-| --- | --- | --- |
-| backend | PostgreSQL with the database `product_management` and the users `pm_migrator`, `pm_app`; Redis with a password. Locally at `host.docker.internal:5432` / `:6379` | the connection strings in `deploy/k8s/overlays/<environment>/api.yaml`, the passwords in the Secret `api-secrets` |
-| frontend | the log collector's Service `alloy-faro.observability.svc.cluster.local:12347` (optional) | `COLLECTOR_UPSTREAM` in `deploy/k8s/overlays/<environment>/gateway.yaml`, or `LOGS=off` |
+## Backups
 
-Cluster add-on: [`cluster-addons.sh`](cluster-addons.sh) installs metrics-server into the current context (needed by
-the API's and the gateway's autoscalers; built into k3s and most managed clusters).
+The CronJob `postgres-backup` dumps, every night at 02:30, the roles and each database into
+`/backups/<date-time>/` on the volume `postgres-backups`, and keeps 7 days. It protects against mistakes (a dropped
+table, a bad migration), not against losing the node: production ships the dumps off the node or uses volume snapshots
+([chapter 12](../docs/guide/12-from-zero.md)).
+
+```bash
+kubectl -n infra create job --from=cronjob/postgres-backup postgres-backup-now   # one now
+```
+
+## Nodes
+
+On Docker Desktop (and on a single k3s server) everything shares one node. A k3s cluster can give the database and the
+cache machines of their own:
+
+```bash
+./add-node.sh admin@db-1.example.internal database --server https://k3s-1.example.internal:6443
+./add-node.sh admin@cache-1.example.internal cache
+./add-node.sh admin@apps-1.example.internal apps
+./add-node.sh admin@db-1.example.internal database --dry-run      # print the steps only
+```
+
+Over ssh it installs the k3s agent (pinned to the cluster's version, v1.34.1+k3s1) with the server's join token, labels
+the node `infra/role=<role>` and taints `database` and `cache` nodes `infra/role=<role>:NoSchedule`. PostgreSQL prefers
+a `database` node and Redis a `cache` node, and both tolerate the taint, so nothing else runs there; without such nodes
+the preference is simply not met. A volume on a node's disk stays on that node: add the database node before the first
+`./infra.sh up postgres`, or move an existing database with a dump and restore. It cannot be tried on Docker Desktop,
+whose Kubernetes is one fixed node.
 
 ## CI/CD (GitLab)
 
 [`.gitlab-ci.yml`](.gitlab-ci.yml):
 
-* **validate** (every change): `docker compose config` on the three Compose files, the collector's manifests rendered
-  and checked with `kubeconform`, both Alloy configurations formatted as `alloy fmt` writes them.
-* **deploy** (manual, on the default branch, per environment once the project or group variable `STAGING_ENABLED` /
-  `PRODUCTION_ENABLED` is `true`):
-  * `servers:staging`, `servers:production`: a matrix over `COMPONENT` = `database`, `redis`, `logs`; each runs
-    `./infra.sh up <component>` on a shell runner with Docker on that server, tagged `pm-<environment>-<component>`
-    (e.g. `pm-staging-database`);
-  * `cluster-logs:staging`, `cluster-logs:production`: [`ci/cluster-logs.sh`](ci/cluster-logs.sh) selects the cluster
-    (GitLab agent or kubeconfig) and runs `infra.sh up logs`; the job has `kubectl` and no Docker, so only the
-    collector is applied, with `LOKI_URL=$CLUSTER_LOKI_URL`.
+* **validate** (every change): `kubeconform` on the three manifests and the dashboards' ConfigMap, `jq` on the
+  dashboards, `shellcheck` on the scripts, `alloy validate` and `alloy fmt` on the Alloy configuration taken out of
+  `logs.yaml`.
+* **deploy** (manual, on the default branch, per environment once `STAGING_ENABLED` / `PRODUCTION_ENABLED` is `true`):
+  selects the cluster and runs `./infra.sh up`.
 
 CI/CD variables, scoped to the `staging` and `production` environments:
 
 | Variable | What |
 | --- | --- |
-| `KUBE_CONTEXT` | `<agent configuration project path>:<agent name>` (the cluster's log collector) |
+| `KUBE_CONTEXT` | `<agent configuration project path>:<agent name>` (the GitLab agent for Kubernetes) |
 | `KUBECONFIG` | File, instead of `KUBE_CONTEXT`: a kubeconfig whose current context is the cluster |
-| `CLUSTER_LOKI_URL` | the Loki the cluster's collector pushes to, e.g. `http://pm-monitoring.example.internal:3100/loki/api/v1/push` |
-| `LOKI_USERNAME`, `LOKI_PASSWORD` | only for a hosted Loki (masked) |
-| `POSTGRES_PASSWORD` | masked, protected: the database administrator |
-| `PM_MIGRATOR_PASSWORD`, `PM_APP_PASSWORD`, `REDIS_PASSWORD` | masked, protected; the same values the backend's pipeline uses: define them once as group-level variables |
+| `LOKI_URL`, `LOKI_USERNAME`, `LOKI_PASSWORD` | optional: another Loki (the last two masked) |
 
-Setting up the servers, the runners and TLS: [chapter 12](../docs/guide/12-from-zero.md).
+No password of PostgreSQL or Redis is a variable: `infra.sh` creates them in the cluster. A new service's database is a
+deliberate, one-time step per environment: `./create-database.sh` against that cluster.

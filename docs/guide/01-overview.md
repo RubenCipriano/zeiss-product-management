@@ -43,23 +43,23 @@ Two kinds of client use these accounts:
 
 ## The building blocks
 
-The application runs in one Kubernetes namespace, `product-management`, on Docker Desktop's single-node cluster
-(k3s is the target for staging and production). Only stateless workloads and a log collector run
-in the cluster. PostgreSQL, Redis and the log server (Grafana and Loki, logs only, optional) run outside it, as such
-servers usually do (locally: Docker Compose containers on the same machine), so the cluster can be rebuilt from Git at any time
-without touching the data ([chapter 8](08-observability.md) for the logs, [chapter 9](09-deployment-and-operations.md)
-for the layout).
+Everything runs in Kubernetes, on Docker Desktop's single-node cluster locally (k3s is the target for staging and
+production). The application has its own namespace, `product-management`, with stateless workloads only. PostgreSQL,
+Redis and the logs (Loki, Grafana and the collector Alloy; optional) are shared infrastructure for any service on the
+cluster and run in a second namespace, `infra`, with their data on PersistentVolumeClaims, so the application's
+namespace can be deleted and redeployed from Git at any time without touching the data
+([chapter 8](08-observability.md) for the logs, [chapter 9](09-deployment-and-operations.md) for the layout).
 
 | Piece | What it is | Its job, in one line |
 | --- | --- | --- |
 | **gateway** | nginx, 2–6 pods (autoscaled) | The only door: rate limit per IP, token check, 1 s cache for API reads, security headers, routing. |
 | **web** | nginx, 2 pods | Serves the built Angular app (HTML, JS, CSS). |
 | **api** | ASP.NET Core (.NET 10), 2–8 pods (autoscaled) | The REST API: issues and verifies tokens, permissions, per-user limits, validation, business rules. |
-| **PostgreSQL** | PostgreSQL 18 server outside the cluster, with a volume | The source of truth: products, categories, the stock ledger, the id sequence. The API connects as `pm_app`, which can read and write rows but not change the schema. |
-| **Redis** | Redis 8 server outside the cluster, memory only, password protected | Shared state for the API replicas: read cache, idempotency keys, rate-limit buckets, failed sign-ins. |
-| **migrations** | the API image run once with `migrate`, as the schema owner `pm_migrator` | Applies EF Core migrations and seed data once per deployment, before the rollout: from `backend/deploy/deploy.sh` locally, from a pipeline job in CI/CD. |
+| **PostgreSQL** | PostgreSQL 18, a StatefulSet in `infra` with a 20 GiB volume and a nightly backup | The source of truth: products, categories, the stock ledger, the id sequence. The API connects as `pm_app`, which can read and write rows but not change the schema. |
+| **Redis** | Redis 8, a Deployment in `infra`, memory only, password protected | Shared state for the API replicas: read cache, idempotency keys, rate-limit buckets, failed sign-ins. |
+| **migrations** | the API image run once with `migrate`, as the schema owner `pm_migrator` | Applies EF Core migrations and seed data once per deployment, before the rollout, as a one-off pod in the cluster: started by `backend/deploy/deploy.sh` locally, by a pipeline job in CI/CD. |
 | **HPAs** | two HorizontalPodAutoscalers | Add or remove API and gateway pods based on CPU. |
-| **logs** (optional) | Alloy in the cluster, an agent on the servers, Loki and Grafana on the log server | Every log line in one place, the browser's errors included, kept 14 days; two dashboards, twelve alerts, one trace id per request ([chapter 8](08-observability.md)). |
+| **logs** (optional) | Alloy, Loki and Grafana in `infra`; Alloy reads every pod's log, PostgreSQL's and Redis' included | Every log line in one place, the browser's errors included, kept 14 days; two dashboards, twelve alerts, one trace id per request ([chapter 8](08-observability.md)). |
 
 The back end follows clean architecture in three projects: `Core` (the domain rules and the use cases, organised by
 feature, no EF Core and no HTTP) ← `Infrastructure` (EF Core, Redis) ← `Api` (HTTP), which also uses `Core` directly
@@ -73,7 +73,7 @@ has its code (or configuration), its deploy script, its Kubernetes manifests and
 
 | Part | What it holds | Deployed by |
 | --- | --- | --- |
-| `infra/` | The servers outside the cluster, one Docker Compose file per component: PostgreSQL (`postgresql.conf`, the least-privilege users in `roles.sql`), Redis (`redis.conf`), and the logs (Loki, Grafana's dashboards and alert rules, the agent that ships the servers' logs, and the cluster's log collector). Locally they are containers on this machine; in production real servers or managed services. | `infra/infra.sh up [database] [redis] [logs]` |
+| `infra/` | The shared infrastructure in the namespace `infra`, one manifest per component: PostgreSQL (`postgres.yaml`: its settings, the StatefulSet, the nightly backup), Redis (`redis.yaml`) and the logs (`logs.yaml`: Loki, Grafana with its alert rules, Alloy; the dashboards in `dashboards/`); `create-database.sh` gives a service its database, users and the Secret `database-credentials`; `add-node.sh` adds a k3s node for the database, the cache or the services. | `infra/infra.sh up [postgres] [redis] [logs]`, then `infra/create-database.sh` once per service |
 | `backend/` | The .NET solution, its Dockerfile and tests; `deploy/` with the API's Kustomize base (the Deployment, with its configuration as environment variables, the headless Service `api`, autoscaler, disruption budget, network policy) and one overlay per environment (the connection strings and a few settings); the load tests and the requirements check. | `backend/deploy/deploy.sh` |
 | `frontend/` | The Angular workspace, the web and gateway Dockerfiles and tests; `deploy/` with the web app's and the gateway's base and overlays (where the API and the log collector are, how the gateway is exposed). | `frontend/deploy/deploy.sh` |
 
@@ -85,9 +85,11 @@ has its code (or configuration), its deploy script, its Kubernetes manifests and
 
 Each deploy script takes an environment (`ENVIRONMENT=local`, the default, `staging` or `production`); the GitLab
 pipelines run the same scripts ([chapter 9](09-deployment-and-operations.md)). The API knows its data stores only
-through two connection strings in its overlay, which name the servers directly and hold no password; the passwords
-come from one Secret, `api-secrets`. Moving to other servers changes those two strings and the passwords, nothing
-else. The logs are optional: without them the application works the same.
+through two connection strings in its overlay (`postgres.infra.svc.cluster.local:5432`,
+`redis.infra.svc.cluster.local:6379`), which hold no password; the passwords come from the Secrets
+`database-credentials` (made by `infra/create-database.sh`) and `redis-credentials` (copied by the backend's deploy
+script from the infra's Redis password). Moving to another database or cache, even outside the cluster, changes those
+two strings and the passwords, nothing else. The logs are optional: without them the application works the same.
 
 The contract between the API and the web app is small and made of names only:
 
@@ -141,11 +143,12 @@ listed in the [documentation home](../README.md#reference-material).
 
 ```bash
 kubectl config use-context docker-desktop
-infra/infra.sh up                                      # the servers (and the log collector)
-backend/deploy/deploy.sh                               # the API
+infra/infra.sh up                                      # PostgreSQL, Redis and the logs, in the namespace infra
+infra/create-database.sh product-management product_management pm_app pm_migrator   # once: database, users, Secret
+backend/deploy/deploy.sh                               # migrations, then the API
 frontend/deploy/deploy.sh                              # the web app and the gateway
 kubectl -n product-management get pods,svc,hpa         # the pieces in the cluster
-infra/infra.sh status                                  # the servers outside it
+infra/infra.sh status                                  # the shared infrastructure
 python3 backend/scripts/check-requirements.py          # the assessment PDF, 14 checks against the running system
 open http://localhost:8080                             # sign in as viewer, clerk or manager
 ```

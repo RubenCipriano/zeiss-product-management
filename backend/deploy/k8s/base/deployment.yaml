@@ -2,14 +2,16 @@
 # `Section__Key` as `Section:Key`); a change here changes the pod template, so applying it rolls the pods.
 #
 # What differs per environment is in deploy/k8s/overlays/<environment>/api.yaml, always including the two
-# connection strings (where the database and Redis are). No password is in any YAML file: they come from the one
-# Secret `api-secrets`:
-#   database-password   → PGPASSWORD (Npgsql uses it when the connection string has no password)
-#   redis-password      → Redis__Password (added to the Redis connection by the API)
-#   signing-key         → Authentication__SigningKey (the ES256 private key that signs access tokens, PEM)
-#   consumers.json      → the file /app/config/consumers.json (registered consumers: client ids, secret hashes, roles)
-# Locally the Secret is generated from files made by deploy/local-secrets.sh; in staging and production the
-# pipeline creates it from protected CI/CD variables (deploy/ci/create-secrets.sh).
+# connection strings (where the database and Redis are). No password is in any YAML file: they come from Secrets in
+# this namespace, none of them committed:
+#   database-credentials   made by the infra repository's create-database.sh (the shared PostgreSQL's users)
+#     app-password         → PGPASSWORD (Npgsql uses it when the connection string has no password)
+#   redis-credentials      a copy of the shared Redis' password (infra/redis-auth), made by deploy/deploy.sh
+#     password             → Redis__Password (added to the Redis connection by the API)
+#   api-secrets            the API's own keys: locally generated from files made by deploy/local-secrets.sh; in
+#                          staging and production created by the pipeline from CI/CD variables (deploy/ci/create-secrets.sh)
+#     signing-key          → Authentication__SigningKey (the ES256 private key that signs access tokens, PEM)
+#     consumers.json       → the file /app/config/consumers.json (registered consumers: client ids, secret hashes, roles)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -90,11 +92,11 @@ spec:
               value: "01:00:00"
             - name: Idempotency__InProgressTimeout
               value: "00:01:00"
-            # The secrets (Secret api-secrets; see the top of this file).
+            # The secrets (see the top of this file).
             - name: PGPASSWORD
-              valueFrom: { secretKeyRef: { name: api-secrets, key: database-password } }
+              valueFrom: { secretKeyRef: { name: database-credentials, key: app-password } }
             - name: Redis__Password
-              valueFrom: { secretKeyRef: { name: api-secrets, key: redis-password } }
+              valueFrom: { secretKeyRef: { name: redis-credentials, key: password } }
             - name: Authentication__SigningKey
               valueFrom: { secretKeyRef: { name: api-secrets, key: signing-key } }
           startupProbe:

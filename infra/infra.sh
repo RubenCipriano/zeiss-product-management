@@ -1,161 +1,232 @@
 #!/usr/bin/env bash
-# Starts and stops the servers the application needs outside its Kubernetes cluster, each component on its own.
-# Locally every server is a container on this machine, one Docker Compose file per component; on real machines the
-# same files and configuration run on each server, or managed services (Amazon RDS, ElastiCache, Grafana Cloud)
-# replace them. The cluster's pods reach the servers through host.docker.internal.
+# Starts, stops and shows the shared infrastructure in the current kubectl context: PostgreSQL, Redis and the logs
+# (Loki, Grafana, Alloy), all in the namespace `infra`, for every service on the cluster.
 #
-#   ./infra.sh up                        # everything: database, redis, logs
-#   ./infra.sh up database redis         # only these two (no Loki, no Grafana)
-#   ./infra.sh down logs                 # stop one component; data volumes are always kept
-#   ./infra.sh status
+#   ./infra.sh up                          # everything: postgres, redis, logs
+#   ./infra.sh up postgres redis           # only these two (no logs)
+#   ./infra.sh down logs                   # remove a component; its data (volumes) and passwords are kept
+#   ./infra.sh down postgres --delete-data # ... and delete its volumes and password too (asks no questions)
+#   ./infra.sh status                      # pods, services, volumes
 #
-#   database   PostgreSQL 18 on port 5432 and its users pm_migrator / pm_app        database.yaml, postgres/
-#   redis      Redis 8 on port 6379, password protected                              redis.yaml, redis/
-#   logs       Loki on port 3100, Grafana on http://localhost:3000, the agent that   logs.yaml, logs/
-#              ships the servers' logs, and the cluster's log collector (Alloy,
-#              applied to the current kubectl context when there is one)            logs/k8s/
-# `logs` skips what it cannot do where it runs: the containers without docker, the cluster's collector without a
-# kubectl context (so a CI job that only has kubectl applies only the collector).
+#   postgres   PostgreSQL 18, postgres.infra.svc.cluster.local:5432; nightly pg_dump      postgres.yaml
+#   redis      Redis 8, redis.infra.svc.cluster.local:6379, password protected              redis.yaml
+#   logs       Loki (14 days), Grafana (dashboards/, 12 alert rules), Alloy collecting      logs.yaml, dashboards/
+#              every pod's logs and the browser's error reports (Service alloy-faro:12347)
 #
-# Another Loki instead of the local one (e.g. Grafana Cloud): no Loki or Grafana container runs, the server agent and
-# the cluster's collector ship there.
+# `up` also creates what must never be committed, once: the namespace and the random passwords (Secrets
+# postgres-admin and redis-auth), and installs metrics-server when the cluster has none (the autoscalers need it).
+# A service then gets its database with ./create-database.sh, and its logs without doing anything.
+#
+# Another Loki instead of the one in the cluster (e.g. Grafana Cloud): Loki and Grafana are not deployed (Loki's
+# volume is kept) and Alloy pushes there.
 #   LOKI_URL=https://<host>/loki/api/v1/push LOKI_USERNAME=<user> LOKI_PASSWORD=<token> ./infra.sh up logs
-#
-# Passwords: local development defaults, which the backend's deploy/local-secrets.sh also uses. Set any of
-# POSTGRES_PASSWORD, PM_MIGRATOR_PASSWORD, PM_APP_PASSWORD, REDIS_PASSWORD to use other values.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+NAMESPACE=infra
+METRICS_SERVER_VERSION=v0.8.0
+ALL=(postgres redis logs)
 
-up_database() {
-  echo "==> database: PostgreSQL 18 on port 5432 (postgres/postgresql.conf)"
-  docker volume create pm-postgres-data >/dev/null
-  docker compose -f "$HERE/database.yaml" up -d --quiet-pull
-  # The `roles` service applies postgres/roles.sql once the database is healthy, then exits: wait for its result.
-  if [[ "$(docker wait pm-postgres-roles)" != 0 ]]; then
-    docker logs pm-postgres-roles >&2
-    echo "Applying postgres/roles.sql failed" >&2
-    exit 1
+usage() {
+  echo "usage: $0 up|down|status [postgres] [redis] [logs] [--delete-data]" >&2
+  exit 1
+}
+
+# Indents what kubectl prints, under the step that printed it.
+indent() {
+  sed 's/^/    /'
+}
+
+# A random password: 48 hex characters from the kernel's generator (no openssl needed).
+random_password() {
+  od -An -tx1 -N24 /dev/urandom | tr -d ' \n'
+}
+
+ensure_namespace() {
+  kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml \
+    | kubectl label --local -f - app.kubernetes.io/part-of=infra -o yaml \
+    | kubectl apply -f - >/dev/null
+}
+
+# Creates the Secret <name> with a random `password` if it does not exist ($created_secret says whether it did);
+# never changes an existing one (PostgreSQL stores its password when it first creates its data directory).
+ensure_password_secret() {
+  local name="$1" component="$2"
+  created_secret=false
+  if kubectl -n "$NAMESPACE" get secret "$name" >/dev/null 2>&1; then
+    return
   fi
-  docker logs pm-postgres-roles
+  created_secret=true
+  echo "==> Secret $name: a new random password"
+  kubectl -n "$NAMESPACE" create secret generic "$name" --from-literal=password="$(random_password)" \
+    --dry-run=client -o yaml \
+    | kubectl label --local -f - -o yaml \
+        app.kubernetes.io/component="$component" app.kubernetes.io/part-of=infra \
+    | kubectl apply -f - >/dev/null
+}
+
+# kubectl apply, printing what changed; returns (in $changed_config) whether a ConfigMap changed, because pods read
+# their configuration files when they start.
+apply() {
+  local output
+  output="$(kubectl apply "$@")"
+  echo "$output" | indent
+  changed_config=false
+  if grep -q '^configmap/.* configured' <<<"$output"; then
+    changed_config=true
+  fi
+}
+
+# metrics-server reports pod CPU and memory: the API's and the gateway's HorizontalPodAutoscalers need it, and
+# `kubectl top` uses it. k3s and most managed clusters ship it; Docker Desktop does not.
+ensure_metrics_server() {
+  if kubectl get apiservice v1beta1.metrics.k8s.io >/dev/null 2>&1; then
+    return
+  fi
+  echo "==> metrics-server $METRICS_SERVER_VERSION (the cluster has none)"
+  kubectl apply -f "https://github.com/kubernetes-sigs/metrics-server/releases/download/$METRICS_SERVER_VERSION/components.yaml"
+  if [[ "$(kubectl config current-context)" == docker-desktop ]]; then
+    # Docker Desktop's kubelet serves a self-signed certificate that does not name the node's IP. Local clusters
+    # only: on a real cluster the kubelet certificates are signed by the cluster CA.
+    kubectl -n kube-system patch deployment metrics-server --type=json \
+      -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+  fi
+  kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s
+}
+
+up_postgres() {
+  echo "==> postgres: PostgreSQL 18 (postgres.yaml)"
+  ensure_password_secret postgres-admin postgres
+  apply -f "$HERE/postgres.yaml"
+  if $changed_config; then
+    echo "    postgresql.conf changed. Most settings only need a reload:"
+    echo "      kubectl -n $NAMESPACE exec statefulset/postgres -- psql -U postgres -c 'SELECT pg_reload_conf()'"
+    echo "    shared_buffers, max_connections and shared_preload_libraries need a restart:"
+    echo "      kubectl -n $NAMESPACE rollout restart statefulset/postgres"
+  fi
+  kubectl -n "$NAMESPACE" rollout status statefulset/postgres --timeout=900s
 }
 
 up_redis() {
-  echo "==> redis: Redis 8 on port 6379 (redis/redis.conf)"
-  docker compose -f "$HERE/redis.yaml" up -d --wait --quiet-pull
+  echo "==> redis: Redis 8 (redis.yaml)"
+  ensure_password_secret redis-auth redis
+  local running=false
+  if kubectl -n "$NAMESPACE" get deployment redis >/dev/null 2>&1; then running=true; fi
+  apply -f "$HERE/redis.yaml"
+  # A new password (the Secret was deleted to rotate it) or a changed redis.conf: Redis reads both when it starts.
+  # The services get the new password on their next deploy (the backend's deploy.sh copies it).
+  if $changed_config || { $running && $created_secret; }; then
+    kubectl -n "$NAMESPACE" rollout restart deployment/redis
+  fi
+  kubectl -n "$NAMESPACE" rollout status deployment/redis --timeout=300s
 }
 
 up_logs() {
-  if ! command -v docker >/dev/null; then
-    echo "    no docker here: the log servers (logs.yaml) were not started"
-  elif [[ -n "${LOKI_URL:-}" ]]; then
-    echo "==> logs: the server agent ships to $LOKI_URL (no local Loki or Grafana)"
-    # Removes the local Loki and Grafana if they were running (their volumes are kept).
-    docker compose -f "$HERE/logs.yaml" --profile storage rm --stop --force loki grafana
-    docker compose -f "$HERE/logs.yaml" up -d --quiet-pull
-  else
-    echo "==> logs: Loki on port 3100, Grafana on http://localhost:3000, the server agent"
-    docker volume create pm-loki-data >/dev/null
-    docker volume create pm-grafana-data >/dev/null
-    docker compose -f "$HERE/logs.yaml" --profile storage up -d --quiet-pull
-    echo "==> Waiting for Loki and Grafana"
-    for _ in $(seq 1 120); do
-      curl -fsS http://localhost:3100/ready >/dev/null 2>&1 && curl -fsS http://localhost:3000/api/health >/dev/null 2>&1 && break
-      sleep 1
-    done
-  fi
-  up_cluster_logs
-}
-
-# The cluster's log collector: every pod's logs, and the browser's error reports forwarded by the gateway.
-up_cluster_logs() {
-  if ! kubectl config current-context >/dev/null 2>&1; then
-    echo "    no kubectl context: the cluster's log collector (logs/k8s) was not applied"
-    return
-  fi
-  echo "==> logs: the cluster's log collector (logs/k8s) in $(kubectl config current-context)"
-  kubectl apply -f "$HERE/logs/k8s/namespace.yaml"
-
-  # logs/k8s as it is, or with LOKI_URL in place of the local Loki when it is set. Rendered into .build/ (not
-  # committed) and applied from there, so kubectl remembers what was applied and switching back works too.
-  local build="$HERE/.build/logs-k8s"
-  mkdir -p "$build"
-  cat > "$build/kustomization.yaml" <<EOF
-# Generated by infra.sh: logs/k8s, with LOKI_URL when it is set. Not committed.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources: [../../logs/k8s]
-EOF
+  local restart_alloy=false
   if [[ -n "${LOKI_URL:-}" ]]; then
-    cat >> "$build/kustomization.yaml" <<EOF
-patches:
-  - patch: |-
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata: { name: alloy, namespace: observability }
-      spec:
-        template:
-          spec:
-            containers:
-              - name: alloy
-                env:
-                  - { name: LOKI_URL, value: "$LOKI_URL" }
-EOF
-    # The hosted Loki's credentials (read when the collector starts: after changing them,
-    # kubectl -n observability rollout restart deployment/alloy).
-    kubectl -n observability create secret generic loki-credentials \
-      --from-literal=username="${LOKI_USERNAME:-}" --from-literal=password="${LOKI_PASSWORD:-}" \
-      --dry-run=client -o yaml | kubectl apply -f -
+    echo "==> logs: Alloy pushes to $LOKI_URL (no Loki or Grafana in the cluster)"
+    local output
+    output="$(kubectl -n "$NAMESPACE" create secret generic loki-external \
+        --from-literal=url="$LOKI_URL" \
+        --from-literal=username="${LOKI_USERNAME:-}" --from-literal=password="${LOKI_PASSWORD:-}" \
+        --dry-run=client -o yaml \
+      | kubectl label --local -f - -o yaml app.kubernetes.io/component=logs app.kubernetes.io/part-of=infra \
+      | kubectl apply -f -)"
+    [[ "$output" == *" unchanged" ]] || restart_alloy=true
+    # Loki and Grafana are not needed; Loki's volume (data-loki-0) is kept for when this is switched back.
+    kubectl -n "$NAMESPACE" delete statefulset,deployment,service,configmap \
+      -l 'app.kubernetes.io/name in (loki,grafana)' --ignore-not-found
+    apply -f "$HERE/logs.yaml" -l app.kubernetes.io/name=alloy
+    if $changed_config; then restart_alloy=true; fi
   else
-    kubectl -n observability delete secret loki-credentials --ignore-not-found
+    echo "==> logs: Loki, Grafana and Alloy (logs.yaml, dashboards/)"
+    if kubectl -n "$NAMESPACE" get secret loki-external >/dev/null 2>&1; then
+      kubectl -n "$NAMESPACE" delete secret loki-external
+      restart_alloy=true
+    fi
+    # The dashboards are JSON files of their own, so they stay easy to edit and diff: one ConfigMap made from the
+    # folder (each file a key).
+    kubectl -n "$NAMESPACE" create configmap grafana-dashboards --from-file="$HERE/dashboards/" \
+      --dry-run=client -o yaml \
+      | kubectl label --local -f - -o yaml \
+          app.kubernetes.io/name=grafana app.kubernetes.io/component=logs app.kubernetes.io/part-of=infra \
+      | kubectl apply -f - | indent
+    apply -f "$HERE/logs.yaml"
+    if $changed_config; then
+      # Which of the three read a changed file is not worth working out: they restart in seconds.
+      kubectl -n "$NAMESPACE" rollout restart statefulset/loki deployment/grafana
+      restart_alloy=true
+    fi
+    kubectl -n "$NAMESPACE" rollout status statefulset/loki --timeout=300s
+    kubectl -n "$NAMESPACE" rollout status deployment/grafana --timeout=300s
   fi
-
-  kubectl apply -k "$build"
-  kubectl -n observability rollout status deployment/alloy --timeout=180s
+  if $restart_alloy; then
+    kubectl -n "$NAMESPACE" rollout restart deployment/alloy
+  fi
+  kubectl -n "$NAMESPACE" rollout status deployment/alloy --timeout=300s
 }
 
-down() {
-  case "$1" in
-    database) docker compose -f "$HERE/database.yaml" down ;;
-    redis) docker compose -f "$HERE/redis.yaml" down ;;
-    logs)
-      docker compose -f "$HERE/logs.yaml" --profile storage down
-      if kubectl config current-context >/dev/null 2>&1; then
-        kubectl delete -k "$HERE/logs/k8s" --ignore-not-found
-      fi
-      ;;
-  esac
+# Removes a component's workloads, Services and configuration. Its volumes (PersistentVolumeClaims) and its password
+# Secret stay unless --delete-data is given, so `up` brings it back with its data.
+down_component() {
+  local component="$1"
+  echo "==> $component: removing"
+  kubectl -n "$NAMESPACE" delete statefulset,deployment,cronjob,job,service,configmap,serviceaccount,networkpolicy \
+    -l app.kubernetes.io/component="$component" --ignore-not-found
+  kubectl delete clusterrole,clusterrolebinding -l app.kubernetes.io/component="$component" --ignore-not-found
+  if $delete_data; then
+    echo "    --delete-data: deleting its volumes and Secrets"
+    kubectl -n "$NAMESPACE" delete pvc,secret -l app.kubernetes.io/component="$component" --ignore-not-found --wait=false
+    if [[ "$component" == postgres ]]; then
+      echo "    The services' database-credentials Secrets now name users that no longer exist: run"
+      echo "    create-database.sh again for each service after the next ./infra.sh up postgres."
+    fi
+  else
+    local kept
+    kept="$(kubectl -n "$NAMESPACE" get pvc,secret -l app.kubernetes.io/component="$component" -o name 2>/dev/null)"
+    if [[ -n "$kept" ]]; then
+      echo "    kept (delete them with --delete-data):"
+      echo "$kept" | indent | indent
+    fi
+  fi
 }
 
 status() {
-  # Without docker (the pipeline's cluster-logs job) there are no server containers to show.
-  if command -v docker >/dev/null; then
-    docker ps --all --filter label=com.product-management.role=server \
-      --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-  else
-    echo "No docker here: the servers' containers are not shown."
-  fi
-  if kubectl config current-context >/dev/null 2>&1; then
-    echo
-    kubectl -n observability get deployment alloy 2>/dev/null || echo "The cluster's log collector is not deployed."
-  fi
+  echo "Context: $(kubectl config current-context)"
+  kubectl -n "$NAMESPACE" get pods,services,pvc -o wide 2>/dev/null || echo "No namespace $NAMESPACE yet: ./infra.sh up"
+  echo
+  echo "From this machine:"
+  echo "  Grafana     kubectl -n $NAMESPACE port-forward svc/grafana 3000:3000     → http://localhost:3000"
+  echo "  Loki        kubectl -n $NAMESPACE port-forward svc/loki 3100:3100        → http://localhost:3100"
+  echo "  PostgreSQL  kubectl -n $NAMESPACE exec -it statefulset/postgres -- psql -U postgres"
+  echo "  Redis       kubectl -n $NAMESPACE exec -it deployment/redis -- redis-cli"
 }
 
 command="${1:-}"
-shift || true
-components=("$@")
-if [[ ${#components[@]} == 0 ]]; then
-  components=(database redis logs)
-fi
-for component in "${components[@]}"; do
-  case "$component" in
-    database | redis | logs) ;;
-    *) echo "Unknown component: $component (database, redis or logs)" >&2; exit 1 ;;
+[[ -n "$command" ]] || usage
+shift
+components=()
+delete_data=false
+for arg in "$@"; do
+  case "$arg" in
+    postgres | redis | logs) components+=("$arg") ;;
+    --delete-data) delete_data=true ;;
+    *) echo "Unknown argument: $arg" >&2; usage ;;
   esac
 done
+if [[ ${#components[@]} == 0 ]]; then
+  components=("${ALL[@]}")
+fi
+if $delete_data && [[ "$command" != down ]]; then
+  echo "--delete-data only goes with down" >&2
+  exit 1
+fi
 
 case "$command" in
   up)
+    echo "Kubernetes context: $(kubectl config current-context)"
+    ensure_namespace
+    ensure_metrics_server
     for component in "${components[@]}"; do
       "up_$component"
     done
@@ -164,10 +235,9 @@ case "$command" in
     ;;
   down)
     for component in "${components[@]}"; do
-      down "$component"
+      down_component "$component"
     done
-    echo "Stopped. The data volumes are kept (pm-postgres-data, pm-loki-data, pm-grafana-data)."
     ;;
   status) status ;;
-  *) echo "usage: $0 up|down|status [database] [redis] [logs]" >&2; exit 1 ;;
+  *) usage ;;
 esac

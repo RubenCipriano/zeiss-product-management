@@ -28,7 +28,7 @@ frontend/
   src/app/shared/        reusable widgets, form validators, pipes
   gateway/               the nginx in front of everything: routing, token check, rate limits, 1 s cache
   deploy/                how the web app and the gateway run: their Kubernetes manifests, deploy.sh
-infra/                   the servers outside the cluster (PostgreSQL, Redis, Loki + Grafana) and the log collector
+infra/                   the shared infrastructure (namespace infra): PostgreSQL, Redis, Loki + Grafana, Alloy
 ```
 
 One rule holds the backend together: **Api → Infrastructure → Core**, never the other way. Core has no reference to

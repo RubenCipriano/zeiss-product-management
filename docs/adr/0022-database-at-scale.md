@@ -18,7 +18,8 @@ passes). The rows were generated in SQL by `backend/load-tests/data/bulk-ledger.
 with a realistic skew: 5 very busy products with ~100,000 movements each, 1,000 busy ones with ~2,000, and the rest
 spread over every product. Every query the API runs was then measured with `EXPLAIN (ANALYZE, BUFFERS)` and through
 the gateway, at 5.5 and at 20 million rows. The server is PostgreSQL 18 in a container with 1 GiB of memory and a
-256 MB buffer cache. The database is 3.4 GB at 20 million movements: ledger 1.6 GB, its two indexes 1.4 GB, products
+256 MB buffer cache (measured when PostgreSQL ran as a Docker container on the same machine; it now runs in the
+cluster, in the namespace `infra`, with the settings of section 3). The database is 3.4 GB at 20 million movements: ledger 1.6 GB, its two indexes 1.4 GB, products
 with indexes ~280 MB. Reads that miss the cache cost 0.1–0.3 ms each on this disk.
 
 ## Index inventory
@@ -88,7 +89,7 @@ pages marked all-visible in the visibility map, and only VACUUM sets those marks
 Both are model-driven (`HasStorageParameter` in the entity configurations, migration `AutovacuumAtScale`): an
 `ALTER TABLE ... SET (...)`, instant, which blocks neither reads nor writes.
 
-### 3. Server settings (`infra/postgres/postgresql.conf`)
+### 3. Server settings (`postgresql.conf`, in `infra/postgres.yaml`)
 
 Applied to the server after these measurements. Each value comes with the evidence for it:
 
@@ -179,6 +180,6 @@ random leaf of the 1 GB+ product index), and the lack of a way to retire old dat
 * The capped products table needs no further indexes. The ledger needs none until partitioning, and the plan for
   that is written down, including how exactly-once survives it.
 * `backend/load-tests/seed-bulk.sh` can grow the ledger (`LEDGER_ROWS=20000000`), and `seed-bulk.sh`, `verify-data.sh` and
-  `run.sh` talk to the PostgreSQL and Redis servers directly (`docker exec pm-postgres` / `pm-redis` by default,
-  `PSQL` / `REDIS_CLI` to target others).
+  `run.sh` talk to PostgreSQL and Redis directly (`kubectl -n infra exec` into `statefulset/postgres` /
+  `deployment/redis` by default, `PSQL` / `REDIS_CLI` to target others).
 * Numbers before and after, including through the gateway, are in [load-test-results.md](../load-test-results.md).

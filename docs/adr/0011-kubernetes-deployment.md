@@ -4,7 +4,10 @@
 
 > **Update (2026-10-10):** the per-project manifests and deploy scripts, PostgreSQL and Redis in the cluster, the
 > migration Job and the `api` ClusterIP Service are gone: see [0021](0021-deployment-layout.md) (Kustomize overlays,
-> servers outside the cluster, migrations run by the pipeline with the API image). Still valid: Kubernetes on Docker
+> at first servers outside the cluster, migrations run by the pipeline with the API image). Later PostgreSQL, Redis
+> and the logs came back into the cluster, as shared infrastructure in their own namespace `infra` (the infra
+> repository: `infra/infra.sh`), and the migrations run as a one-off pod that the backend's deploy script starts with
+> `kubectl run`, still without a Job manifest. Still valid: Kubernetes on Docker
 > Desktop locally, one Dockerfile per image, pod hardening, zero-downtime rollouts, NetworkPolicies between the
 > gateway and the applications; the HorizontalPodAutoscalers were added later ([0018](0018-autoscaling-and-scale-testing.md)).
 > The second local cluster option and its VM scripts (`scripts/cluster-up.sh`, `cluster-down.sh`) were removed:

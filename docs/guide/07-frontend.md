@@ -141,7 +141,8 @@ SEO 63 is deliberate: this is an internal application and `robots.txt` tells sea
 **Playwright** runs 11 scenarios on a desktop viewport and a phone viewport (22 tests) against the running system. Its
 fixture fails any test in which the page reports a Content-Security-Policy violation or an uncaught error; the one
 scenario that throws an error on purpose (`browser-errors.spec.ts`) checks only for CSP violations and reads its error
-back from Loki; it is skipped when no Loki is reachable (e.g. `LOGS=off`).
+back from Loki (`LOKI_URL`, by default `http://localhost:3100`: `kubectl -n infra port-forward svc/loki 3100:3100`);
+it is skipped when no Loki is reachable (e.g. `LOGS=off`).
 
 | Finding | Found by | Cause | Fix |
 | --- | --- | --- | --- |

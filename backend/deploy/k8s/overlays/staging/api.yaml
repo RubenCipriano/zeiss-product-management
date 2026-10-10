@@ -14,14 +14,15 @@ spec:
       containers:
         - name: api
           env:
-            # The staging database server by its private DNS name, as pm_app, encrypted (SSL Mode=Require; VerifyFull
-            # once the API trusts the database's CA). The password is PGPASSWORD, from the Secret api-secrets.
+            # The shared PostgreSQL in the cluster's namespace `infra` (the infra repository: infra.sh up, then
+            # create-database.sh), as pm_app. The password is PGPASSWORD, from the Secret database-credentials. Any
+            # other server works the same way: its host here (e.g. a managed database, then with SSL Mode=VerifyFull).
             - name: ConnectionStrings__ProductManagement
-              value: "Host=pm-db.staging.example.internal;Port=5432;Database=product_management;Username=pm_app;Maximum Pool Size=10;SSL Mode=Require;GSS Encryption Mode=Disable"
-            # The staging Redis. The password is Redis__Password, from the Secret api-secrets. For TLS append
-            # ",ssl=true,sslHost=pm-cache.staging.example.internal".
+              value: "Host=postgres.infra.svc.cluster.local;Port=5432;Database=product_management;Username=pm_app;Maximum Pool Size=10;GSS Encryption Mode=Disable"
+            # The shared Redis in `infra`. The password is Redis__Password, from the Secret redis-credentials (a copy of
+            # infra/redis-auth made by deploy/deploy.sh). Another Redis: its host here (with TLS append ",ssl=true").
             - name: ConnectionStrings__Redis
-              value: "pm-cache.staging.example.internal:6379"
+              value: "redis.infra.svc.cluster.local:6379"
             # Staging shows Swagger (through a port-forward); production does not.
             - name: OpenApi__Enabled
               value: "true"

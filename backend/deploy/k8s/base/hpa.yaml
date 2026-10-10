@@ -1,7 +1,8 @@
 # Adds API replicas when their average CPU passes 60% of the request (200m), removes them when load drops.
 # Scale-up reacts within ~30 s; scale-down waits 3 minutes of lower load so a short lull does not remove capacity
 # that is needed again a moment later. The ceiling (8) is set by the database: 8 replicas x 10 connections each.
-# Needs metrics-server (the infra repository's cluster-addons.sh locally; built into most managed clusters and k3s).
+# Needs metrics-server (installed by the infra repository's infra.sh where missing; built into k3s and most managed
+# clusters).
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

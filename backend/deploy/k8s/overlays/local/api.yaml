@@ -1,5 +1,6 @@
-# The API's local settings: only what differs from deploy/k8s/base/deployment.yaml. Edit the connection strings to
-# use another database or Redis (their passwords: deploy/k8s/overlays/local/generated/passwords.env).
+# The API's local settings: only what differs from deploy/k8s/base/deployment.yaml. The connection strings name the
+# shared PostgreSQL and Redis in the cluster's namespace `infra` (the infra repository: `infra.sh up`); their passwords
+# come from the Secrets database-credentials and redis-credentials (deploy/k8s/base/deployment.yaml).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,17 +12,18 @@ spec:
       containers:
         - name: api
           env:
-            # The database server on this machine, as pm_app: the user that may read and write rows but not change
-            # the schema (the infra repository's postgres/roles.sql). No password here: Npgsql takes PGPASSWORD.
+            # The shared PostgreSQL, as pm_app: the user that may read and write rows but not change the schema
+            # (created by the infra repository's create-database.sh; its rights: the GrantAppPermissions migration).
+            # No password here: Npgsql takes PGPASSWORD.
             # Pool size per API replica: 10, so even at the autoscaler's maximum (8 replicas) PostgreSQL sees at most
             # 80 connections. A database serves only a few queries per CPU core at a time; more connections than that
             # do not add throughput, they make every query slower (measured: 6 replicas x 20 connections on 2 cores
             # queued even primary-key reads for seconds). Excess requests wait in the API's pool instead.
             - name: ConnectionStrings__ProductManagement
-              value: "Host=host.docker.internal;Port=5432;Database=product_management;Username=pm_app;Maximum Pool Size=10;GSS Encryption Mode=Disable"
-            # Redis on this machine. No password here: the API adds Redis__Password.
+              value: "Host=postgres.infra.svc.cluster.local;Port=5432;Database=product_management;Username=pm_app;Maximum Pool Size=10;GSS Encryption Mode=Disable"
+            # The shared Redis. No password here: the API adds Redis__Password.
             - name: ConnectionStrings__Redis
-              value: "host.docker.internal:6379"
+              value: "redis.infra.svc.cluster.local:6379"
             # Swagger UI and the OpenAPI document, through a port-forward (see deploy/k8s/base/service.yaml).
             - name: OpenApi__Enabled
               value: "true"

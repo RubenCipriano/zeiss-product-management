@@ -3,8 +3,9 @@ import { expect, signIn, test } from './support';
 
 /**
  * Browser errors reach Loki: the page's error is reported by the Faro SDK to the gateway's /collect, forwarded to
- * Alloy in the cluster and stored in Loki on the monitoring server, where this test reads it back. Needs that
- * monitoring server (LOKI_URL, by default the local one); skipped where there is none (e.g. LOGS=off).
+ * Alloy in the cluster and stored in Loki (the infra repository, namespace infra), where this test reads it back.
+ * Needs Loki at LOKI_URL, by default a port-forward on this machine
+ * (`kubectl -n infra port-forward svc/loki 3100:3100`); skipped when Loki is not reachable (e.g. LOGS=off).
  */
 const lokiUrl = process.env['LOKI_URL'] ?? 'http://localhost:3100';
 
@@ -16,7 +17,10 @@ interface LokiStream {
 test.describe('browser errors', () => {
   test.beforeAll(async ({ request }) => {
     const ready = await request.get(`${lokiUrl}/ready`).catch(() => null);
-    test.skip(!ready?.ok(), `no monitoring server at ${lokiUrl}`);
+    test.skip(
+      !ready?.ok(),
+      `no Loki at ${lokiUrl} (kubectl -n infra port-forward svc/loki 3100:3100)`,
+    );
   });
 
   test('an uncaught error in the page is stored in Loki, with the route and the user but no query string', async ({

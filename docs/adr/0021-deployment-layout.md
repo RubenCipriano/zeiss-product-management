@@ -1,6 +1,10 @@
 # 0021 — Deployment layout: Kustomize overlays, servers outside the cluster, migrations in the pipeline
 
-**Status:** accepted (supersedes the per-project manifests and the migration Job of [0011](0011-kubernetes-deployment.md))
+**Status:** accepted (supersedes the per-project manifests and the migration Job of [0011](0011-kubernetes-deployment.md)),
+amended twice. **Current state:** [Update (2026-10-10): the infrastructure moves into Kubernetes](#update-2026-10-10-the-infrastructure-moves-into-kubernetes).
+PostgreSQL, Redis and the logs now run in the cluster, in the shared namespace `infra`; the servers outside the
+cluster, the Docker Compose files, the private runner for migrations and the password variables described below are
+history.
 
 ## Context
 
@@ -193,3 +197,85 @@ in-cluster name is now `api.product-management.svc.cluster.local:8080`.
   `kubectl set env` (as the load tests do for the rate limits, restoring them afterwards) is undone by the next deploy.
 * No pipeline deploys the three parts together: each one verifies its own part against staging (the requirements
   check for the backend, Playwright for the frontend), which assumes the other parts are already there.
+
+## Update (2026-10-10): the infrastructure moves into Kubernetes
+
+This update supersedes "Servers outside the cluster", "Migrations in the pipeline" (where they run), "Least-privilege
+database users" (where they are made) and "Secrets from CI/CD variables" (for the passwords) above, and the Docker
+Compose part of the first update. Kustomize overlays, the three parts, configuration as env keys and the headless
+`api` Service are unchanged.
+
+### Context
+
+After the first update the shared infrastructure was a set of Docker Compose projects: containers on a laptop, and on
+each server a shell runner that ran the same files. The cluster reached them through `host.docker.internal` or
+private DNS names; the migrate jobs needed a self-hosted runner inside the private network, the only place that could
+reach the database; the three database and Redis passwords were pipeline variables that the infra and the backend
+projects had to keep identical; the logs needed two collectors (a server agent for the containers, Alloy for the
+pods). There were two ways to run things, and only one of them was Kubernetes.
+
+### Decision
+
+**Everything runs in Kubernetes**, in one shared namespace, `infra`, for every service on the cluster (not only
+product-management), managed by the infra repository:
+
+* `postgres.yaml`: PostgreSQL 18 as a StatefulSet (one replica, its data on a PersistentVolumeClaim, the settings
+  inline in a ConfigMap) behind the Service `postgres.infra.svc.cluster.local`, and a CronJob that writes a nightly
+  `pg_dump` of every database to a second volume.
+* `redis.yaml`: Redis 8 as a Deployment without a volume (a pure cache), password protected.
+* `logs.yaml`: Loki, Grafana (everything provisioned from ConfigMaps) and one Alloy that reads every pod's log in
+  every namespace, PostgreSQL's and Redis' included, and receives the browser's errors.
+* `infra.sh up|down|status [postgres] [redis] [logs] [--delete-data]` applies them; `down` keeps the volumes and the
+  passwords unless `--delete-data`. It also installs metrics-server where the cluster has none (the former
+  `cluster-addons.sh`).
+
+**One PostgreSQL for the platform, one database per service.** `create-database.sh <namespace> <database> [app-user]
+[migrator-user] [--rotate]` creates a service's database and its two users with random passwords, and writes them to
+the Secret `database-credentials` in the service's namespace. What the app user may do on the tables is the service's
+own business: for the API, the EF Core migration `GrantAppPermissions` (run as the schema owner) replaces `roles.sql`.
+
+**Passwords are generated in the cluster and never leave it.** `infra.sh` creates the administrator's and Redis'
+passwords (Secrets `postgres-admin`, `redis-auth`), `create-database.sh` the users'. The backend's `deploy.sh` copies
+Redis' password into its own namespace (`redis-credentials`), since a pod reads only its namespace's Secrets. No
+pipeline variable holds a database or Redis password any more; `api-secrets` holds only the API's signing key and
+consumers.
+
+**Migrations still run with the release's image, once, before the rollout**, but as a one-off pod in the cluster
+(`kubectl run --rm --attach`): the database is reachable only there. The pod streams its output, returns its exit code
+and is deleted when it ends; no Job manifest, no port-forward, and no runner inside the private network: every job
+runs on gitlab.com's shared runners and reaches the cluster through the GitLab agent (or a kubeconfig).
+
+**Dedicated nodes instead of separate servers.** In production the machines become k3s nodes; `add-node.sh <user@host>
+database|cache|apps` joins one with the label `infra/role=<role>` and, for `database` and `cache`, the taint
+`infra/role=<role>:NoSchedule`. PostgreSQL and Redis prefer their node and tolerate its taint, so they get it to
+themselves; without such a node (a laptop, a single k3s server) they run anywhere.
+
+**Docker Compose is dropped**, with everything that existed only for it: the Compose files, the server agent, the
+`observability` namespace, the private runner and the shell runners on the servers.
+
+### Why
+
+* **One way to run everything.** The same manifests and scripts run on Docker Desktop, on a single k3s machine and on
+  a production cluster; there is no second toolchain for the stateful half of the system.
+* **The platform is shared by services.** A new service gets a database with one command and its logs without doing
+  anything; the address of PostgreSQL, Redis and Loki is the same cluster name in every environment.
+* **Kubernetes does what the servers needed by hand:** restarts, health probes, scheduling onto the right node,
+  passing the passwords as Secrets, one log collector for everything.
+* **Fewer secrets to carry.** No password crosses GitLab, and no runner needs network access to the database.
+
+### Trade-offs
+
+* **Stateful workloads on Kubernetes need care.** A volume on a node's disk (`local-path`, `hostpath`) is bound to
+  that node, and the pod with it: the database node must exist before PostgreSQL first starts, a lost node means a
+  restore, and draining that node stops the database.
+* **Backups are dumps on the same node** until production ships them elsewhere (object storage or volume snapshots).
+  They restore to the moment of the dump; there is no WAL archiving, no point-in-time recovery.
+* **No high availability.** One PostgreSQL pod, one Redis pod. A standby with failover and continuous backups is an
+  operator's job (CloudNativePG for PostgreSQL), the next step ([0006](0006-postgresql.md)). The earlier argument for
+  servers outside the cluster, that a cluster rebuild never touches the data, no longer holds: the data's lifecycle
+  is now the cluster's, and etcd holds the only copy of the generated passwords, so etcd snapshots must leave the
+  nodes too.
+* **The migrator's password is in the cluster** (the Secret `database-credentials` in the service's namespace, read
+  only by the migration pod). The API pods still read only `pm_app`'s password, which cannot change the schema.
+* **Rotation is an operator's command** (`create-database.sh --rotate`, a new `redis-auth`) followed by restarting the
+  pods that read the Secret, not "change a variable and re-run a job".

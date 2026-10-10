@@ -2,10 +2,10 @@
 
 **After this chapter you will know** which logs are collected, from where, how they reach Grafana and how long they
 are kept; how the browser's errors get there too, and what they contain; why the system is observed through logs
-alone and why that runs on its own server; what the two dashboards tell you; which alerts exist and what to do when one
+alone and why that runs in the cluster itself; what the two dashboards tell you; which alerts exist and what to do when one
 fires; how to follow one request from the gateway to the API by its `trace_id`; and what we would add next.
 
-![Logs only, one trace id: the gateway creates a W3C traceparent and logs its trace_id, the API logs the same id in every line, the browser's errors go through the gateway's /collect to Alloy, Alloy and the server agent push the logs to Loki (kept 14 days), and Grafana shows them with two dashboards and alerts](../images/observability.svg)
+![Logs only, one trace id: the gateway creates a W3C traceparent and logs its trace_id, the API logs the same id in every line, the browser's errors go through the gateway's /collect to Alloy, Alloy in the namespace infra reads every pod's log (PostgreSQL and Redis included) and pushes it to Loki (kept 14 days), and Grafana shows them with two dashboards and alerts](../images/observability.svg)
 
 Where each log comes from and where it goes:
 
@@ -13,23 +13,22 @@ Where each log comes from and where it goes:
 flowchart LR
   BR["browser<br/>errors (Faro SDK)"]
   subgraph cluster["Kubernetes cluster"]
-    GW["gateway pods<br/>JSON access log"]
-    API["API pods<br/>JSON logs"]
-    WEB["web, kube-system…"]
-    ALLOY["Alloy<br/>reads every pod's log<br/>+ faro.receiver"]
+    subgraph pm["namespace product-management"]
+      GW["gateway pods<br/>JSON access log"]
+      API["API pods<br/>JSON logs"]
+      WEB["web pods"]
+    end
+    subgraph infra["namespace infra"]
+      PG[("PostgreSQL")]
+      RD[("Redis")]
+      ALLOY["Alloy<br/>reads every pod's log<br/>+ faro.receiver"]
+      LOKI["Loki :3100<br/>stores the logs, 14 days"]
+      GRAF["Grafana :3000<br/>dashboards + alerts"]
+    end
+    KS["kube-system, load tests…"]
   end
-  subgraph servers["Database and cache servers"]
-    PG[("PostgreSQL")]
-    RD[("Redis")]
-    AGENT["server agent (Alloy)<br/>reads the servers' logs"]
-  end
-  subgraph mon["Monitoring server"]
-    LOKI["Loki :3100<br/>stores the logs"]
-    GRAF["Grafana :3000<br/>dashboard + alerts"]
-  end
-  BR -- "POST /collect" --> GW -- proxy --> ALLOY
-  GW & API & WEB -. stdout .-> ALLOY -- push --> LOKI
-  PG & RD -. stdout .-> AGENT -- push --> LOKI
+  BR -- "POST /collect" --> GW -- "proxy to alloy-faro" --> ALLOY
+  GW & API & WEB & PG & RD & KS -. stdout .-> ALLOY -- push --> LOKI
   LOKI --> GRAF
 ```
 
@@ -44,8 +43,8 @@ deliberate trade-off:
   the method, URI, status, total time, the API replica that answered and how long it took, the microcache result and
   the verified user. Request rate, error ratio, latency percentiles, cache efficiency and "who is getting errors"
   are all LogQL queries over those lines. They are exact to the request: no sampling, no averaging.
-* **One pipeline, few moving parts.** Two collectors (one in the cluster, one on the servers), one store, one UI. Nothing
-  in the application code knows about any of them: the API and the gateway write JSON to stdout, as they would
+* **One pipeline, few moving parts.** One collector, one store, one UI, all in the cluster's shared namespace `infra`.
+  Nothing in the application code knows about any of them: the API and the gateway write JSON to stdout, as they would
   anywhere. The browser is the one exception: it has no stdout anyone can read, so the web app sends its errors
   ([below](#browser-errors)).
 * **Correlation still works.** Every request gets a W3C trace id at the gateway, written into the gateway's line and
@@ -59,8 +58,8 @@ deliberate trade-off:
 | Source | Collected by | Labels in Loki | Parsed on the way in |
 | --- | --- | --- | --- |
 | **The browser** (the Angular app): its errors only ([below](#browser-errors)) | the **Faro SDK** in the page posts them to the gateway's `/collect`, which forwards them to Alloy's `faro.receiver` in the cluster | `namespace="browser"`, `app="browser"`, `level="error"` | yes: JSON per error |
-| **Every pod** in the cluster: gateway, API, web, load tests (k6 Jobs), kube-system | **Alloy** in the cluster (`observability` namespace), reading pod logs through the Kubernetes API and pushing to Loki at `LOKI_URL` (locally `http://host.docker.internal:3100/loki/api/v1/push`) | `namespace`, `app`, `pod`, `container`, `service_name` | see below |
-| **The servers**: PostgreSQL, Redis, and the monitoring server's own Loki and Grafana | the **server agent** (`pm-server-agent`, Alloy), reading the containers labelled as servers | `namespace="servers"`, `app` = `postgres`, `redis`, `loki`, `grafana`, `container` | no: plain text lines |
+| **Every pod** in the cluster, in every namespace: gateway, API, web, load tests (k6 Jobs), kube-system | **Alloy** (a Deployment in the namespace `infra`), reading pod logs through the Kubernetes API and pushing to the Loki next to it (`http://loki.infra.svc.cluster.local:3100/loki/api/v1/push`, or another Loki through `LOKI_URL`) | `namespace`, `app` (the pod's `app.kubernetes.io/name`, else its container name), `pod`, `container`, `service_name` | see below |
+| **The shared infrastructure**: PostgreSQL, Redis, Loki, Grafana and the nightly backup | the same **Alloy**: they are pods in the namespace `infra` like any other (only Alloy's own lines are dropped, so they do not feed back into it) | `namespace="infra"`, `app` = `postgres`, `redis`, `loki`, `grafana`, `postgres-backup` | PostgreSQL: a statement written over several lines is joined into one entry; otherwise plain text lines |
 
 Two log formats are parsed so they can be filtered without reading every line:
 
@@ -72,59 +71,65 @@ Two log formats are parsed so they can be filtered without reading every line:
 
 The API logs writes (product created, updated, deleted, stock adjusted), warnings and errors; reads that succeed write
 nothing, so for them the gateway line is the whole story. PostgreSQL logs statements slower than 250 ms, lock waits
-longer than 1 s, checkpoints and errors (`infra/postgres/postgresql.conf`).
+longer than 1 s, checkpoints and errors (the `postgresql.conf` in [`infra/postgres.yaml`](../../infra/postgres.yaml)).
 
 ## Where the logs live, and for how long
 
-Everything ends up in one place: **Loki on the monitoring server**. Nothing is stored in the cluster, in the pods or
-in the browser; the collectors only forward.
+Everything ends up in one place: **Loki**, a StatefulSet in the namespace `infra`. Nothing is stored in the
+application's pods or in the browser; the collector only forwards.
 
 | Source | Collector | Query it with |
 | --- | --- | --- |
 | Browser (errors only) | Faro SDK → gateway `POST /collect` → Alloy `faro.receiver` (cluster) | `{namespace="browser"}` |
-| Gateway, web, API pods (and load tests, kube-system) | Alloy in the cluster, through the Kubernetes API | `{namespace="product-management", app="gateway"}` (or `"web"`, `"api"`) |
-| PostgreSQL, Redis, Loki, Grafana, the agent | server agent (`pm-server-agent`, Alloy), from the containers | `{namespace="servers", app="postgres"}` (or `"redis"`, `"loki"`, `"grafana"`, `"agent"`) |
+| Gateway, web, API pods (and load tests, kube-system) | Alloy, through the Kubernetes API | `{namespace="product-management", app="gateway"}` (or `"web"`, `"api"`) |
+| PostgreSQL, Redis, Loki, Grafana, the nightly backup | the same Alloy, through the Kubernetes API | `{namespace="infra", app="postgres"}` (or `"redis"`, `"loki"`, `"grafana"`, `"postgres-backup"`) |
 
-Locally Loki is the container `pm-loki`, its data in the Docker volume `pm-loki-data` (mounted at `/loki`: chunks,
-index, compactor state). Its configuration is
-[`infra/logs/loki.yaml`](../../infra/logs/loki.yaml): the image's default
-single-process configuration plus **retention of 14 days** (`limits_config.retention_period: 336h`). Loki's compactor
-looks for older data every 10 minutes and deletes it two hours after marking it. Without that setting Loki keeps
-everything until the disk is full. Fourteen days covers "what happened last week" and keeps the volume bounded; the
+Loki keeps its data on the PersistentVolumeClaim `data-loki-0` (10 GiB, mounted at `/loki`: chunks, index, compactor
+state). Its configuration is the ConfigMap `loki-config` in [`infra/logs.yaml`](../../infra/logs.yaml): the image's
+default single-process configuration plus **retention of 14 days** (`limits_config.retention_period: 336h`). Loki's
+compactor looks for older data every 10 minutes and deletes it two hours after marking it. Without that setting Loki
+keeps everything until the disk is full. Fourteen days covers "what happened last week" and keeps the volume bounded; the
 same period applies to every source. Check it with:
 
 ```bash
+kubectl -n infra port-forward svc/loki 3100:3100 &   # Loki is not published outside the cluster
 curl -s localhost:3100/config | grep -E 'retention_period|retention_enabled'
 #   retention_enabled: true
 #   retention_period: 2w
 ```
 
-## Why monitoring runs on its own server
+## Why the logs run in the cluster
 
-Monitoring exists for the bad day. If Loki and Grafana ran inside the cluster they would share its fate: a node out of
-memory, a broken network policy or a failed upgrade would take down the application **and** the means to find out
-why, together with the logs of the pods that just crashed. So the monitoring server sits outside the cluster, like the
-database and cache servers, with its data on its own volumes (`pm-loki-data`, `pm-grafana-data`). The cluster runs
-only the collector, which is stateless: if Alloy restarts, the pods keep logging to stdout and it reads them again
-from the Kubernetes API.
+Loki, Grafana and Alloy are the infra's `logs` component: `infra/infra.sh up logs` applies
+[`infra/logs.yaml`](../../infra/logs.yaml) to the current `kubectl` context, in the shared namespace `infra`, next to
+PostgreSQL and Redis:
 
-Alerts benefit too: "the gateway has received nothing for 15 minutes" is evaluated by a system that does not depend on
-the cluster being healthy.
+| Workload | What | Data |
+| --- | --- | --- |
+| `loki` (StatefulSet, `grafana/loki:3.5.5`) | stores the logs, Service `loki:3100` | PVC `data-loki-0`, 14 days |
+| `grafana` (Deployment, `grafana/grafana:12.2.0`) | the data source, the two dashboards and the twelve alert rules, all provisioned from ConfigMaps; Service `grafana:3000` | none (`emptyDir`): a new pod starts with the same dashboards and rules |
+| `alloy` (Deployment, `grafana/alloy:v1.10.2`) | reads every pod's log in every namespace through the Kubernetes API, and receives the browser's error reports (Service `alloy-faro:12347`) | none: if it restarts, the pods keep logging to stdout and it reads them again |
 
-Locally the monitoring server is the infra's `logs` component: `infra/infra.sh up logs` starts, with Docker Compose
-(`infra/logs.yaml`), `pm-loki` (`grafana/loki:3.5.5`, configured by `infra/logs/loki.yaml`), `pm-grafana`
-(`grafana/grafana:12.2.0`) and the server agent `pm-server-agent`, and applies the cluster's collector
-(`infra/logs/k8s`) to the current `kubectl` context.
+One place for everything, one command to set it up, and nothing for a service to do: a new service's pods appear in
+Loki as `{namespace="<its namespace>", app="<its app.kubernetes.io/name>"}` as soon as they log. The database and the
+cache are pods too, so their logs need no agent of their own.
 
-**The logs are optional.** Without the `logs` component (`infra/infra.sh up database redis`, or
-`infra/infra.sh down logs` later) the application works the same: the pods still write to stdout
-(`kubectl -n product-management logs deployment/api`), and the frontend is deployed with
+The price: monitoring exists for the bad day, and here it shares the cluster's fate. A failed upgrade or a node out of
+memory can take down the application **and** the means to find out why, and an alert such as "the gateway has received
+nothing for 15 minutes" is evaluated by the same cluster that may be failing. For a single local cluster that is the
+right trade; in production the logs can go to a Loki outside the cluster (another cluster, or Grafana Cloud) with one
+setting, `LOKI_URL` ([below](#what-changes-in-production)).
+
+**The logs are optional.** Without the `logs` component (`infra/infra.sh up postgres redis`, or
+`infra/infra.sh down logs` later, which keeps Loki's volume unless given `--delete-data`) the application works the
+same: the pods still write to stdout (`kubectl -n product-management logs deployment/api`), and the frontend is
+deployed with
 `LOGS=off frontend/deploy/deploy.sh`, so the gateway answers the browser's `POST /collect` with 204 and drops the
 reports instead of failing with 502 (`frontend/gateway/collector.sh` writes either the proxy or the `return 204` at
 start-up, from `COLLECTOR_UPSTREAM`). **Another Loki** (e.g. Grafana Cloud):
-`LOKI_URL=https://<host>/loki/api/v1/push LOKI_USERNAME=... LOKI_PASSWORD=... infra/infra.sh up logs` starts no Loki
-or Grafana container; the server agent and the cluster's collector push there (the collector's credentials in the
-Secret `loki-credentials`).
+`LOKI_URL=https://<host>/loki/api/v1/push LOKI_USERNAME=... LOKI_PASSWORD=... infra/infra.sh up logs` stores the three
+values in the Secret `loki-external`, removes Loki and Grafana from the cluster (Loki's volume is kept) and applies
+only Alloy, which pushes there. Running `infra/infra.sh up logs` without `LOKI_URL` switches back.
 
 ## Browser errors
 
@@ -169,13 +174,13 @@ code must not put personal data in error messages.
 stays `connect-src 'self'` and no CORS is involved. The gateway
 ([`default.conf.template`](../../frontend/gateway/default.conf.template), `location = /collect`) accepts POST only,
 bodies up to 64 kB, 5 requests/s per client IP (burst 20), no token (errors happen on the sign-in page too), no
-caching, and proxies to `alloy-faro.observability.svc.cluster.local:12347`. There Alloy's `faro.receiver`
-([`config.alloy`](../../infra/logs/k8s/config.alloy)) checks the size again, applies a global limit of
+caching, and proxies to `alloy-faro.infra.svc.cluster.local:12347`. There Alloy's `faro.receiver` (the ConfigMap
+`alloy-config` in [`infra/logs.yaml`](../../infra/logs.yaml)) checks the size again, applies a global limit of
 50 requests/s (burst 100, to protect Loki when every browser fails at once after a bad release: a sample is enough),
 keeps exceptions only (anything else posted to `/collect` is dropped), and writes one JSON line per error with the
 labels above. Who and where are **structured metadata**, not labels, so one user or page does not create a stream of
-its own. A NetworkPolicy lets only the gateway reach the receiver, so its per-IP limit cannot be bypassed from inside
-the cluster.
+its own. A NetworkPolicy (`alloy-ingress`) lets only the gateway pods of the namespace `product-management` reach the
+receiver, so the gateway's per-IP limit cannot be bypassed from inside the cluster.
 
 **Cost to the page:** none at first paint. The SDK is about 37 kB compressed, so it is not in the initial bundle: it is
 a separate chunk loaded after the first render, and errors raised before it arrives are queued (up to 10) and sent
@@ -201,26 +206,28 @@ The page was `/products?search=not-sent`; the query string is in neither the pag
 ## Opening Grafana
 
 ```bash
-infra/infra.sh up logs                          # once; infra/infra.sh up starts every server
-open http://localhost:3000                      # anonymous admin locally: no login
+infra/infra.sh up logs                                   # once; infra/infra.sh up starts all of the infra
+kubectl -n infra port-forward svc/grafana 3000:3000      # Grafana is not published outside the cluster
+open http://localhost:3000                               # anonymous admin locally: no login
 ```
 
 * **Dashboards → Product Management → Product Management: production overview** (`/d/product-management`): the
-  numbers (traffic, errors, latency, cache) and the servers.
+  numbers (traffic, errors, latency, cache), the database and the cache.
 * **Dashboards → Product Management → Logs — where everything goes** (`/d/logs`): every log line, frontend, backend
-  and servers side by side ([below](#the-logs-dashboard)). Each dashboard links to the other, keeping the time range
-  and the `trace_id`.
+  and shared infrastructure side by side ([below](#the-logs-dashboard)). Each dashboard links to the other, keeping the
+  time range and the `trace_id`.
 * **Alerting → Alert rules**: the twelve rules below, in the folder *Product Management*.
 * **Explore** (data source *Loki*): any LogQL query.
 
-Everything in Grafana comes from files in the repository, loaded at start-up: the Loki data source
-([`datasources.yaml`](../../infra/logs/grafana/provisioning/datasources.yaml)), the dashboards
-([`product-management.json`](../../infra/logs/grafana/dashboards/product-management.json),
-[`logs.json`](../../infra/logs/grafana/dashboards/logs.json)) and the
-alerting files ([`provisioning/alerting`](../../infra/logs/grafana/provisioning/alerting)). The
-dashboard files are re-read every 30 s; after changing the alerting files restart Grafana
-(`docker restart pm-grafana`).
-Changes made in the UI are not saved back to the files.
+Everything in Grafana comes from files in the repository, mounted from ConfigMaps and loaded at start-up: the Loki
+data source (`grafana-datasources`), the dashboard provider (`grafana-dashboard-provider`) and the alert rules,
+contact point and policy (`grafana-alerting`), all in [`infra/logs.yaml`](../../infra/logs.yaml); the dashboards are
+JSON files of their own in [`infra/dashboards/`](../../infra/dashboards/)
+([`product-management.json`](../../infra/dashboards/product-management.json),
+[`logs.json`](../../infra/dashboards/logs.json)), which `infra/infra.sh up logs` loads into the ConfigMap
+`grafana-dashboards`. After changing any of them run `infra/infra.sh up logs`: it applies the ConfigMaps and restarts
+Grafana when one changed (Grafana also re-reads the dashboard folder every 30 s).
+Changes made in the UI are not saved back to the files, and Grafana has no volume: a restart forgets them.
 
 ## The Logs dashboard
 
@@ -233,12 +240,13 @@ Changes made in the UI are not saved back to the files.
   trace), the web pods' access log (the Angular files served) and nginx's own lines, and the gateway's access log
   (status, method, URI, time, user, `trace_id`).
 * **Backend**: API lines per level, and the API's lines (level, category, message, exception, `trace_id`).
-* **Servers**: PostgreSQL, Redis, and the warnings and errors of Loki and Grafana (their info lines are one per query).
+* **Shared infrastructure**: PostgreSQL, Redis, and the warnings and errors of Loki and Grafana (their info lines are
+  one per query).
 
 Three variables apply to the panels: **search** (any text, case-insensitive, in every panel), **API level** (the API
 panels) and **trace_id**: with one set, every panel keeps only the lines of that request, so the gateway line and the
-API lines of one request are next to each other, and the other panels are empty (browsers and servers have no trace
-id).
+API lines of one request are next to each other, and the other panels are empty (the browser, PostgreSQL and Redis
+have no trace id).
 
 ## The production overview, row by row
 
@@ -271,26 +279,23 @@ API error lines, slow SQL statements. Colours follow the alert thresholds.
 mean a dependency failed its check), the API's error lines with their exceptions, and the gateway's 5xx and nginx
 error lines (upstream timeouts, refused connections).
 
-**Database server (PostgreSQL logs)**: per minute, slow statements (over 250 ms), lock waits and deadlocks, `ERROR`
+**Database (PostgreSQL logs)**: per minute, slow statements (over 250 ms), lock waits and deadlocks, `ERROR`
 and `FATAL`/`PANIC` lines; checkpoints by trigger (`wal` checkpoints closer than 30 s apart mean `max_wal_size` is too
 small for the write rate); the slowest statements of the range; the raw warning and error lines.
 
-**Cache server (Redis logs)**: warning-level lines and persistence errors (normally none: Redis is quiet unless
+**Cache (Redis logs)**: warning-level lines and persistence errors (normally none: Redis is quiet unless
 something is wrong), and the raw log.
 
 **Follow one request**: the gateway's line and every API line carrying the `trace_id` typed at the top.
 
 ## Alerts
 
-Grafana evaluates the rules every minute, all as LogQL over Loki
-([`rules.yaml`](../../infra/logs/grafana/provisioning/alerting/rules.yaml)). A rule must stay true for
-its *for* duration before it fires. Each alert has a `severity`, a summary, a description with the measured value, a
+Grafana evaluates the rules every minute, all as LogQL over Loki, in four groups (*Gateway*, *Browser*, *API*,
+*Database and cache*; the ConfigMap `grafana-alerting` in [`infra/logs.yaml`](../../infra/logs.yaml)). A rule must stay
+true for its *for* duration before it fires. Each alert has a `severity`, a summary, a description with the measured value, a
 link to its dashboard panel and a `runbook_url` pointing at its section below. Notifications are grouped per rule and
-go to the contact point in
-[`contact-points.yaml`](../../infra/logs/grafana/provisioning/alerting/contact-points.yaml), a
-**placeholder** webhook to a local port where nothing listens: replace it in production
-([`policies.yaml`](../../infra/logs/grafana/provisioning/alerting/policies.yaml) already routes by
-severity).
+go to the contact point defined there, a **placeholder** webhook to a local port where nothing listens: replace it in
+production (the notification policy next to it already routes by severity).
 
 | Alert | Condition (LogQL over the last minutes) | For | Severity |
 | --- | --- | --- | --- |
@@ -307,11 +312,11 @@ severity).
 | [RedisLogErrors](#redislogerrors) | any warning-level or persistence error line in the Redis log in 10 min | at once | warning |
 | [BrowserErrors](#browsererrors) | more than 10 errors reported by browsers in 5 min | 5 min | warning |
 
-A stopped server writes no logs, so its absence is caught from the other side: a dead database shows up as
+A stopped PostgreSQL or Redis writes no logs, so its absence is caught from the other side: a dead database shows up as
 `DatabaseUnreachable` (the API's health checks fail every 10 s per replica) and `GatewayHighErrorRate`; a dead gateway
 or a broken log pipeline as `GatewayNoTraffic`.
 
-These rules fired for real while the servers were being rebuilt for this chapter: PostgreSQL restarting produced
+These rules fired for real while the database was being rebuilt for this chapter: PostgreSQL restarting produced
 `FATAL: the database system is not yet accepting connections` lines (`PostgresFatal`), and the API's health checks
 failed meanwhile (`DatabaseUnreachable`). Both resolved on their own once it was up.
 
@@ -349,7 +354,7 @@ yet.
 topk(5, quantile_over_time(0.95, {namespace="product-management", app="gateway"} | json uri, duration | uri=~"/api/.*"
   | label_format path=`{{ regexReplaceAll "/[0-9]+" (regexReplaceAll "\\?.*" .uri "") "/{id}" }}`
   | unwrap duration [10m]) by (method, path))
-sum(count_over_time({namespace="servers", app="postgres"} |= "duration:" [10m]))
+sum(count_over_time({namespace="infra", app="postgres"} |= "duration:" [10m]))
 ```
 
 **Likely causes:** slow SQL statements (the second query; their text is in the PostgreSQL row); requests waiting for a
@@ -369,13 +374,14 @@ logs no longer reach Loki. Locally it is expected when nobody uses the system.
 ```bash
 kubectl -n product-management get pods -l app.kubernetes.io/name=gateway
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/healthz
-kubectl -n observability get pods; kubectl -n observability logs deploy/alloy --tail 20
+kubectl -n infra get pods; kubectl -n infra logs deployment/alloy --tail 20
 ```
 
 **Likely causes:** gateway pods not running, the load balancer or DNS in front of it broken, or Alloy unable to push
-(Loki down or unreachable from the cluster at `LOKI_URL`).
+(Loki down, its volume full, or the external Loki at `LOKI_URL` unreachable).
 
-**Do:** if `/healthz` answers, the problem is the log pipeline: restart Alloy, check `pm-loki`. Otherwise restore the
+**Do:** if `/healthz` answers, the problem is the log pipeline: check Loki (`kubectl -n infra logs statefulset/loki
+--tail 20`), then restart Alloy (`kubectl -n infra rollout restart deployment/alloy`). Otherwise restore the
 gateway (`kubectl -n product-management rollout status deploy/gateway`, events, last crash logs).
 
 #### RateLimitSurge
@@ -421,20 +427,25 @@ fail. PostgreSQL may be down, overloaded or refusing connections.
 
 ```logql
 {namespace="product-management", app="api", level=~"Error|Critical"} |= "Health check database"
-{namespace="servers", app="postgres"} |~ "FATAL|PANIC|ERROR"
+{namespace="infra", app="postgres"} |~ "FATAL|PANIC|ERROR"
 ```
 
 ```bash
 infra/infra.sh status
-docker logs --tail 50 pm-postgres
+kubectl -n infra get pods -l app.kubernetes.io/name=postgres; kubectl -n infra describe pod postgres-0 | tail -20
+kubectl -n infra logs statefulset/postgres --tail 50       # add --previous after a crash
 ```
 
-**Likely causes:** the server stopped or is restarting (out of memory, disk full); connections exhausted
-(`FATAL: sorry, too many clients already`); a password rotated without updating the API's Secret
-(`FATAL: password authentication failed`); a single slow check under heavy load (a few failures, then recovery).
+**Likely causes:** the pod stopped or is restarting (out of memory, volume full, a node problem); connections
+exhausted (`FATAL: sorry, too many clients already`); a password rotated (`create-database.sh … --rotate`) without
+restarting the API (`FATAL: password authentication failed`); a single slow check under heavy load (a few failures,
+then recovery).
 
-**Do:** restart the server if it is down (`infra/infra.sh up database`; the data is on its volume). Disk full:
-free space first. Authentication: fix the Secret and restart the API.
+**Do:** if the pod is gone or stuck, `infra/infra.sh up postgres` (or
+`kubectl -n infra rollout restart statefulset/postgres`); the data is on its volume (`data-postgres-0`). Volume full:
+free space or grow the volume first. Authentication: the API reads its password from the Secret
+`database-credentials`, so restart it after a rotation (`kubectl -n product-management rollout restart
+deployment/api`).
 
 #### RedisUnreachable
 
@@ -451,13 +462,15 @@ counts as Redis being unavailable, with the same fallbacks, and is logged once a
 ```
 
 ```bash
-docker logs --tail 50 pm-redis
+kubectl -n infra get pods -l app.kubernetes.io/name=redis
+kubectl -n infra logs deployment/redis --tail 50
 ```
 
-**Likely causes:** the container stopped (memory limit), Redis overloaded (timeouts are 500 ms), a password changed
-without updating the API's Secret.
+**Likely causes:** the pod stopped or restarted (memory limit), Redis overloaded (timeouts are 500 ms), the password
+in `infra/redis-auth` changed without a backend deploy (which copies it into the API's Secret `redis-credentials`).
 
-**Do:** `infra/infra.sh up redis`. Nothing to restore: it is a cache. Watch the database row until it is back.
+**Do:** `infra/infra.sh up redis` (or `kubectl -n infra rollout restart deployment/redis`). Nothing to restore: it is a
+cache. Watch the database row until it is back.
 
 #### PostgresFatal
 
@@ -466,12 +479,12 @@ without updating the API's Secret.
 **Confirm:**
 
 ```logql
-{namespace="servers", app="postgres"} |~ "FATAL:|PANIC:|could not connect|No space left on device"
+{namespace="infra", app="postgres"} |~ "FATAL:|PANIC:|could not connect|No space left on device"
 ```
 
 **Likely causes:** read the message: `the database system is starting up / shutting down` (a restart: resolves by
 itself), `too many clients already` (connections exhausted), `password authentication failed` (wrong credentials
-somewhere), `No space left on device` (disk full), `PANIC` (crash, then automatic recovery).
+somewhere), `No space left on device` (volume full), `PANIC` (crash, then automatic recovery).
 
 **Do:** restarts need nothing; for the others see [DatabaseUnreachable](#databaseunreachable).
 
@@ -482,13 +495,13 @@ somewhere), `No space left on device` (disk full), `PANIC` (crash, then automati
 **Confirm:**
 
 ```logql
-topk(10, max_over_time({namespace="servers", app="postgres"} |= "duration:"
+topk(10, max_over_time({namespace="infra", app="postgres"} |= "duration:"
   | regexp `duration: (?P<ms>[0-9.]+) ms\s+(?:statement|execute|bind|parse)[^:]*: (?P<stmt>.{0,120})`
   | unwrap ms [30m]) by (stmt))
 ```
 
 **Likely causes:** a query without a usable index after a code change, a bulk job (seeding, data migration) running
-during traffic, table bloat, or simply more load than the server can take.
+during traffic, table bloat, or simply more load than PostgreSQL can take (4 CPUs, 3 GiB).
 
 **Do:** run `EXPLAIN (ANALYZE, BUFFERS)` on the statement; add or fix the index; move bulk jobs out of peak hours.
 
@@ -500,7 +513,7 @@ one of the transactions (the API answered an error for it).
 **Confirm:**
 
 ```logql
-{namespace="servers", app="postgres"} |~ "still waiting for|deadlock detected|acquired .* after"
+{namespace="infra", app="postgres"} |~ "still waiting for|deadlock detected|acquired .* after"
 ```
 
 The lines that follow name the process holding the lock and the statement.
@@ -518,18 +531,19 @@ transaction, run migrations that lock tables outside peak hours.
 **Confirm:**
 
 ```logql
-{namespace="servers", app="redis"}
+{namespace="infra", app="redis"}
 ```
 
-**Likely causes:** start-up warnings about the host (memory overcommit), a configuration problem after an upgrade.
+**Likely causes:** start-up warnings about the node (memory overcommit), a configuration problem after an upgrade.
 Out-of-memory errors are returned to clients, not logged: they show up as `RedisUnreachable`/cache warnings in the API.
 
-**Do:** read the line; fix the server or its configuration (`infra/redis/redis.conf`) and restart it.
+**Do:** read the line; fix the configuration (the ConfigMap `redis-config` in
+[`infra/redis.yaml`](../../infra/redis.yaml)) and run `infra/infra.sh up redis`, which restarts Redis when it changed.
 
 #### BrowserErrors
 
 **Means:** users' browsers reported more than 10 errors in 5 minutes, for 5 minutes: the web app is failing for
-someone. The servers may look perfectly healthy.
+someone. The gateway, the API and the database may look perfectly healthy.
 
 **Confirm:** the **Browser errors** panel of the Logs dashboard, or:
 
@@ -558,7 +572,7 @@ header, or builds one from its random 32-hex-character request id. It writes the
 the API's logger adds its `TraceId` to every line written while handling it; Alloy lifts it into the `trace_id`
 structured metadata. So one id finds the gateway line and every API line of a request, whichever pods served it.
 
-**A real example** from the monitoring server, a product created by `backend/scripts/check-requirements.py`:
+**A real example** from Loki, a product created by `backend/scripts/check-requirements.py`:
 
 | Where | Line |
 | --- | --- |
@@ -608,7 +622,7 @@ needed, in this order:
 | --- | --- | --- |
 | **Traces** | Per-request spans: the API's handling, every SQL statement and Redis call with its duration, linked to the same `trace_id` already in the logs | OpenTelemetry SDK in the API (ASP.NET Core, HttpClient, Npgsql, StackExchange.Redis instrumentation), OTLP to Tempo (or Grafana Cloud). Sample 10–20 % of requests, or tail-sample (keep every slow or failed trace) in an OpenTelemetry Collector. The gateway already propagates `traceparent`. |
 | **Application metrics** | Request rate and latency histograms without parsing logs; GC, thread pool, connection-pool usage and waits | The same SDK's metrics, OTLP to Prometheus/Mimir. |
-| **Database and cache metrics** | Connections vs `max_connections`, cache hit ratio, transactions, locks, deadlocks, database size; Redis memory vs `maxmemory`, hit ratio, evictions | `prometheus.exporter.postgres` and `prometheus.exporter.redis` in the server agent (Alloy), remote-written to Prometheus; or the managed service's own metrics. |
+| **Database and cache metrics** | Connections vs `max_connections`, cache hit ratio, transactions, locks, deadlocks, database size; Redis memory vs `maxmemory`, hit ratio, evictions | `prometheus.exporter.postgres` and `prometheus.exporter.redis` in Alloy, which already runs next to them in `infra`, remote-written to Prometheus; or the managed service's own metrics. |
 | **Pod and node metrics** | Restarts, OOM kills, CPU throttling, which logs cannot show | kube-state-metrics and the kubelet's cAdvisor, scraped by Alloy. |
 
 The applications would not change their logging; the dashboards would gain rows and the alerts would move from
@@ -618,38 +632,40 @@ counting log lines to thresholds on metrics, which are cheaper to evaluate at hi
 
 | Here (local) | In production |
 | --- | --- |
-| Grafana with anonymous admin access | SSO (OIDC with the company identity provider), roles from groups. |
-| One Loki container with local storage, 14 days' retention | Loki with object storage (S3, Azure Blob) and the retention the company requires (e.g. 30 days, longer for audit), or Grafana Cloud Logs. |
+| Grafana with anonymous admin access, reached by `kubectl port-forward`, no volume | SSO (OIDC with the company identity provider), roles from groups, behind an Ingress; a database (`GF_DATABASE_*`, e.g. on the platform's PostgreSQL) so what people make in the UI survives a restart. |
+| Loki and Grafana in the same cluster as the application | A Loki outside it (another cluster or Grafana Cloud: `LOKI_URL`), so the logs and the alerts survive a failing cluster. |
+| One Loki pod with its data on a 10 GiB volume, 14 days' retention | Loki with object storage (S3, Azure Blob) and the retention the company requires (e.g. 30 days, longer for audit), or Grafana Cloud Logs. |
 | Browser errors with minified stack traces | Source maps uploaded to the collector (`faro.receiver` `sourcemaps`), not served to browsers, so stack traces show the TypeScript source. |
 | Alerts to a placeholder webhook | The pager (PagerDuty, Opsgenie, Grafana OnCall) for `severity=critical`, the team channel (Slack, Teams) for `warning`, keys from the secret store. |
 | One Alloy pod reading logs through the Kubernetes API | A DaemonSet reading `/var/log/pods` on each node, which scales with the cluster. |
-| One agent container for both servers | The Alloy service on each server, or the managed services' log export. |
-| Plain HTTP pushes to Loki | TLS and authentication (tenant id, token) on the push endpoint, reachable only from the private network. |
+| Plain HTTP pushes to the Loki in the same namespace | To a Loki outside the cluster: TLS and authentication (tenant id, token; `LOKI_USERNAME`, `LOKI_PASSWORD`) on the push endpoint, reachable only from the private network. |
 
 ## Where to look
 
-* Monitoring server: [`infra/infra.sh`](../../infra/infra.sh) (`up_logs`, `up_cluster_logs`),
-  [`infra/logs.yaml`](../../infra/logs.yaml) (Loki, Grafana, the agent),
-  [`infra/logs/grafana`](../../infra/logs/grafana): the data source and dashboard provider
-  ([`provisioning`](../../infra/logs/grafana/provisioning)), the dashboard
-  ([`dashboards/product-management.json`](../../infra/logs/grafana/dashboards/product-management.json)),
-  the alert rules, contact point and policy ([`provisioning/alerting`](../../infra/logs/grafana/provisioning/alerting))
-* Loki: [`infra/logs/loki.yaml`](../../infra/logs/loki.yaml) (storage, retention)
-* Collectors: [`infra/logs/k8s`](../../infra/logs/k8s) (Alloy in the cluster: labels, `LOKI_URL`,
-  JSON parsing of the API and gateway lines, the browser errors' `faro.receiver`, its Service and NetworkPolicy),
-  [`infra/logs/server-agent.alloy`](../../infra/logs/server-agent.alloy)
+* The logs component: [`infra/infra.sh`](../../infra/infra.sh) (`up_logs`: the dashboards ConfigMap, `LOKI_URL`,
+  restarts after a configuration change), [`infra/logs.yaml`](../../infra/logs.yaml), in three parts:
+  * Loki: its configuration (storage, retention), Service and StatefulSet with its volume
+  * Grafana: the data source, the dashboard provider, the alert rules, contact point and policy, its Deployment
+  * Alloy: what it may read (ServiceAccount, ClusterRole), its configuration (labels, `LOKI_URL`, JSON parsing of the
+    API and gateway lines, PostgreSQL's multi-line statements, the browser errors' `faro.receiver`), its Deployment,
+    the Service `alloy-faro` and the NetworkPolicy `alloy-ingress`
+* The dashboards: [`infra/dashboards/`](../../infra/dashboards/)
+  ([`product-management.json`](../../infra/dashboards/product-management.json), [`logs.json`](../../infra/dashboards/logs.json))
 * Gateway: [`trace.js`](../../frontend/gateway/trace.js) (trace context), [`default.conf.template`](../../frontend/gateway/default.conf.template)
   (`log_format json`, `location = /collect`), [`collector.sh`](../../frontend/gateway/collector.sh) (`/collect` with or without a collector)
 * Web app: [`core/observability`](../../frontend/src/app/core/observability) (`BrowserErrors`, `ReportingErrorHandler`)
 * API: [`LoggingExtensions.cs`](../../backend/ProductManagement.Api/Observability/LoggingExtensions.cs)
   (JSON logs with the trace id in their scope)
-* What the servers log: [`postgresql.conf`](../../infra/postgres/postgresql.conf)
-  (`log_min_duration_statement`, `log_lock_waits`, `log_checkpoints`), [`redis.conf`](../../infra/redis/redis.conf)
+* What PostgreSQL and Redis log: their configuration ConfigMaps in [`infra/postgres.yaml`](../../infra/postgres.yaml)
+  (`log_min_duration_statement`, `log_lock_waits`, `log_checkpoints`, `log_line_prefix`) and
+  [`infra/redis.yaml`](../../infra/redis.yaml)
 
 ## How to verify
 
 ```bash
-infra/infra.sh status                                # pm-loki, pm-grafana, pm-server-agent and the collector running
+infra/infra.sh status                                # loki-0, grafana and alloy running in the namespace infra
+kubectl -n infra port-forward svc/grafana 3000:3000 & # Grafana and Loki on this machine, for the commands below
+kubectl -n infra port-forward svc/loki 3100:3100 &
 curl -s localhost:3000/api/health                    # Grafana up
 python3 backend/scripts/check-requirements.py        # some traffic
 
@@ -663,7 +679,8 @@ for g in json.load(sys.stdin)["data"]["groups"]:
 curl -s localhost:3100/loki/api/v1/label/app/values
 curl -s localhost:3100/config | grep -E 'retention_period|retention_enabled'
 
-# Browser errors: a real error thrown in the page, read back from Loki (skipped where no Loki answers)
+# Browser errors: a real error thrown in the page, read back from Loki at LOKI_URL (default http://localhost:3100,
+# the port-forward above; skipped where no Loki answers)
 (cd frontend && npx playwright test e2e/browser-errors.spec.ts)
 curl -s -G localhost:3100/loki/api/v1/query_range --data-urlencode 'query={namespace="browser"}' --data-urlencode limit=5
 

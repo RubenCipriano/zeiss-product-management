@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# Creates or updates the API's one Secret, api-secrets, in the current kubectl context from CI/CD variables. Run by
+# Creates or updates the API's own Secret, api-secrets, in the current kubectl context from CI/CD variables. Run by
 # the pipeline's deploy jobs for staging and production (deploy/ci/deploy-environment.sh); locally the overlay
 # generates the same Secret from deploy/k8s/overlays/local/generated (deploy/local-secrets.sh). Idempotent: it runs on
 # every deployment, so changing a variable in GitLab and re-running the deploy job is how a secret is rotated.
 #
 #   api-secrets
-#     database-password   password of the database user pm_app        → PGPASSWORD in the API
-#     redis-password      password of Redis                           → Redis__Password
 #     signing-key         ES256 private key that signs access tokens  → Authentication__SigningKey
 #     consumers.json      registered consumers: client ids, PBKDF2 secret hashes, roles → /app/config/consumers.json
 #
+# The database and Redis passwords are not here: they live in the cluster (database-credentials, made by the infra
+# repository's create-database.sh; redis-credentials, copied by deploy/deploy.sh), so no pipeline variable holds them.
+#
 # Required (GitLab: CI/CD variables scoped to the environment, protected; docs/guide/12-from-zero.md):
-#   PM_APP_PASSWORD     password of pm_app                                   masked
-#   REDIS_PASSWORD      password of Redis                                    masked
 #   API_SIGNING_KEY     path to the PEM file                                 File-type variable
 #   API_CONSUMERS       path to consumers.json                               File-type variable
 # Optional:
@@ -24,8 +23,6 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 NAMESPACE=product-management
-: "${PM_APP_PASSWORD:?PM_APP_PASSWORD is not set (CI/CD variable, masked, scoped to the environment)}"
-: "${REDIS_PASSWORD:?REDIS_PASSWORD is not set (CI/CD variable, masked, scoped to the environment)}"
 : "${API_SIGNING_KEY:?API_SIGNING_KEY is not set (File-type CI/CD variable with the PEM private key)}"
 : "${API_CONSUMERS:?API_CONSUMERS is not set (File-type CI/CD variable with consumers.json)}"
 dry_run=()
@@ -45,8 +42,6 @@ kubectl apply "${dry_run[@]}" -f "$HERE/../k8s/base/namespace.yaml" >&2
 
 # kubectl create --dry-run renders the Secret; apply creates or updates it and says whether it changed.
 output="$(kubectl -n "$NAMESPACE" create secret generic api-secrets \
-    --from-literal=database-password="$PM_APP_PASSWORD" \
-    --from-literal=redis-password="$REDIS_PASSWORD" \
     --from-file=signing-key="$API_SIGNING_KEY" \
     --from-file=consumers.json="$API_CONSUMERS" \
     --dry-run=client -o yaml \

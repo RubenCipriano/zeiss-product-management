@@ -65,7 +65,7 @@ it uses.
 | Script                     | What it checks                                                                 |
 | -------------------------- | ------------------------------------------------------------------------------ |
 | `npm run test:ci`          | unit and component tests (Vitest)                                              |
-| `npm run e2e`              | Playwright against the running system (default http://localhost:8080), desktop and mobile; the browser-errors test also reads Loki (`LOKI_URL`, default http://localhost:3100) and is skipped without it |
+| `npm run e2e`              | Playwright against the running system (default http://localhost:8080), desktop and mobile; the browser-errors test also reads Loki (`LOKI_URL`, default http://localhost:3100: `kubectl -n infra port-forward svc/loki 3100:3100`) and is skipped without it |
 | `npm run audit:lighthouse` | Lighthouse user flow, signed in (`FORM_FACTOR=desktop` for desktop); report in `e2e/reports/` |
 
 
@@ -91,8 +91,8 @@ Docker and `kubectl` with a cluster (Docker Desktop's Kubernetes, context `docke
 deploy: the images are built in Docker.
 
 **What it expects from the other parts:** the API deployed to the same cluster by the backend repository (its
-Service `api` in the namespace `product-management`) and, optionally, the cluster's log collector deployed by the
-infra repository (`infra.sh up logs`).
+Service `api` in the namespace `product-management`) and, optionally, the log collector of the shared infrastructure
+(the infra repository: `infra.sh up logs`; its Service `alloy-faro` in the namespace `infra`).
 
 ### Deploy
 
@@ -127,7 +127,7 @@ Docker Desktop the gateway is a `LoadBalancer` Service on http://localhost:8080;
   | --- | --- | --- |
   | `API_UPSTREAM` | `api.product-management.svc.cluster.local:8080` | the API's headless Service: one DNS record per API pod |
   | `JWKS_URL` | `http://api.product-management.svc.cluster.local:8080/.well-known/jwks.json` | the API's public keys, to verify tokens |
-  | `COLLECTOR_UPSTREAM` | `alloy-faro.observability.svc.cluster.local:12347` | the log collector; `""` = no collector |
+  | `COLLECTOR_UPSTREAM` | `alloy-faro.infra.svc.cluster.local:12347` | the log collector; `""` = no collector |
 
   To use an API elsewhere, put its `host:port` in `API_UPSTREAM` and its key set's URL in `JWKS_URL`, and deploy
   again. Staging and production also set `GATEWAY_TRUSTED_PROXIES=10.42.0.0/16` (the Ingress controller's pod

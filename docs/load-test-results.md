@@ -168,8 +168,9 @@ The runs below were made earlier on MicroK8s (Multipass VM, 4 vCPU / 6 GB), befo
 ## The database at 20 million ledger rows (dedicated PostgreSQL server)
 
 The catalogue is capped at 900,000 products (six-digit ids), so the table that grows is the stock ledger. It was
-grown from 5.55 to **20 million movements** on the PostgreSQL server outside the cluster
-(`PRODUCTS=0 LEDGER_ROWS=20000000 backend/load-tests/seed-bulk.sh`: +N/−N pairs in time order, 5 products with ~100,000
+grown from 5.55 to **20 million movements** on the PostgreSQL server outside the cluster (a Docker container on the
+same machine at the time; PostgreSQL now runs in the cluster, in the namespace `infra`, with the same settings, and the
+data was copied there unchanged) (`PRODUCTS=0 LEDGER_ROWS=20000000 backend/load-tests/seed-bulk.sh`: +N/−N pairs in time order, 5 products with ~100,000
 movements each, 1,000 with ~2,000; 14.4 million rows in 19.5 minutes). `backend/load-tests/verify-data.sh` passes on the
 result: 20,010,066 movements, every invariant 0, in 53 s. Decisions and the full index inventory:
 [ADR 0022](adr/0022-database-at-scale.md).
@@ -284,7 +285,7 @@ kubectl -n product-management patch hpa api -p '{"spec":{"minReplicas":4}}'   # 
 PEAK=2000 backend/load-tests/run.sh stress
 backend/load-tests/run.sh rate-limit
 
-infra/cluster-addons.sh                   # metrics-server, for the autoscaler
+infra/infra.sh up                         # PostgreSQL, Redis, logs; metrics-server for the autoscaler if missing
 backend/load-tests/seed-bulk.sh                   # 850,000 products, 5 million movements (~2 minutes)
 PRODUCTS=0 LEDGER_ROWS=20000000 backend/load-tests/seed-bulk.sh   # grow the ledger to 20 million movements (~20 minutes)
 RATE=300 backend/load-tests/run.sh teams          # many teams + duplicate retries, then verifies the data

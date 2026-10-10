@@ -79,7 +79,8 @@ with no CSP violation or uncaught error. Example: "create, find, change stock by
 see ([chapter 7](07-frontend.md#what-the-audits-found-and-the-fixes)). One scenario follows a real error thrown in the
 page through the gateway's `/collect` and Alloy into Loki, and checks that the route's query string and the token were
 not sent ([`browser-errors.spec.ts`](../../frontend/e2e/browser-errors.spec.ts)); it needs a Loki
-(`LOKI_URL`, by default `http://localhost:3100`, the infra's `logs` component) and is skipped where there is none.
+(`LOKI_URL`, by default `http://localhost:3100`: the infra's `logs` component through
+`kubectl -n infra port-forward svc/loki 3100:3100`) and is skipped where there is none.
 
 **`check-requirements.py`** proves the assessment PDF against the running system, one requirement at a time, through
 the gateway (so the requests spread over the replicas): CRUD, add 25 and remove 7, refuse to go below zero, partial
@@ -104,7 +105,8 @@ cd backend && dotnet test --project ProductManagement.UnitTests --filter-namespa
 # Front end: 185 tests, lint and format (ESLint and Prettier also cover e2e/)
 cd frontend && npm ci && npm run lint && npm run format:check && npm run test:ci
 
-# Against the running system (deploy first: infra/infra.sh up, backend/deploy/deploy.sh, frontend/deploy/deploy.sh)
+# Against the running system (deploy first: infra/infra.sh up, infra/create-database.sh product-management
+# product_management pm_app pm_migrator, backend/deploy/deploy.sh, frontend/deploy/deploy.sh)
 python3 backend/scripts/check-requirements.py                # 14 checks
 cd frontend && npm run e2e                                   # 22 Playwright tests; report in e2e/reports/playwright
 cd frontend && npm run audit:lighthouse                      # mobile; FORM_FACTOR=desktop for desktop

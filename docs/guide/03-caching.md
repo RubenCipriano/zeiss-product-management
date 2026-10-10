@@ -163,9 +163,9 @@ curl -s -o /dev/null -D - "localhost:8080/api/products?page=1" -H "Authorization
 curl -s -o /dev/null -D - "localhost:8080/api/products?page=1" -H "Authorization: Bearer $TOKEN" -H 'Cache-Control: no-cache' | grep X-Cache
 
 # Redis: the generations and some cached entries
-# (the Redis server runs outside the cluster: infra/infra.sh up redis; local password: REDIS_PASSWORD's default in infra/redis.yaml)
-docker exec pm-redis redis-cli -a local-redis-password --no-auth-warning GET product-management:catalog:listing-generation
-docker exec pm-redis redis-cli -a local-redis-password --no-auth-warning --scan --pattern 'product-management:v*:products:all:*' | head
+# (Redis runs in the namespace infra: infra/infra.sh up redis; redis-cli in the pod finds the password in REDISCLI_AUTH)
+kubectl -n infra exec deployment/redis -- redis-cli GET product-management:catalog:listing-generation
+kubectl -n infra exec deployment/redis -- redis-cli --scan --pattern 'product-management:v*:products:all:*' | head
 
 # Automated proof
 cd backend && dotnet test --project ProductManagement.Api.IntegrationTests \

@@ -31,7 +31,6 @@ generated="$K8S/overlays/local/generated"
 mkdir -p "$generated"
 [[ -f "$generated/signing-key.pem" ]] || echo placeholder > "$generated/signing-key.pem"
 [[ -f "$generated/consumers.json" ]] || echo '{"Authentication":{"Consumers":[]}}' > "$generated/consumers.json"
-[[ -f "$generated/passwords.env" ]] || printf 'database-password=placeholder\nredis-password=placeholder\n' > "$generated/passwords.env"
 
 cd "$K8S"
 for target in base overlays/*; do

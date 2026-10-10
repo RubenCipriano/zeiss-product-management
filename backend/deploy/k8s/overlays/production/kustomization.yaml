@@ -1,8 +1,9 @@
 # Production environment. Deployed only by the CI/CD pipeline (.gitlab-ci.yml), with the image it built and scanned:
 #   ENVIRONMENT=production API_IMAGE=... MIGRATIONS=skip deploy/deploy.sh      (through deploy/ci/deploy-environment.sh)
 #
-# Replace the example.* names in api.yaml with the real ones. The Secret api-secrets is not here: the pipeline creates
-# it from protected, masked CI/CD variables before applying this overlay (deploy/ci/create-secrets.sh).
+# No Secret is here: the pipeline creates api-secrets from protected, masked CI/CD variables
+# (deploy/ci/create-secrets.sh) and redis-credentials from the shared Redis (deploy/deploy.sh); database-credentials
+# is made once by the infra repository's create-database.sh.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
