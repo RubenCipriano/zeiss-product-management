@@ -374,7 +374,7 @@ step-by-step list is in the deploy repository's README ("Clean deploy") and, wit
   the tag pipeline add the tag `X.Y.Z` (without the `v`) to the same image after its tests and scan passed
   (`crane tag`: same digest), and create a GitLab Release. The version that runs is the `newTag` in
   `deploy/environments/<env>/kustomization.yaml`, set by `deploy/scripts/set-version.sh` (for staging by the scheduled
-  `update:staging`); nothing else decides it. Tag immutability in the registries means a version is never rebuilt.
+  `update:staging`); nothing else decides it. A version is never overwritten: the publish jobs refuse to retag an existing `X.Y.Z` with another image.
 
 ## Migrations run before the rollout, with the image being deployed
 
@@ -491,7 +491,7 @@ them by hand against an environment (`BASE_URL=<environment url> npm run e2e`, [
 | Stage | Jobs | Runs on |
 | --- | --- | --- |
 | validate | `validate:manifests` (`scripts/validate.sh`: every environment, `infra/` and `argocd/`; extracts the inline Alloy configuration), `validate:scripts` (`shellcheck` on `scripts/*.sh`), `validate:alloy` (`alloy validate` and `alloy fmt` on that configuration) | merge requests, `main` (not schedules) |
-| staging | `update:staging` (`scripts/update-versions.sh staging`: the newest `X.Y.Z` of each image, committed to `main` with `DEPLOY_PUSH_TOKEN`); `deploy:staging` (`scripts/deploy.sh staging apps`: migrations, apply) → `smoke:staging` (`scripts/smoke.sh $STAGING_URL`), automatic when a commit changes `environments/staging`, `apps/`, `infra/`, `scripts/deploy.sh` or `scripts/migrate.sh`; `infra:staging` (**manual**, `scripts/deploy.sh staging infra`) | `update:staging`: the pipeline schedule (or manual on `main`); the others `main` with `STAGING_ENABLED` |
+| staging | `update:staging` (`scripts/update-versions.sh staging`: the newest `X.Y.Z` of each image, committed to `main` with the job's own token, then migrated, applied and smoke-checked in the same job, since a job-token push starts no pipeline); `deploy:staging` (`scripts/deploy.sh staging apps`: migrations, apply) → `smoke:staging` (`scripts/smoke.sh $STAGING_URL`), automatic when a commit changes `environments/staging`, `apps/`, `infra/`, `scripts/deploy.sh` or `scripts/migrate.sh`; `infra:staging` (**manual**, `scripts/deploy.sh staging infra`) | `update:staging`: the pipeline schedule (or manual on `main`); the others `main` with `STAGING_ENABLED` |
 | production | `propose:production` (**manual**: the merge request with staging's versions); `deploy:production` (**manual**, protected environment) → `smoke:production`, when a commit changes `environments/production`, `apps/` or the two scripts; `infra:production` (**manual**) | `main` with `PRODUCTION_ENABLED` |
 
 With the environment-scoped `LOKI_URL` (and `LOKI_USERNAME` / `LOKI_PASSWORD`) the infra jobs make Alloy push to that
@@ -754,7 +754,7 @@ metrics-server, which `deploy/scripts/infra.sh up` installs where it is missing.
 | `set-version.sh`: "… is not in the registry" | the version was not published (its tag pipeline failed before `publish:*`) or is mistyped: `deploy/scripts/versions.sh <image>` |
 | `update:staging` does nothing | no newer plain `X.Y.Z` (release candidates are skipped; web and gateway need the same version), or the schedule is inactive |
 | `deploy.sh` stops: "No Secret gitlab-registry" or "No Secret api-secrets" | the deploy project's variables: the group deploy token `gitlab-deploy-token`, `API_SIGNING_KEY` / `API_CONSUMERS` for that environment ([chapter 12](12-from-zero.md)) |
-| `update:staging` / `propose:production` fails to push | `DEPLOY_PUSH_TOKEN` in the deploy project: a project access token of `zeiss/deploy` itself, Maintainer, `write_repository`, protected and masked (so only protected branches see it) |
+| `update:staging` / `propose:production` fails to push | the deploy project does not allow job-token pushes, or the job's user cannot push to the protected `main` | Settings → CI/CD → Job token permissions → "Allow Git push requests to the repository"; the schedule's owner (or whoever runs the job) is a Maintainer and Maintainers may push to `main` |
 | The API cannot reach the database or Redis | the connection strings it runs with: `kubectl -n product-management get deployment api -o jsonpath='{.spec.template.spec.containers[0].env}'`; whether the Services answer: `kubectl -n product-management run nettest --rm -it --restart=Never --image=busybox:1.37 -- nc -zv postgres.infra.svc.cluster.local 5432` (and `redis.infra.svc.cluster.local 6379`) |
 | Password authentication failed | the users' passwords no longer match `database-credentials` (e.g. after `down postgres --delete-data`): `deploy/scripts/create-database.sh …` again (it sets the Secret's passwords on the users), then `kubectl -n product-management rollout restart deployment/api`. Redis `WRONGPASS`: `deploy/scripts/deploy.sh <env>` copies `redis-auth` again and restarts the API |
 | Migration step fails | its output in `deploy.sh`'s terminal or the `deploy:<env>` job log (`migrate.sh`); nothing is applied, the previous version keeps running; the pod is gone afterwards. A pod that never starts: `kubectl -n product-management get events --sort-by=.lastTimestamp` (image pull, missing Secret) |

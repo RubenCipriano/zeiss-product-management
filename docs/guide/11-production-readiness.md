@@ -127,7 +127,7 @@ Environment work, in order, following the runbook in [chapter 12](12-from-zero.m
    object storage and the company's retention (or outside the cluster through `LOKI_URL`), Grafana behind SSO and
    alerts routed to on-call.
 2. **GitLab:** the agent for Kubernetes (or a `KUBECONFIG`), protected environments, protected tags `v*` in backend
-   and frontend, the deploy project's CI/CD variables (with its own access token `DEPLOY_PUSH_TOKEN` for
+   and frontend, the deploy project's CI/CD variables (pushing with the job's own token for
    `update:staging`) and the `update:staging` schedule; then a first version released through staging and a rehearsed
    rollback (`deploy/scripts/set-version.sh` with the older version). The shared runners are enough: every job reaches the
    cluster through `kubectl`.

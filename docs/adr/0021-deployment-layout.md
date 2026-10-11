@@ -416,7 +416,7 @@ the registry's v2 API (curl, with the group deploy token or a `docker login`); `
 <image|frontend|all> <version|latest>` checks the version exists and edits `newTag` (upgrade and downgrade alike; `latest`
 excludes pre-releases unless `--pre` and never moves backwards; web and gateway move together). Staging is updated by
 the scheduled job `update:staging` (`scripts/update-versions.sh staging`: the newest `X.Y.Z`, committed to `main` as
-"staging: api 1.4.0, ..." with `DEPLOY_PUSH_TOKEN`, a project access token of the deploy repository itself, the same
+"staging: api 1.4.0, ..." with the job's own token (`CI_JOB_TOKEN`, allowed to push to its own project; GitLab Free has no project access tokens), the same
 thing Image Updater's git write-back does). Production changes only by merge request (`set-version.sh production ...`,
 or the manual `propose:production`, which proposes staging's versions).
 
@@ -434,7 +434,7 @@ switch procedure.
 ### Consequences
 
 * **No cross-repository credential.** Backend and frontend have no CI/CD variable at all; the only token that can push
-  to the deploy repository is the deploy repository's own (`DEPLOY_PUSH_TOKEN`), used by its own jobs. Only the deploy
+  to the deploy repository is the deploy repository's own job token, used by its own jobs. Only the deploy
   project reaches a cluster.
 * **Environments run named versions** with release notes; `git log environments/production` reads "production: api
   1.4.0, web 2.1.0, gateway 2.1.0". The image of a version is exactly the one tested on `main` (same digest), and tag
