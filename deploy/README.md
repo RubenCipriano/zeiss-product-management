@@ -149,8 +149,9 @@ machine. Each component above runs as one or more containers.
 built from backend's `Dockerfile`, the web and gateway images from frontend's `Dockerfile` and `gateway/Dockerfile`.
 An image has a name and a **tag** (a version label). Every build is tagged with its git commit
 (`registry.gitlab.com/zeiss/backend/api:1a2b3c4`); a released version also gets its **SemVer** tag
-(`registry.gitlab.com/zeiss/backend/api:1.4.0`) on the same image. Environments run versions. A tag is never
-overwritten (tag immutability in the registry), so a tag always means exactly one build.
+(`registry.gitlab.com/zeiss/backend/api:1.4.0`) on the same image. Environments run versions. A version tag is never
+overwritten (the app pipelines' publish jobs refuse to move an existing `X.Y.Z` to another image), so a version always
+means exactly one build.
 
 **SemVer (Semantic Versioning).** A version `MAJOR.MINOR.PATCH`: a breaking change raises MAJOR (1.4.0 → 2.0.0), new
 backward-compatible functionality MINOR (1.4.0 → 1.5.0), fixes only PATCH (1.4.0 → 1.4.1). `1.5.0-rc.1` is a
@@ -363,12 +364,15 @@ runners, or your own). The **GitLab agent for Kubernetes** is a component instal
 the cluster without a kubeconfig; a job selects it as the context `<agent configuration project>:<agent name>`
 (the variable `KUBE_CONTEXT`).
 
-**Deploy token, project access token.** Two kinds of GitLab credential used here. A **group deploy token** named
-exactly `gitlab-deploy-token` with the scope `read_registry` lets the cluster pull images from both registries and
-`scripts/versions.sh` list the published versions; GitLab hands it to every job as `CI_DEPLOY_USER` /
-`CI_DEPLOY_PASSWORD`. A **project access token** of this repository itself (role Maintainer, scope
-`write_repository`), the CI/CD variable `DEPLOY_PUSH_TOKEN`, lets `update:staging` and `propose:production` push
-version changes here (a job's own token cannot push). Backend and frontend hold no token of this repository.
+**Deploy token, job token, deploy key.** Three kinds of GitLab credential used here, all available on GitLab Free. A
+**group deploy token** (created on the zeiss group, not on a project) named exactly `gitlab-deploy-token` with the
+scope `read_registry` lets the cluster pull images from both registries and `scripts/versions.sh` list the published
+versions; GitLab hands it to every job as `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`. The **job token**
+(`CI_JOB_TOKEN`) is the short-lived token GitLab gives each job; once this project allows it (Settings → CI/CD → Job
+token permissions → "Allow Git push requests to the repository"), `update:staging` and `propose:production` push
+version changes here with it, with the rights of the user who started the job. No token is stored for that. A
+**deploy key** is an SSH key registered on one project; with write permission it is what Argo CD Image Updater would
+push with ([Moving to Argo CD](#moving-to-argo-cd)). Backend and frontend hold no credential of this repository.
 
 ## Why Kubernetes and not Docker Compose
 
@@ -653,7 +657,7 @@ applied. It never applies a local image to a remote cluster, and refuses `stagin
 | `LOCAL_CLUSTER` | local | `docker-desktop` or `k3s`: how the images reach the cluster, when the detection is wrong |
 | `LOGS=off` | local | no log collector: the gateway answers the browser's error reports with 204 |
 | `SEED_SAMPLE_DATA` | all | the sample catalogue on an empty database (default `true` for local and staging, `false` for production) |
-| `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD`, `CI_REGISTRY` | staging, production | a deploy token with `read_registry` → Secret `gitlab-registry` |
+| `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD`, `CI_REGISTRY` | staging, production | the group deploy token `gitlab-deploy-token` (`read_registry`, on the zeiss group) → Secret `gitlab-registry` |
 | `API_SIGNING_KEY`, `API_CONSUMERS` | staging, production | files: the ES256 private key (PEM) and `consumers.json` → Secret `api-secrets` |
 
 Why: a local deploy is nine steps in a fixed order (keys before apply, database before migrations, migrations before
@@ -734,12 +738,14 @@ otherwise become an `ImagePullBackOff` in the cluster), and it is the same comma
 | --- | --- |
 | Purpose | turn `set-version.sh` into a git change, from the pipeline |
 | Usage | `scripts/update-versions.sh staging` (job `update:staging`); `scripts/update-versions.sh production` (job `propose:production`) |
-| Needs | `DEPLOY_PUSH_TOKEN` (a project access token of this repository, Maintainer, `write_repository`; read by a git credential helper, never printed); the registry credentials of `versions.sh`. `DEPLOY_REPO_URL` (default this project), `DEPLOY_REPO_BRANCH` (default `main`), `DRY_RUN=1` (no push) |
+| Needs | `CI_JOB_TOKEN` (the job's own token; the project setting "Allow Git push requests to the repository" on, and the user who started the job allowed to push to `main`), or `DEPLOY_PUSH_TOKEN` instead (optional: any token with `write_repository` on this repository, for a GitLab before 18.4); either is read by a git credential helper, never printed. The registry credentials of `versions.sh`. `DEPLOY_REPO_URL` (default this project), `DEPLOY_REPO_BRANCH` (default `main`), `DRY_RUN=1` (no push) |
 
 * **staging**: clones `main`, runs `set-version.sh staging all latest` in the clone and, if anything changed, commits
-  `staging: api 1.4.0, web 1.4.0, gateway 1.4.0` (only the images that changed) and pushes it to `main`. If `main`
-  moved meanwhile it starts again from the new `main` (up to 5 times). That commit starts this repository's pipeline:
-  `deploy:staging` migrates and applies, `smoke:staging` checks. No new version: no commit.
+  `staging: api 1.4.0, web 1.4.0, gateway 1.4.0` (only the images that changed), pushes it to `main` and writes the file
+  `.updated` (the commit's subject). If `main` moved meanwhile it starts again from the new `main` (up to 5 times). A
+  push made with the job token starts no pipeline, so the job `update:staging` deploys that commit itself when
+  `.updated` exists: it checks out the new `main`, runs `deploy.sh staging apps` (migrations, then the manifests) and
+  `smoke.sh`. No new version: no commit, no `.updated`, nothing deployed.
 * **production**: sets production's images to the versions staging runs (each checked by `set-version.sh`), pushes the
   branch `production/api-1.4.0-web-1.4.0-gateway-1.4.0` and opens the merge request
   `production: api 1.4.0, web 1.4.0, gateway 1.4.0` with git push options. Merging it is the release decision.
@@ -903,12 +909,12 @@ No Secret value is in git. Each one is created in the cluster by a script or a p
 | `database-credentials` | product-management | `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password` | `create-database.sh` | random | `create-database.sh product-management product_management pm_app pm_migrator --rotate`, then `kubectl -n product-management rollout restart deployment/api` |
 | `redis-credentials` | product-management | `password` | `deploy.sh` on every run | a copy of `infra/redis-auth` | follows `redis-auth` automatically; the API restarts when it changes |
 | `api-secrets` (locally `api-secrets-<hash>`) | product-management | `signing-key`, `consumers.json` | local: Kustomize `secretGenerator` from `environments/local/generated/`; staging, production: `deploy.sh` | local: `local-secrets.sh`; remote: the File variables `API_SIGNING_KEY`, `API_CONSUMERS` | local: `FORCE=1 scripts/local-secrets.sh && scripts/deploy.sh local`; remote: change the CI/CD variable and re-run the deploy job. A new signing key signs every user out |
-| `gitlab-registry` | product-management | `.dockerconfigjson` | `deploy.sh` (staging, production) | `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD` (the group deploy token) | create a new deploy token named `gitlab-deploy-token`, revoke the old one, re-run the deploy job |
+| `gitlab-registry` | product-management | `.dockerconfigjson` | `deploy.sh` (staging, production) | `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD` (the group deploy token) | create a new deploy token named `gitlab-deploy-token` in the zeiss group, revoke the old one, re-run the deploy job |
 | `gateway-tls` | product-management | `tls.crt`, `tls.key` | cert-manager | Let's Encrypt | automatic, before expiry |
 
 With Argo CD, three more Secrets in the namespace `argocd` (made once, by hand; see
-[Moving to Argo CD](#moving-to-argo-cd)): the repository credential (read), `deploy-push-token` (Image Updater's
-write-back) and `gitlab-registry` (Image Updater reads the registries).
+[Moving to Argo CD](#moving-to-argo-cd)): the repository credential (a read-only deploy key), `deploy-write-key`
+(Image Updater's write-back, a deploy key with write access) and `gitlab-registry` (Image Updater reads the registries).
 
 Who can read them: anyone with read access to Secrets in that namespace, and anyone who can `kubectl exec` into a pod
 that mounts them. Inside the PostgreSQL pod, local connections need no password (the image's default `pg_hba.conf`
@@ -1071,11 +1077,15 @@ Staging or production, in this order:
    infrastructure starts. DNS for the host must point at the cluster.
 2. **Hosts.** Replace the `example.com` hosts in `environments/<env>/ingress.yaml` and set `STAGING_URL` /
    `PRODUCTION_URL`.
-3. **GitLab.** The group deploy token `gitlab-deploy-token` (`read_registry`). In this project: `DEPLOY_PUSH_TOKEN`
-   (a project access token of this repository, Maintainer, `write_repository`; masked, protected), and scoped to the
-   environment: `KUBE_CONTEXT` or `KUBECONFIG`, `API_SIGNING_KEY`, `API_CONSUMERS` (and optionally `SMOKE_CLIENT_ID`,
-   `SMOKE_CLIENT_SECRET`). In backend and frontend: nothing but protected tags `v*` (Maintainers) and registry tag
-   immutability. Make the keys with the API image:
+3. **GitLab.** The group deploy token, made on the zeiss group (group → Settings → Repository → Deploy tokens), named
+   exactly `gitlab-deploy-token`, scope `read_registry` (a project-level one would only see that project's images).
+   In this project: Settings → CI/CD → Job token permissions → turn on **"Allow Git push requests to the
+   repository"** (GitLab 18.4+, every tier, off by default), so `update:staging` and `propose:production` push with
+   their own job token; `main` protected with "Allowed to push and merge: Maintainers", and the pipeline schedule
+   (step 5) owned by a Maintainer (the job token acts as that user). No token is stored. Then, scoped to the
+   environment: `KUBE_CONTEXT` or `KUBECONFIG`, `API_SIGNING_KEY`, `API_CONSUMERS` (and optionally
+   `SMOKE_CLIENT_ID`, `SMOKE_CLIENT_SECRET`). In backend and frontend: nothing but protected tags `v*` (Maintainers);
+   their publish jobs already refuse to overwrite a version. Make the keys with the API image:
    `docker run --rm registry.gitlab.com/zeiss/backend/api:<version> generate-signing-key > signing-key.pem` and, per
    account, `docker run --rm <api image> hash-secret <secret>` for the `SecretHash` in `consumers.json`
    (format: `{"Authentication":{"Consumers":[{"ClientId":"...","SecretHash":"...","Roles":["viewer"]}]}}`).
@@ -1084,12 +1094,13 @@ Staging or production, in this order:
    missing); the migrations then create the tables.
 5. **Switch the environment on.** `STAGING_ENABLED=true` (later `PRODUCTION_ENABLED=true`) in this project, and the
    pipeline schedule for `update:staging`: Build → Pipeline schedules → New schedule, description "update staging",
-   interval `*/15 * * * *` (every 15 minutes; any interval works), target branch `main`, active.
+   interval `*/15 * * * *` (every 15 minutes; any interval works), target branch `main`, active. Create it as a
+   Maintainer: the schedule's owner is who the job pushes as.
 6. **Release.** Tag a version in backend (`v1.0.0`) and in frontend (`v1.0.0`); their tag pipelines publish
    `api:1.0.0`, `web:1.0.0`, `gateway:1.0.0`. The next `update:staging` (or start it by hand in a pipeline on `main`)
-   commits `staging: api 1.0.0, web 1.0.0, gateway 1.0.0`; that commit's pipeline migrates and deploys staging and
-   `smoke:staging` checks it. Until every image has a version, `update:staging` keeps `unreleased` for the missing ones
-   and `deploy:staging` refuses to apply.
+   commits `staging: api 1.0.0, web 1.0.0, gateway 1.0.0`, then in the same job migrates, deploys and smoke-checks
+   staging. Until every image has a version, `update:staging` keeps `unreleased` for the missing ones and
+   `deploy.sh` refuses to apply.
 7. **Production.** Start `propose:production` (or run `scripts/set-version.sh production all <version>` and open a
    merge request yourself). Merging it and starting `deploy:production` migrates and deploys production.
 
@@ -1107,17 +1118,17 @@ flowchart LR
   B2 --> REG
   F2 --> REG
   subgraph deploy["deploy repository"]
-    U["update:staging<br/>schedule, every 15 min<br/>set-version.sh staging all latest"]
+    U["update:staging<br/>schedule, every 15 min<br/>set-version.sh staging all latest,<br/>commit, then deploy.sh + smoke.sh"]
     S["environments/staging<br/>kustomization.yaml"]
     PP["propose:production (manual)<br/>or set-version.sh production"]
     MR["merge request<br/>environments/production"]
     P["environments/production<br/>kustomization.yaml"]
-    D1["deploy:staging<br/>migrate.sh, apply, smoke"]
+    D1["deploy:staging (people's commits)<br/>migrate.sh, apply, smoke"]
     D2["deploy:production (manual)<br/>migrate.sh, apply, smoke"]
   end
   REG -. "versions.sh: newest X.Y.Z" .-> U
-  U -- "commit: staging: api 1.4.0, ..." --> S
-  S --> D1
+  U -- "commit: staging: api 1.4.0, ...<br/>(job token: no new pipeline)" --> S
+  S -- "a person's commit or merge" --> D1
   S -. "the versions staging runs" .-> PP
   PP --> MR -- "merge = release decision" --> P
   P --> D2
@@ -1128,10 +1139,13 @@ flowchart LR
   creates a GitLab Release with the image digests and the changes. That is all the app repositories do.
 * **Updating staging.** The pipeline schedule runs `update:staging` here (every 15 minutes): `scripts/versions.sh` reads
   the registry, `scripts/set-version.sh staging all latest` takes the newest `X.Y.Z` of each image (never a release
-  candidate, never backwards), and `scripts/update-versions.sh` commits `staging: api 1.4.0` to `main` with
-  `DEPLOY_PUSH_TOKEN`. That commit's pipeline runs `validate:*`, then `deploy:staging` (migrations with the new API
-  image, then apply, then wait for the rollouts) and `smoke:staging`. A release candidate reaches staging only when a
-  person sets it (`set-version.sh staging api 1.5.0-rc.1`, commit).
+  candidate, never backwards), and `scripts/update-versions.sh` commits `staging: api 1.4.0` to `main` with the job's
+  own token. A push made with the job token starts no pipeline, so the same job then deploys that commit:
+  `scripts/deploy.sh staging apps` (migrations with the new API image, then apply, then wait for the rollouts) and
+  `scripts/smoke.sh`, under staging's lock (`resource_group: staging`). Nothing new: no commit, no deployment. A
+  person's commit to `environments/staging` (or a merge) starts the normal pipeline instead: `validate:*`,
+  `deploy:staging`, `smoke:staging`. A release candidate reaches staging only when a person sets it
+  (`set-version.sh staging api 1.5.0-rc.1`, commit).
 * **Promotion to production.** `propose:production` (manual, only for people allowed to deploy to the protected
   `production` environment) opens the merge request `production: api 1.4.0, web 2.1.0, gateway 2.1.0` with the
   versions staging runs; or a person runs `scripts/set-version.sh production api 1.4.0` and opens one. Merging it is
@@ -1178,20 +1192,28 @@ Steps, in this order (versions pinned; check the current ones when you do it):
      -f https://raw.githubusercontent.com/argoproj-labs/argocd-image-updater/v1.3.1/config/install.yaml
    ```
 
-3. **Register this repository with a read-only token** (a deploy token of this project with `read_repository`):
+3. **Register this repository over SSH with a read-only deploy key.** The Applications use the SSH URL
+   `git@gitlab.com:zeiss/deploy.git` (Argo CD's default known hosts include gitlab.com). Make a key pair
+   (`ssh-keygen -t ed25519 -N '' -C argocd-read -f argocd-read`), add `argocd-read.pub` in this project under
+   Settings → Repository → Deploy keys (no write permission), and give Argo CD the private key:
 
    ```bash
    kubectl -n argocd create secret generic repo-zeiss-deploy \
-     --from-literal=type=git --from-literal=url=https://gitlab.com/zeiss/deploy.git \
-     --from-literal=username=<deploy token user> --from-literal=password=<deploy token>
+     --from-literal=type=git --from-literal=url=git@gitlab.com:zeiss/deploy.git \
+     --from-file=sshPrivateKey=argocd-read
    kubectl -n argocd label secret repo-zeiss-deploy argocd.argoproj.io/secret-type=repository
    ```
 
-4. **Registry and write-back credentials for Image Updater** (both Secrets in `argocd`, names as in the annotations):
-   `gitlab-registry`, the group deploy token as a pull secret
+4. **Registry and write-back credentials for Image Updater** (both Secrets in `argocd`, the namespace of the
+   ImageUpdater, names as in the annotations): `gitlab-registry`, the group deploy token as a pull secret
    (`kubectl -n argocd create secret docker-registry gitlab-registry --docker-server=registry.gitlab.com --docker-username=<user> --docker-password=<token>`),
-   and `deploy-push-token`, the same project access token as `DEPLOY_PUSH_TOKEN`
-   (`kubectl -n argocd create secret generic deploy-push-token --from-literal=username=oauth2 --from-literal=password=<token>`).
+   and `deploy-write-key`, an SSH **deploy key with write access**: a second key pair
+   (`ssh-keygen -t ed25519 -N '' -C image-updater -f image-updater`), added under Settings → Repository → Deploy keys
+   with **"Grant write permissions to this key"**, and allowed to push to the protected `main` (Settings → Repository →
+   Protected branches → `main` → "Allowed to push and merge": add the deploy key)
+   (`kubectl -n argocd create secret generic deploy-write-key --from-file=sshPrivateKey=image-updater`). Deploy keys
+   are on every GitLab tier; a bot user's personal access token (`write_repository`) works too, as a Secret with
+   `username` and `password` and the Applications' `repoURL` back on HTTPS. Delete the private key files afterwards.
    The Secrets the pipeline creates in `product-management` today (`gitlab-registry`, `api-secrets`,
    `redis-credentials`) must exist before the first sync: create them once per environment with
    `scripts/deploy.sh <env>` as today, or move them to a secrets operator (e.g. External Secrets).
@@ -1328,7 +1350,10 @@ opens up to 10 connections and `max_connections` is 200.
   and production change the File variables `API_SIGNING_KEY` / `API_CONSUMERS` and re-run the deploy job (it restarts
   the API). Every existing token becomes invalid; the gateway fetches the new public key by itself (an unknown key id
   triggers a JWKS download, at most once per 30 s).
-* **Registry token:** a new group deploy token `gitlab-deploy-token`, then re-run the deploy job.
+* **Registry token:** a new deploy token `gitlab-deploy-token` in the zeiss group, revoke the old one, then re-run the
+  deploy job.
+* **Pushing to this repository:** nothing to rotate: `update:staging` and `propose:production` push with the job
+  token, which lives only as long as the job. (A `DEPLOY_PUSH_TOKEN`, where one is used, is replaced like any token.)
 
 ### Backups and restore
 
@@ -1409,8 +1434,8 @@ The pipeline of this repository ([`.gitlab-ci.yml`](.gitlab-ci.yml)):
 | `validate:manifests` | validate | every merge request and commit | `scripts/validate.sh` (environments, `infra/`, `argocd/`); extracts the Alloy configuration for the next job |
 | `validate:scripts` | validate | every merge request and commit | `shellcheck scripts/*.sh` |
 | `validate:alloy` | validate | every merge request and commit | `alloy validate` and `alloy fmt` on the configuration inside `infra/logs.yaml` |
-| `update:staging` | staging | the **pipeline schedule** on `main` with `STAGING_ENABLED`; also **manual** in any pipeline on `main` | `scripts/update-versions.sh staging`: the newest released versions into `environments/staging`, committed to `main` (whose pipeline deploys) |
-| `deploy:staging` | staging | `main`, `STAGING_ENABLED`, when `environments/staging/`, `apps/`, `infra/`, `scripts/deploy.sh` or `scripts/migrate.sh` changed | `scripts/deploy.sh staging apps`: Secrets, migrations (`scripts/migrate.sh`), apply, rollouts |
+| `update:staging` | staging | the **pipeline schedule** on `main` with `STAGING_ENABLED`; also **manual** in any pipeline on `main` | `scripts/update-versions.sh staging`: the newest released versions into `environments/staging`, committed to `main` with the job token; when something was committed, deploys it in the same job (`scripts/deploy.sh staging apps`, then `scripts/smoke.sh $STAGING_URL`), since a job-token push starts no pipeline |
+| `deploy:staging` | staging | `main`, `STAGING_ENABLED`, when `environments/staging/`, `apps/`, `infra/`, `scripts/deploy.sh` or `scripts/migrate.sh` changed (people's commits and merges) | `scripts/deploy.sh staging apps`: Secrets, migrations (`scripts/migrate.sh`), apply, rollouts |
 | `smoke:staging` | staging | after `deploy:staging` | `scripts/smoke.sh $STAGING_URL` |
 | `infra:staging` | staging | `main`, `STAGING_ENABLED`, **manual** | `scripts/deploy.sh staging infra` |
 | `deploy:production` | production | `main`, `PRODUCTION_ENABLED`, when `environments/production/`, `apps/`, `scripts/deploy.sh` or `scripts/migrate.sh` changed; **manual** | `scripts/deploy.sh production apps`: Secrets, migrations, apply, rollouts |
@@ -1418,7 +1443,7 @@ The pipeline of this repository ([`.gitlab-ci.yml`](.gitlab-ci.yml)):
 | `infra:production` | production | `main`, `PRODUCTION_ENABLED`, **manual** | `scripts/deploy.sh production infra` |
 | `propose:production` | production | `main`, `PRODUCTION_ENABLED`, **manual** (protected environment `production`) | `scripts/update-versions.sh production`: the merge request "production: api 1.4.0, ..." with the versions staging runs |
 
-Deploy and infra jobs of one environment share a `resource_group`, so two never run at once. A branch with an open
+Deploy, infra and update jobs of one environment share a `resource_group`, so two never run at once. A branch with an open
 merge request gets only the merge-request pipeline. Without `STAGING_ENABLED` / `PRODUCTION_ENABLED` the pipeline only
 validates. `infra/` is applied only by the manual infra jobs: it holds the data of every service. A **scheduled**
 pipeline runs only `update:staging` (in a pipeline that no push started, `changes:` is always true, so every other job
@@ -1426,15 +1451,21 @@ has a rule that skips schedules).
 
 The schedule (once): Build → Pipeline schedules → New schedule; description "update staging", interval pattern
 `*/15 * * * *` (or another; GitLab.com runs schedules at most every 5 minutes), cron time zone UTC, target branch
-`main`, active. Its owner is the commits' author. Deactivating it holds staging on its current versions.
+`main`, active. Its owner is the commits' author and the user the job token pushes as, so it must be a Maintainer
+(allowed to push to the protected `main`); if the owner leaves, take the schedule over (Take ownership). Deactivating
+it holds staging on its current versions.
+
+The push needs no stored token: in this project, Settings → CI/CD → Job token permissions → turn on **"Allow Git push
+requests to the repository"** (GitLab 18.4+, every tier, off by default). `update:staging` and `propose:production`
+then push with their own `CI_JOB_TOKEN`, which has the rights of the user who started the job and expires with it.
 
 Every CI/CD variable of the three projects:
 
 | Project | Variable | Scope | Type, protection | Purpose |
 | --- | --- | --- | --- | --- |
 | deploy | `STAGING_ENABLED`, `PRODUCTION_ENABLED` | project or group (not environment-scoped: rules cannot see those) | plain | `"true"` creates that environment's jobs on `main` |
-| deploy | `DEPLOY_PUSH_TOKEN` | project | masked, protected | project access token of this repository (role Maintainer, scope `write_repository`, with an expiry reminder): `update:staging` and `propose:production` push with it |
-| zeiss group | `gitlab-deploy-token` (a deploy token, not a variable) | group | `read_registry` | GitLab passes it to every job as `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`; `versions.sh` reads the registries with it; becomes the Secret `gitlab-registry` |
+| deploy | `DEPLOY_PUSH_TOKEN` | project | optional; masked, protected | only where the job token cannot push (GitLab before 18.4, or the setting is missing): any token with `write_repository` on this repository, e.g. a bot user's personal access token. Normally not set: the jobs push with `CI_JOB_TOKEN` |
+| zeiss group | `gitlab-deploy-token` (a deploy token, not a variable) | group (zeiss → Settings → Repository → Deploy tokens; a project-level one would see only that project's images) | `read_registry` | GitLab passes it to every job as `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`; `versions.sh` reads the registries with it; becomes the Secret `gitlab-registry` |
 | deploy | `KUBE_CONTEXT` | staging, production | plain | the GitLab agent's context `<agent configuration project>:<agent name>` |
 | deploy | `KUBECONFIG` | staging, production | File | instead of `KUBE_CONTEXT`: a kubeconfig whose current context is the cluster |
 | deploy | `API_SIGNING_KEY` | staging, production | File, protected | the API's ES256 private key (`<api image> generate-signing-key`) |
@@ -1442,7 +1473,7 @@ Every CI/CD variable of the three projects:
 | deploy | `SMOKE_CLIENT_ID`, `SMOKE_CLIENT_SECRET` | staging, production | optional; the secret masked | a viewer account for the signed-in smoke check |
 | deploy | `LOKI_URL`, `LOKI_USERNAME`, `LOKI_PASSWORD` | staging, production | optional; the password masked | another Loki, for the infra jobs |
 | deploy | `STAGING_URL`, `PRODUCTION_URL` | defined in `.gitlab-ci.yml`; override in the project | plain | the environments' public URLs |
-| backend, frontend | none | | | their pipelines only publish; settings there: protected tags `v*` (Maintainers) and registry tag immutability |
+| backend, frontend | none | | | their pipelines only publish; setting there: protected tags `v*` (Maintainers). Their publish jobs never overwrite a version (on GitLab Ultimate, protected immutable container tags can enforce it in the registry too) |
 
 No database or Redis password is a CI/CD variable: they are random and live in the cluster. No app repository holds
 a credential of this repository or of a cluster.
@@ -1458,9 +1489,11 @@ a credential of this repository or of a cluster.
 | `No backend checkout at ../backend` | the three repositories are not side by side | clone them next to each other, or set `BACKEND_DIR` / `FRONTEND_DIR` |
 | `environments/staging names no version yet for some images (newTag: unreleased)` | no version chosen for an image: backend or frontend has not published one, or nobody set it | tag a version in that repository (`v1.0.0`), then `update:staging` (or `scripts/set-version.sh staging all latest` and commit) |
 | `set-version.sh`: `api 1.4.0 is not in the registry` | a typo, or the tag pipeline did not publish it (yet) | `scripts/versions.sh api`; check the tag's pipeline in backend |
+| `publish:*` fails (backend or frontend): `... already exists as another image ...: versions are never overwritten` | the version `X.Y.Z` was published before from another build (a tag deleted and re-created, or moved) | versions are never overwritten: release a new one (`v1.4.1`); a re-run of the same pipeline is fine (same image, nothing to do) |
 | `versions.sh`: `No registry token ...` / `Not allowed to read ... (401/403)` | no or wrong registry credentials | `REGISTRY_USER` / `REGISTRY_PASSWORD` (a token with `read_registry`), or `docker login registry.gitlab.com`; in CI the group deploy token `gitlab-deploy-token` must exist |
-| `update:staging` fails: `DEPLOY_PUSH_TOKEN is not set` | the variable is missing, or it is protected and the pipeline is not on a protected branch | create the project access token and the masked, protected variable; run the schedule on `main` |
-| `update:staging` fails to push (`403`, `pre-receive hook declined`) | the token's role cannot push to the protected `main` | role Maintainer, and allow Maintainers to push to `main` (or that token's bot user, on Premium) |
+| `update-versions.sh`: `No token to push with` | run outside a pipeline (no `CI_JOB_TOKEN`) and without `DEPLOY_PUSH_TOKEN` | run it through the job, or set `DEPLOY_PUSH_TOKEN` (a token with `write_repository`), or `DRY_RUN=1` |
+| `update:staging` / `propose:production` fails to push (`403`, `You are not allowed to push code`, `pre-receive hook declined`) | the job token may not push: the project setting is off, or the user who started the job (the schedule's owner) cannot push to the protected `main` | Settings → CI/CD → Job token permissions → turn on "Allow Git push requests to the repository"; the schedule's owner must be a Maintainer and Maintainers allowed to push to `main` (Protected branches). On a GitLab before 18.4: `DEPLOY_PUSH_TOKEN` |
+| staging changed in git (`staging: api 1.4.0`) but no pipeline ran for that commit | expected: a push made with the job token starts no pipeline | nothing: `update:staging` deployed it itself (its log shows `deploy.sh` and `smoke.sh`); if that step failed, fix the cause and run a pipeline on `main` (Build → Pipelines → Run pipeline): `deploy:staging` applies it (re-running `update:staging` finds nothing new to commit) |
 | `update:staging` runs but staging stays on an older version | there is no newer plain `X.Y.Z` (release candidates are skipped), or for web/gateway only one of the two has it | `scripts/versions.sh all`; release the missing image |
 | staging went back up after a downgrade | `update:staging` moves it to the newest version again | deactivate the schedule while staging must stay older; better, release a fix |
 | `deploy:*` fails in `migrate.sh` (the migration pod's output in the log) | a migration failed: nothing was applied, the old version keeps running | fix forward in backend (a new version); the pod is gone, its log is in the job |
@@ -1488,7 +1521,7 @@ a credential of this repository or of a cluster.
 | --- | --- |
 | Verified locally (Docker Desktop Kubernetes, macOS) | `scripts/infra.sh up`, `scripts/deploy.sh local`: the API, web and gateway with the shared infrastructure, 850,000 products and a 20-million-row stock ledger; every assessment requirement, the end-to-end tests (Playwright), load tests (k6) and the log pipeline (Loki, Grafana, 12 alert rules) pass against it |
 | Verified on k3s (a fresh Ubuntu 24.04 VM) | `scripts/setup-ubuntu.sh`, `scripts/infra.sh up`, `scripts/deploy.sh local`, a start over from nothing, a backup; the smoke check, every assessment requirement and the 22 Playwright tests (from a laptop) pass through http://&lt;server-ip&gt;:8080 |
-| Verified locally, release flow | `scripts/versions.sh` and `scripts/set-version.sh` against a throwaway registry (latest, `--pre`, downgrade, unknown version refused; also the token flow against registry.gitlab.com); `scripts/update-versions.sh` against a throwaway git repository (commit, retry after a rejected push, production merge request branch); `scripts/migrate.sh` on the local cluster ("Database is up to date", no data changed) through `scripts/deploy.sh local` |
+| Verified locally, release flow | `scripts/versions.sh` and `scripts/set-version.sh` against a throwaway registry (latest, `--pre`, downgrade, unknown version refused; also the token flow against registry.gitlab.com); `scripts/update-versions.sh` against a throwaway git repository (commit, retry after a rejected push, production merge request branch); the app pipelines' publish step with crane against a throwaway registry (a new version is tagged, a re-run is a no-op, another image under an existing version is refused); `scripts/migrate.sh` on the local cluster ("Database is up to date", no data changed) through `scripts/deploy.sh local` |
 | Validated, not yet run on a real cluster | `environments/staging` and `environments/production` (rendered and schema-checked by `scripts/validate.sh`), the GitLab pipelines (schema-valid; jobs that need no cluster run on gitlab.com), `scripts/add-node.sh` (dry run) |
 | Prepared, not installed | Argo CD and Argo CD Image Updater: `argocd/` (Applications, ImageUpdater, the PreSync migration hook) is validated against their pinned CRDs on every change; [Moving to Argo CD](#moving-to-argo-cd) is the procedure |
-| Still to provide per environment | a k3s (or any) cluster with cert-manager and the ClusterIssuer `letsencrypt`; the real hosts in `ingress.yaml` and `STAGING_URL` / `PRODUCTION_URL` (now `*.example.com`); the CI/CD variables above and the `update:staging` schedule; the first versions (`newTag: unreleased` until then); a real alert contact point; off-node backups |
+| Still to provide per environment | a k3s (or any) cluster with cert-manager and the ClusterIssuer `letsencrypt`; the real hosts in `ingress.yaml` and `STAGING_URL` / `PRODUCTION_URL` (now `*.example.com`); the CI/CD variables above, the job token push setting and the `update:staging` schedule; the first versions (`newTag: unreleased` until then); a real alert contact point; off-node backups |

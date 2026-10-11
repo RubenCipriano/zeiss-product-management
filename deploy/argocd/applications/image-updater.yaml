@@ -1,7 +1,9 @@
 # Argo CD Image Updater configuration (v1.x): one ImageUpdater object that selects the Applications labelled
 # image-updater=product-management (only staging.yaml) and reads everything else from their annotations
 # (useAnnotations: true). Image Updater 1.x is configured through this custom resource; the annotations keep the whole
-# update policy next to the Application it changes.
+# update policy next to the Application it changes. Its git write-back credential (the annotation write-back-method,
+# git:secret:argocd/deploy-write-key) must be a Secret in this object's namespace, argocd: an SSH deploy key with write
+# access (key sshPrivateKey), which GitLab Free has; no project access token is needed.
 apiVersion: argocd-image-updater.argoproj.io/v1alpha1
 kind: ImageUpdater
 metadata:

@@ -14,7 +14,8 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://gitlab.com/zeiss/deploy.git
+    # The same repository registration as staging: SSH with a read-only deploy key (README.md, "Moving to Argo CD").
+    repoURL: git@gitlab.com:zeiss/deploy.git
     targetRevision: main
     path: environments/production
   destination:

@@ -6,8 +6,9 @@
 # <image>:X.Y.Z); they never touch this repository. This repository pulls versions in:
 #   staging      update:staging (a pipeline schedule, e.g. every 15 minutes) sets every image to its newest released
 #                version (scripts/update-versions.sh staging → scripts/set-version.sh staging all latest) and, if
-#                anything changed, commits "staging: api 1.4.0, web 1.4.0, gateway 1.4.0" to main. That commit's
-#                pipeline deploys staging.
+#                anything changed, commits "staging: api 1.4.0, web 1.4.0, gateway 1.4.0" to main with the job's own
+#                token, then deploys and smoke-tests that commit in the same job (a push made with the job token
+#                starts no pipeline).
 #   production   a merge request that changes environments/production (a person runs scripts/set-version.sh, or starts
 #                propose:production, which proposes the versions staging runs). Merging it is the release decision.
 #
@@ -27,9 +28,13 @@
 # Project- or group-level CI/CD variables (not scoped to an environment: rules cannot see environment-scoped ones):
 #   STAGING_ENABLED, PRODUCTION_ENABLED   "true" creates that environment's jobs on the default branch; without them
 #                                         the pipeline only validates
-#   DEPLOY_PUSH_TOKEN                     masked, protected: a project access token of THIS repository, role
-#                                         Maintainer, scope write_repository; update:staging and propose:production
-#                                         push with it (a CI job token cannot push)
+#   DEPLOY_PUSH_TOKEN                     optional, masked, protected: only where the job token cannot push (GitLab
+#                                         before 18.4): any token with write_repository on THIS repository, e.g. a
+#                                         bot user's personal access token
+# update:staging and propose:production push with the job's own token (CI_JOB_TOKEN). Turn that on once: Settings →
+# CI/CD → Job token permissions → "Allow Git push requests to the repository" (GitLab 18.4+, every tier, off by
+# default). The job token has the rights of the user who started the job (the schedule's owner, or who runs the manual
+# job), so that user must be allowed to push to the protected main (Maintainers).
 # A group deploy token named exactly `gitlab-deploy-token` with the scope read_registry on the zeiss group (group →
 # Settings → Repository → Deploy tokens): it reads both registries (backend and frontend), and GitLab passes it to the
 # jobs as CI_DEPLOY_USER / CI_DEPLOY_PASSWORD; scripts/versions.sh lists the published versions with it and
@@ -44,7 +49,8 @@
 #   LOKI_URL, LOKI_USERNAME, LOKI_PASSWORD optional, infra jobs: another Loki (scripts/infra.sh)
 # STAGING_URL and PRODUCTION_URL (below) are the environments' public hosts (environments/*/ingress.yaml).
 #
-# The schedule: Build → Pipeline schedules → New schedule, target branch main, interval e.g. "*/15 * * * *".
+# The schedule: Build → Pipeline schedules → New schedule, target branch main, interval e.g. "*/15 * * * *"; its owner
+# must be allowed to push to main (update:staging pushes as that user).
 #
 # Argo CD instead of these jobs (prepared in argocd/, README.md "Moving to Argo CD"): Argo CD applies main (automated
 # for staging, manual sync for production), the migration runs as its PreSync hook (argocd/hooks), and Argo CD Image
@@ -189,9 +195,11 @@ smoke:staging:
 
 # Pulls the newest released versions into staging: scripts/update-versions.sh staging sets every image to its newest
 # X.Y.Z in the registry (scripts/set-version.sh staging all latest; pre-releases and older versions are never picked)
-# and, if anything changed, commits "staging: api 1.4.0, ..." to main with DEPLOY_PUSH_TOKEN. That commit's pipeline
-# runs deploy:staging. Runs on the pipeline schedule (Build → Pipeline schedules, on main, e.g. every 15 minutes), and
-# can be started by hand in any pipeline on main. To hold staging on an older version, deactivate the schedule first.
+# and, if anything changed, commits "staging: api 1.4.0, ..." to main with the job's own token. A push made with the
+# job token starts no pipeline, so this job then deploys that commit itself (scripts/deploy.sh staging apps and
+# scripts/smoke.sh, as deploy:staging and smoke:staging do for people's commits); nothing changed, nothing deployed.
+# Runs on the pipeline schedule (Build → Pipeline schedules, on main, e.g. every 15 minutes), and can be started by
+# hand in any pipeline on main. To hold staging on an older version, deactivate the schedule first.
 update:staging:
   stage: staging
   image: $KUBE_TOOLS_IMAGE
@@ -202,8 +210,21 @@ update:staging:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
       when: manual
       allow_failure: true
+  # Staging's variables (cluster, keys) and its lock: never at the same time as deploy:staging.
+  environment:
+    name: staging
+    url: $STAGING_URL
+    deployment_tier: staging
+  resource_group: staging
   script:
+    # Commits the newest versions to main with this job's own token (no stored token: Settings → CI/CD → Job token
+    # permissions → "Allow Git push requests to the repository"). A push made with the job token starts no pipeline,
+    # so when something was committed this job deploys it itself: the same steps as deploy:staging and smoke:staging.
     - scripts/update-versions.sh staging
+    - if [ ! -f .updated ]; then echo "Nothing new to deploy"; exit 0; fi
+    - git fetch --quiet origin "$CI_DEFAULT_BRANCH" && git checkout --quiet FETCH_HEAD
+    - scripts/deploy.sh staging apps
+    - scripts/smoke.sh "$STAGING_URL"
 
 infra:staging:
   extends: .infra
@@ -271,7 +292,7 @@ infra:production:
     ENVIRONMENT: production
 
 # Proposes a production release: scripts/update-versions.sh production sets production's images to the versions staging
-# runs and opens the merge request "production: api 1.4.0, ..." (a branch pushed with DEPLOY_PUSH_TOKEN and GitLab's
+# runs and opens the merge request "production: api 1.4.0, ..." (a branch pushed with the job's own token and GitLab's
 # merge request push options). Merging it is the release decision; deploy:production then applies it. The same as a
 # person running scripts/set-version.sh production ... and opening the merge request by hand. Starting it is limited
 # to the users allowed to deploy to the protected `production` environment.

@@ -667,7 +667,7 @@ repository: the deploy repository chooses which published version each environme
 | `build:api` | build | every pipeline | builds and pushes `registry.gitlab.com/zeiss/backend/api:<short sha>` (BuildKit, layer cache in the registry); in a tag pipeline it reuses that image when the pipeline on `main` already built it |
 | `migrations:sql` | build | every pipeline | the idempotent SQL script of all migrations (`dotnet ef migrations script --idempotent`), as an artifact to review in the merge request |
 | `scan:api` | scan | every pipeline | Trivy: full report to GitLab; fails on fixable critical vulnerabilities |
-| `publish:api` | publish | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | after test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `v`) to the same image, so the version has the commit build's digest; the digest goes to `release` |
+| `publish:api` | publish | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | after test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `v`) to the same image, so the version has the commit build's digest; the digest goes to `release`. If `X.Y.Z` already exists it must be this same image (a re-run: nothing to do); another image fails the job, so a version is never overwritten |
 | `release` | release | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | GitLab's `release:` keyword (image `release-cli`): the Release `vX.Y.Z`, with the image reference and digest and the commits since the previous version ([`ci/release-notes.sh`](ci/release-notes.sh)) |
 
 Which pipelines run: merge requests and `main` (test, build, scan), and tags that match
@@ -686,12 +686,15 @@ version is still serving, and next to the new one during the rollout. A rollback
 never touches the schema; a bad migration is fixed forward.
 
 **No CI/CD variable is needed in this project:** the jobs use only what GitLab provides (`CI_REGISTRY_USER` /
-`CI_REGISTRY_PASSWORD` for the registry, the job token for the release). Two project settings matter:
+`CI_REGISTRY_PASSWORD` for the registry, the job token for the release). One project setting matters:
 
 * **Protected tags** (Settings → Repository → Protected tags): `v*`, allowed to create: Maintainers. Only maintainers
   can then release, and the publish and release jobs run with protected-branch rights.
-* **Tag immutability** of the container registry (Settings → Packages and registries → Container registry, protected
-  or immutable tags): a published version can never be overwritten or deleted.
+
+A published version is never overwritten: `publish:api` refuses to point an existing `X.Y.Z` at another image (on
+every GitLab tier). On GitLab Ultimate, protected **immutable** container tags (Settings → Packages and registries →
+Container registry → Protected container tags → Immutable) can enforce the same in the registry itself, an optional
+extra. A cleanup policy, where one runs, must keep the `X.Y.Z` tags.
 
 ## How to release a version
 
@@ -761,6 +764,6 @@ published it.
 | integration tests fail at startup | Docker is not running (Testcontainers) | start Docker |
 | `migrate` fails with `permission denied for schema public` | it ran as `pm_app` | run it as the schema owner (`pm_migrator`), as the deploy repository's `scripts/migrate.sh` does |
 | a tag starts no pipeline | the tag is not `vX.Y.Z` / `vX.Y.Z-rc.N` (e.g. `1.4.0` without `v`, or `v1.4`) | delete it and create `v1.4.0` |
-| `publish:api` fails: the tag cannot be overwritten | the version was published before (tag immutability) | versions are never reused: release `v1.4.1` |
+| `publish:api` fails: `... already exists as another image ...: versions are never overwritten` | the version was published before from another build (its git tag deleted and created again on another commit) | versions are never reused: release `v1.4.1`. Re-running the pipeline of the same tag is fine (same image, nothing to do) |
 | `release` fails with `already exists` | a Release with that tag exists (a re-run) | nothing to do, or delete the Release in Deploy → Releases and retry the job |
 | the deploy repository does not see a new version | `publish:api` did not run (the tag pipeline failed before it), or the registry token there cannot read this registry | check the tag's pipeline; in deploy, `scripts/versions.sh api` |

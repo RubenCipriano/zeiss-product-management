@@ -534,7 +534,7 @@ the deploy repository: the deploy repository chooses which published version eac
 | GitLab SAST, Secret Detection | test | every pipeline | GitLab's own analysers (included templates) |
 | `build:web`, `build:gateway` | build | every pipeline | build and push `registry.gitlab.com/zeiss/frontend/{web,gateway}:<short sha>` (BuildKit on Docker-in-Docker, layer cache in the registry); in a tag pipeline they reuse those images when the pipeline on `main` already built them |
 | `scan:web`, `scan:gateway` | scan | every pipeline | Trivy: full report to GitLab; fails on fixable critical vulnerabilities |
-| `publish:web`, `publish:gateway` | publish | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | after every test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `v`) to each image, so a version has the commit build's digest; the digests go to `release` |
+| `publish:web`, `publish:gateway` | publish | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | after every test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `v`) to each image, so a version has the commit build's digest; the digests go to `release`. If `X.Y.Z` already exists it must be this same image (a re-run: nothing to do); another image fails the job, so a version is never overwritten |
 | `release` | release | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | GitLab's `release:` keyword (image `release-cli`): the Release `vX.Y.Z`, with both image references and digests and the commits since the previous version ([`ci/release-notes.sh`](ci/release-notes.sh)) |
 
 Which pipelines run: merge requests and `main` (test, build, scan), and tags that match
@@ -548,9 +548,12 @@ digests, then `git log --no-merges` since the previous version tag (for a releas
 skipping release candidates; for a release candidate the previous tag of any kind) and a compare link.
 
 **No CI/CD variable is needed in this project:** the jobs use only what GitLab provides (`CI_REGISTRY_USER` /
-`CI_REGISTRY_PASSWORD`, the job token). Two project settings matter: **protected tags** `v*` (Settings → Repository →
-Protected tags, allowed to create: Maintainers), so only maintainers release; and **tag immutability** of the
-container registry, so a published version can never be overwritten.
+`CI_REGISTRY_PASSWORD`, the job token). One project setting matters: **protected tags** `v*` (Settings → Repository →
+Protected tags, allowed to create: Maintainers), so only maintainers release. A published version is never
+overwritten: `publish:web` and `publish:gateway` refuse to point an existing `X.Y.Z` at another image (on every GitLab
+tier). On GitLab Ultimate, protected **immutable** container tags (Settings → Packages and registries → Container
+registry → Protected container tags → Immutable) can enforce the same in the registry itself, an optional extra. A
+cleanup policy, where one runs, must keep the `X.Y.Z` tags.
 
 ## How to release a version
 
@@ -600,5 +603,5 @@ backend version first (the API stays backward compatible, so the order is always
 | Playwright: browser-errors test skipped | Loki not reachable at `LOKI_URL` | `kubectl -n infra port-forward svc/loki 3100:3100` |
 | `npm run audit:lighthouse` cannot launch Chrome | it uses the macOS Chrome path by default | set `CHROME_PATH` |
 | a tag starts no pipeline | the tag is not `vX.Y.Z` / `vX.Y.Z-rc.N` (e.g. `2.1.0` without `v`, or `v2.1`) | delete it and create `v2.1.0` |
-| `publish:*` fails: the tag cannot be overwritten | the version was published before (tag immutability) | versions are never reused: release `v2.1.1` |
+| `publish:*` fails: `... already exists as another image ...: versions are never overwritten` | the version was published before from another build (its git tag deleted and created again on another commit) | versions are never reused: release `v2.1.1`. Re-running the pipeline of the same tag is fine (same images, nothing to do) |
 | staging keeps the previous frontend version | only one of the two images has the new version (a publish job failed), and staging takes the newest version both have | re-run the failed publish job of the tag's pipeline |

@@ -19,7 +19,8 @@
 #
 # No CI/CD variable has to be set in this project: the jobs use only what GitLab provides (CI_REGISTRY_*, the job
 # token). Protect the tags v* (Settings → Repository → Protected tags, allowed to create: Maintainers) so only
-# maintainers release, and turn on tag immutability for the container registry so a version can never be overwritten.
+# maintainers release. A version is never overwritten: publish:api refuses to move an existing X.Y.Z to another image
+# (on GitLab Ultimate, protected immutable container tags can enforce the same in the registry itself).
 #
 # Runners: every job runs on gitlab.com's shared runners (no tags).
 
@@ -44,8 +45,8 @@ include:
   - template: Jobs/Secret-Detection.gitlab-ci.yml
 
 variables:
-  # The build of this commit. A version tag adds <MAJOR>.<MINOR>.<PATCH> to the same image (publish:api). Enable tag
-  # immutability for this repository in the Container Registry settings so a tag can never be overwritten.
+  # The build of this commit. A version tag adds <MAJOR>.<MINOR>.<PATCH> to the same image (publish:api), which never
+  # moves an existing version to another image.
   API_IMAGE: $CI_REGISTRY_IMAGE/api:$CI_COMMIT_SHORT_SHA
   # Tool images, pinned (bump them with Renovate or by hand).
   DOTNET_SDK_IMAGE: mcr.microsoft.com/dotnet/sdk:10.0.401        # = global.json
@@ -212,7 +213,18 @@ publish:api:
   script:
     - echo "$CI_REGISTRY_PASSWORD" | crane auth login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
     - version="${CI_COMMIT_TAG#v}"
-    - crane tag "$API_IMAGE" "$version"
+    # A version is never overwritten (the free equivalent of GitLab's "immutable tags"): if X.Y.Z already exists it
+    # must already be this very image (a re-run of this job); anything else stops the release.
+    - |
+      if existing="$(crane digest "$CI_REGISTRY_IMAGE/api:$version" 2>/dev/null)"; then
+        if [ "$existing" != "$(crane digest "$API_IMAGE")" ]; then
+          echo "$CI_REGISTRY_IMAGE/api:$version already exists as another image ($existing): versions are never overwritten, release a new one" >&2
+          exit 1
+        fi
+        echo "$CI_REGISTRY_IMAGE/api:$version already points at this image: nothing to do"
+      else
+        crane tag "$API_IMAGE" "$version"
+      fi
     - echo "API_DIGEST=$(crane digest "$CI_REGISTRY_IMAGE/api:$version")" > publish.env
     - echo "Published $CI_REGISTRY_IMAGE/api:$version ($(cut -d= -f2 publish.env))"
   artifacts:

@@ -7,9 +7,10 @@
 #   scripts/update-versions.sh production   # production to the versions staging runs, as a merge request
 #
 # staging (the scheduled job update:staging): clones main, runs `scripts/set-version.sh staging all latest` there and,
-# if anything changed, commits "staging: api 1.4.0, web 1.4.0, gateway 1.4.0" (the images that changed) and pushes it
-# to main. That push starts this repository's pipeline, whose deploy:staging migrates, applies and smoke-checks
-# staging. If main moved meanwhile, it starts again from the new main (up to 5 times). Nothing new: no commit.
+# if anything changed, commits "staging: api 1.4.0, web 1.4.0, gateway 1.4.0" (the images that changed), pushes it to
+# main and writes the file .updated (with that summary) in the current directory. A push made with the job's own token
+# starts no pipeline, so the job update:staging deploys what was committed itself when .updated exists. If main moved
+# meanwhile, it starts again from the new main (up to 5 times). Nothing new: no commit, no .updated.
 #
 # production (the manual job propose:production): sets production's images to the versions staging runs
 # (scripts/set-version.sh production <image> <version>, which checks they exist), pushes the branch
@@ -18,8 +19,12 @@
 # production ..., commit on a branch, open a merge request.)
 #
 # Variables:
-#   DEPLOY_PUSH_TOKEN    a project access token of THIS repository, role Maintainer (main is protected), scope
-#                        write_repository. Masked and protected; never printed (a git credential helper reads it).
+#   CI_JOB_TOKEN         the job's own token (GitLab sets it). It may push to this repository once the project allows it:
+#                        Settings → CI/CD → Job token permissions → "Allow Git push requests to the repository"
+#                        (GitLab 18.4+, every tier). It has the rights of whoever started the job: the schedule's owner
+#                        or the person running the job must be allowed to push to the protected main.
+#   DEPLOY_PUSH_TOKEN    optional, instead of the job token (older GitLab): a token with write_repository on THIS
+#                        repository. Masked and protected. Neither token is ever printed (a credential helper reads it).
 #   DEPLOY_REPO_URL      default $CI_SERVER_URL/$CI_PROJECT_PATH.git (https://gitlab.com/zeiss/deploy.git); a local
 #                        path or file:// URL for a test
 #   DEPLOY_REPO_BRANCH   default main
@@ -36,14 +41,21 @@ REPO_URL="${DEPLOY_REPO_URL:-${CI_SERVER_URL:-https://gitlab.com}/${CI_PROJECT_P
 BRANCH="${DEPLOY_REPO_BRANCH:-main}"
 FILE="environments/$ENVIRONMENT/kustomization.yaml"
 
-# Git over HTTPS with the token, which stays in the environment: the credential helper reads $DEPLOY_PUSH_TOKEN when
-# git asks for a password, so the token is in no URL, command line, config value or log line.
+# Git over HTTPS with a token that stays in the environment: the credential helper reads it when git asks for a
+# password, so the token is in no URL, command line, config value or log line.
 export GIT_TERMINAL_PROMPT=0
 git_auth=()
 if [[ "$REPO_URL" == https://* ]]; then
-  : "${DEPLOY_PUSH_TOKEN:?DEPLOY_PUSH_TOKEN is not set (a project access token of this repository, write_repository)}"
-  # shellcheck disable=SC2016 # expanded by the helper's shell, when git calls it
-  git_auth=(-c credential.helper= -c 'credential.helper=!f() { echo username=oauth2; echo "password=$DEPLOY_PUSH_TOKEN"; }; f')
+  if [[ -n "${DEPLOY_PUSH_TOKEN:-}" ]]; then
+    # shellcheck disable=SC2016 # expanded by the helper's shell, when git calls it
+    git_auth=(-c credential.helper= -c 'credential.helper=!f() { echo username=oauth2; echo "password=$DEPLOY_PUSH_TOKEN"; }; f')
+  elif [[ -n "${CI_JOB_TOKEN:-}" ]]; then
+    # shellcheck disable=SC2016 # expanded by the helper's shell, when git calls it
+    git_auth=(-c credential.helper= -c 'credential.helper=!f() { echo username=gitlab-ci-token; echo "password=$CI_JOB_TOKEN"; }; f')
+  else
+    echo "No token to push with: run this in the pipeline (CI_JOB_TOKEN) or set DEPLOY_PUSH_TOKEN" >&2
+    exit 1
+  fi
 fi
 git_() {
   git ${git_auth[@]+"${git_auth[@]}"} -C "$repo" "$@"
@@ -84,6 +96,7 @@ push() {
 }
 
 if [[ "$ENVIRONMENT" == staging ]]; then
+  rm -f .updated
   for attempt in 1 2 3 4 5; do
     "$repo/scripts/set-version.sh" staging all latest
     if git -C "$repo" diff --quiet -- "$FILE"; then
@@ -92,7 +105,9 @@ if [[ "$ENVIRONMENT" == staging ]]; then
     fi
     commit "staging: $(summary)"
     if push origin "HEAD:refs/heads/$BRANCH"; then
-      echo "==> Pushed to $BRANCH: its pipeline deploys staging (deploy:staging)"
+      summary_text="$(git -C "$repo" log -1 --format=%s)"
+      echo "$summary_text" > .updated
+      echo "==> Pushed to $BRANCH: $summary_text (the job deploys it next)"
       exit 0
     fi
     # Someone pushed first (a person, or a merge): start again from the new main.
