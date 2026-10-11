@@ -2,6 +2,13 @@
 
 **Status:** accepted
 
+> **Update (2026-10-11):** migrations are now applied by the API's first new pod when it starts, while the previous
+> version keeps serving ([0021, revision of 2026-10-11](0021-deployment-layout.md#revision-2026-10-11-the-api-applies-its-migrations-at-startup)).
+> The `CONCURRENTLY` index builds below therefore run during a rollout, under a 10-minute budget (the startup probe and
+> the migration's command timeout). On the 20-million-row ledger, an index build that may take longer should get a
+> larger budget for that release (`startupProbe.failureThreshold`, `DatabaseMigrator.Timeout`) or be built by hand
+> beforehand with the same `CREATE INDEX CONCURRENTLY IF NOT EXISTS` statement, which the migration then skips.
+
 ## Context
 
 The question was "did you add indexes? We have 850,000 products now, but we may want 5 million or more records."

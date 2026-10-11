@@ -6,10 +6,11 @@
 > migration Job and the `api` ClusterIP Service are gone: see [0021](0021-deployment-layout.md) (Kustomize overlays,
 > at first servers outside the cluster, migrations run by the pipeline with the API image). Later PostgreSQL, Redis
 > and the logs came back into the cluster, as shared infrastructure in their own namespace `infra` (now in the
-> deploy repository: `deploy/infra/`, applied by `deploy/scripts/infra.sh`), and the migrations run as a one-off pod
-> started with `kubectl run` (by `deploy/scripts/migrate.sh`, which `deploy/scripts/deploy.sh` runs for every
-> environment), still without a Job manifest (a Job exists only as the prepared Argo CD PreSync hook,
-> `deploy/argocd/hooks/`). Still valid: Kubernetes on Docker
+> deploy repository: `deploy/infra/`, applied by `deploy/scripts/infra.sh`). The migrations then ran as a one-off pod
+> (`deploy/scripts/migrate.sh`); since 2026-10-11 there is no migration Job or pod at all: the API applies its own
+> migrations when each pod starts, as `pm_migrator`, one replica at a time under a PostgreSQL advisory lock
+> ([0021, revision of 2026-10-11](0021-deployment-layout.md#revision-2026-10-11-the-api-applies-its-migrations-at-startup)),
+> so the decision below ("not on every replica start") is reversed. Still valid: Kubernetes on Docker
 > Desktop locally, one Dockerfile per image, pod hardening, zero-downtime rollouts, NetworkPolicies between the
 > gateway and the applications; the HorizontalPodAutoscalers were added later ([0018](0018-autoscaling-and-scale-testing.md)).
 > The second local cluster option and its VM scripts (`scripts/cluster-up.sh`, `cluster-down.sh`) were removed:

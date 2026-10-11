@@ -17,7 +17,7 @@ backend/
   ProductManagement.UnitTests/       Core/ · Infrastructure/ · Api/  (fast, no database)
   ProductManagement.Api.IntegrationTests/  real HTTP against real PostgreSQL and Redis (Testcontainers)
   ProductManagement.Api.AcceptanceTests/   the user outcomes, in Gherkin (Given / When / Then)
-  ci/                                pipeline helpers: migrate.sh (migrations in the cluster), release.sh
+  ci/                                pipeline helper: release-notes.sh (the GitLab Release's description)
 frontend/
   src/app/core/          once per app: sign-in, HTTP interceptors, browser cache, error reporting
   src/app/features/products/
@@ -55,6 +55,7 @@ the same idea: `ui/` components receive data and emit events, they never call th
 | What is wired to what at startup? | [`Program.cs`](../../backend/ProductManagement.Api/Program.cs), [`CoreServiceCollectionExtensions.cs`](../../backend/ProductManagement.Core/CoreServiceCollectionExtensions.cs), [`InfrastructureServiceCollectionExtensions.cs`](../../backend/ProductManagement.Infrastructure/InfrastructureServiceCollectionExtensions.cs) | [`app.config.ts`](../../frontend/src/app/app.config.ts), [`app.routes.ts`](../../frontend/src/app/app.routes.ts) |
 | How does the page stay up to date? | — | [`products-store.ts`](../../frontend/src/app/features/products/data-access/products-store.ts) |
 | How is the database shaped? | [`ProductConfiguration.cs`](../../backend/ProductManagement.Infrastructure/Persistence/Configurations/ProductConfiguration.cs), [`Migrations/`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations) | — |
+| How does the database get its schema? | [`DatabaseMigrator.cs`](../../backend/ProductManagement.Infrastructure/Persistence/DatabaseMigrator.cs): every API pod applies the pending migrations when it starts, as the schema owner, one pod at a time (an advisory lock), before [`Program.cs`](../../backend/ProductManagement.Api/Program.cs) starts the server; [`MigrationsAtStartupTests.cs`](../../backend/ProductManagement.Api.IntegrationTests/Persistence/MigrationsAtStartupTests.cs) |
 
 ## One click, file by file
 

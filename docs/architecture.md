@@ -45,9 +45,8 @@ flowchart LR
         subgraph pm["namespace product-management"]
             gw["<b>gateway</b> nginx ×2–6 (HPA)<br/>rate limit · JWT check · microcache<br/>(frontend)"]
             web["<b>web</b> nginx ×2<br/>Angular files<br/>(frontend)"]
-            api["<b>api</b> ASP.NET Core ×2–8 (HPA)<br/>headless Service api<br/>(backend)"]
+            api["<b>api</b> ASP.NET Core ×2–8 (HPA)<br/>headless Service api<br/>migrates the schema at startup<br/>(backend)"]
             sec["Secrets api-secrets,<br/>database-credentials, redis-credentials,<br/>gitlab-registry (staging, production)"]
-            mig["migrate pod, one-off<br/>as pm_migrator, before the rollout"]
         end
         subgraph inf["namespace infra (shared)"]
             pg[("<b>PostgreSQL 18</b> StatefulSet<br/>pm_app · pm_migrator")]
@@ -61,10 +60,9 @@ flowchart LR
 
     gw --> web
     gw -->|"/api, per request"| api
-    sec -.->|"PGPASSWORD · Redis__Password"| api
-    api -->|"postgres.infra:5432"| pg
+    sec -.->|"PGPASSWORD · Database__MigratorPassword<br/>Redis__Password"| api
+    api -->|"postgres.infra:5432<br/>requests as pm_app,<br/>migrations as pm_migrator"| pg
     api -->|"redis.infra:6379"| rd
-    mig --> pg
     bk --> pg
     gw -->|"/collect<br/>browser errors"| alloy
     alloy --> loki
@@ -85,8 +83,8 @@ cluster-internal, and from a laptop they are reached with `kubectl port-forward`
 | `gateway`      | product-management | ClusterIP; `LoadBalancer` in the local environment | 8080 | gateway pods | you (http://localhost:8080), k6; the Ingress in staging and production | The only entry from outside. |
 | `web`          | product-management | ClusterIP               | 8080 | web pods                | gateway                                       | The Angular app's static files (HTML, JS, CSS). |
 | `api`          | product-management | ClusterIP **None** (headless) | 8080 | api pods          | gateway                                       | **The API's only Service.** No virtual IP: `api.product-management.svc.cluster.local` returns **every ready API pod's IP**. nginx re-resolves it every 5 s and balances **per request** to the least busy pod, so new replicas get traffic at once. Also where the gateway downloads the JWKS. |
-| `postgres`     | infra              | ClusterIP               | 5432 | postgres pod (StatefulSet) | api, the migrate pod, the backup CronJob, `create-database.sh` (through `kubectl exec`) | PostgreSQL 18: one database per service. `postgres.infra.svc.cluster.local`. |
-| `redis`        | infra              | ClusterIP               | 6379 | redis pod               | api, the migrate pod                          | Redis 8, password protected. `redis.infra.svc.cluster.local`. |
+| `postgres`     | infra              | ClusterIP               | 5432 | postgres pod (StatefulSet) | api (requests as `pm_app`, its migrations at startup as `pm_migrator`), the backup CronJob, `create-database.sh` (through `kubectl exec`) | PostgreSQL 18: one database per service. `postgres.infra.svc.cluster.local`. |
+| `redis`        | infra              | ClusterIP               | 6379 | redis pod               | api                                           | Redis 8, password protected. `redis.infra.svc.cluster.local`. |
 | `loki`         | infra              | ClusterIP               | 3100 | loki pod (StatefulSet)  | alloy (push), grafana (queries); you through a port-forward | The logs, 14 days. |
 | `grafana`      | infra              | ClusterIP               | 3000 | grafana pod             | you: `kubectl -n infra port-forward svc/grafana 3000:3000` | Dashboards and alerts. |
 | `alloy-faro`   | infra              | ClusterIP               | 12347 | alloy pod (`faro.receiver`) | gateway (`POST /collect`)              | The browser's error reports; a NetworkPolicy (`alloy-ingress`) admits only the gateway pods of `product-management`. |
@@ -101,7 +99,7 @@ port-forward the Deployment (`kubectl -n product-management port-forward deploym
 | ------------------------------ | ----- | ----------- | ------------ |
 | `gateway`                      | `product-management` | Deployment, 2–6 (HPA) | nginx: the edge. Per-IP rate limit, **verifies every access token** (njs `jwt.js`, ES256 with the API's public key), gives every request a W3C trace id (`trace.js`), security headers and CSP, gzip, caches static files (7 days) and API reads (1 s, shared per role), routes `/api`, `/collect` and `/`. |
 | `web`                          | `product-management` | Deployment ×2 | nginx serving the built Angular app; long cache for hashed bundles, no cache for `index.html`. |
-| `api`                          | `product-management` | Deployment, 2–8 (HPA) | The REST API. Issues tokens and validates them again on every request. Stateless: anything shared (cache generations, idempotency keys, rate-limit buckets, failed sign-ins) is in Redis, so any replica can serve any request. Never migrates the database (`ApplyMigrationsOnStartup=false`). |
+| `api`                          | `product-management` | Deployment, 2–8 (HPA) | The REST API. Issues tokens and validates them again on every request. Stateless: anything shared (cache generations, idempotency keys, rate-limit buckets, failed sign-ins) is in Redis, so any replica can serve any request. Each new pod first applies the pending EF Core migrations (and the sample data where configured) as `pm_migrator`, under a PostgreSQL advisory lock so replicas starting together take turns, then serves as `pm_app`; a failed migration keeps the pod unready while the old ones serve. |
 | `alloy`                        | `infra` | Deployment ×1 | Reads the log of every pod in every namespace through the Kubernetes API (the shared infrastructure's included; only its own is dropped), parses the gateway's and the API's JSON lines (`trace_id`, `level`) and PostgreSQL's multi-line statements, and pushes them to Loki (or to another Loki: `LOKI_URL`). Also receives the browser's error reports (`faro.receiver`, from the gateway's `/collect`) and writes them to Loki as `namespace="browser"`. Optional: without it the gateway is deployed with `LOGS=off` and answers `/collect` with 204. |
 | `api` / `gateway` HPA          | `product-management` | HorizontalPodAutoscaler | Add pods when average CPU passes 60 % (API) / 70 % (gateway) of the request; remove them after 3 minutes of lower load. |
 | `metrics-server`               | `kube-system` | Deployment | Reports pod CPU/memory to the HPAs and to `kubectl top`. Installed by `deploy/scripts/infra.sh up` when the cluster has none (k3s and most managed clusters ship it). |
@@ -110,16 +108,15 @@ port-forward the Deployment (`kubectl -n product-management port-forward deploym
 | `postgres-backup`              | `infra` | CronJob | Every night at 02:30: the roles (`pg_dumpall --globals-only`) and each database (`pg_dump -Fc`) into the volume `postgres-backups`, kept 7 days. On the same node as the data: protects against mistakes, not against losing the node. `deploy/infra/postgres.yaml`. |
 | `redis`                        | `infra` | Deployment ×1 | Redis 8: memory only, `volatile-lru`, password (Secret `redis-auth`), dangerous commands disabled (`deploy/infra/redis.yaml`). A Deployment, not a StatefulSet: nothing to keep. Losing it costs performance, never correctness (the database's unique request key still stops duplicates; keyed requests are refused while it is down). Prefers a node labelled `infra/role=cache`. |
 | `loki`, `grafana`              | `infra` | StatefulSet ×1, Deployment ×1 | Loki stores every log for 14 days (volume `data-loki-0`); Grafana shows them: two dashboards (*Product Management*, *Logs*), 12 LogQL alert rules ([guide chapter 8](guide/08-observability.md)), all provisioned from ConfigMaps, so Grafana keeps no data of its own. `deploy/infra/logs.yaml`, `deploy/infra/dashboards/`; optional, or replaced by another Loki (`LOKI_URL`). |
-| `migrate-<version>`            | `product-management` | Pod (temporary) | The API image run with `migrate` (`kubectl run --rm --attach`, by `deploy/scripts/migrate.sh`, which `deploy/scripts/deploy.sh` runs for every environment): waits for PostgreSQL, applies the EF Core migrations and seeding as `pm_migrator` (credentials from `database-credentials`), moves the Redis cache generations on; once per deployment, with the API version the environment names, before it is rolled out. |
 
 ### Configuration and protection
 
 | Object                          | What it holds / does |
 | ------------------------------- | -------------------- |
-| API environment                 | Every setting as a plain env entry in `deploy/apps/backend/deployment.yaml` (token lifetime, rate limits, sign-in throttle, idempotency lifetimes, `ApplyMigrationsOnStartup=false`); each environment's `api.yaml` sets what differs and always `ConnectionStrings__ProductManagement` (user `pm_app`, pool of 10 per replica, no password) and `ConnectionStrings__Redis` (no password). A change rolls the pods. |
+| API environment                 | Every setting as a plain env entry in `deploy/apps/backend/deployment.yaml` (token lifetime, rate limits, sign-in throttle, idempotency lifetimes, `ApplyMigrationsOnStartup=true` with the migrator's user and password from `database-credentials`); each environment's `api.yaml` sets what differs and always `ConnectionStrings__ProductManagement` (user `pm_app`, pool of 10 per replica, no password), `ConnectionStrings__Redis` (no password) and `Database__SeedSampleData` (`true` locally and in staging, `false` in production). A change rolls the pods. |
 | Secret `api-secrets`            | The API's own keys: `signing-key` → `Authentication__SigningKey`, the ES256 (P-256) private key that signs access tokens (only the API holds it; verifiers get the public key from `/.well-known/jwks.json`); `consumers.json` → the file `/app/config/consumers.json` (client id, PBKDF2 hash of the secret, roles). Locally `api-secrets-<hash>`, generated from `deploy/environments/local/generated/`; in staging and production made by `deploy/scripts/deploy.sh` from the deploy project's CI/CD variables `API_SIGNING_KEY`, `API_CONSUMERS`. |
 | Secret `gitlab-registry`        | Staging and production only: the credential every pod pulls its image with (`imagePullSecrets`), from the `zeiss` group's deploy token `gitlab-deploy-token` (`read_registry`, reads both registries). Made by `deploy/scripts/deploy.sh` (the migration pod pulls with it too). |
-| Secret `database-credentials`   | Made by `deploy/scripts/create-database.sh` (random passwords, kept on re-runs unless `--rotate`): `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password`. The API takes `app-password` → `PGPASSWORD` (Npgsql uses it when the connection string has none, the readiness check's connection too); the migrate pod takes the migrator's user and password and the address. |
+| Secret `database-credentials`   | Made by `deploy/scripts/create-database.sh` (random passwords, kept on re-runs unless `--rotate`): `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password`. The API takes `app-password` → `PGPASSWORD` (Npgsql uses it when the connection string has none, the readiness check's connection too), and `migrator-user` / `migrator-password` → `Database__MigratorUsername` / `Database__MigratorPassword` for its migration step at startup. |
 | Secret `redis-credentials`      | `password` → `Redis__Password`: a copy of the shared Redis' password (`infra/redis-auth`), made by `deploy/scripts/deploy.sh` on every deploy, because a pod can only read the Secrets of its own namespace. |
 | Secrets in `infra`              | `postgres-admin` (PostgreSQL's superuser), `redis-auth` (Redis): random, created once by `deploy/scripts/infra.sh up`, kept by `down` unless `--delete-data`; `loki-external` only with `LOKI_URL`. |
 | Gateway environment             | Per-IP rate limit, `GATEWAY_TRUSTED_PROXIES` (the Ingress controller in staging and production), `JWT_ISSUER`, `JWT_AUDIENCE` (`deploy/apps/frontend/gateway.yaml`); per environment `API_UPSTREAM`, `JWKS_URL`, `COLLECTOR_UPSTREAM` (`deploy/environments/<env>/gateway.yaml`). |

@@ -35,10 +35,10 @@ Checked against the running system by `tools/check-requirements.py` (14 checks, 
 | Unique 6-digit id, no duplicates with multiple instances | ✅ | PostgreSQL sequence `100000–999999`; 40 concurrent creates over the replicas → 40 unique ids; 850,024 products unique ([ADR 0002](../adr/0002-product-id-generation.md), [chapter 5](05-stock-and-consistency.md)) |
 | Validation of create and update | ✅ | 400 with the invalid fields named; domain guards; database CHECKs |
 | Stock in every list response | ✅ | checked on all three list endpoints |
-| EF Core code-first migrations | ✅ | `Persistence/Migrations`, applied once per deployment, before the rollout, with the API image being deployed, as the schema owner `pm_migrator` (`deploy/scripts/deploy.sh local` locally, the backend pipeline's `migrate:*` jobs in GitLab; large indexes built `CONCURRENTLY`) |
+| EF Core code-first migrations | ✅ | `Persistence/Migrations`, applied by the API itself when it starts, before it serves, as the schema owner `pm_migrator`, one replica at a time (a PostgreSQL advisory lock); the same in every environment; large indexes built `CONCURRENTLY` |
 | Database seeding | ✅ | sample data via `UseSeeding`; bulk data via `tools/load-tests/seed-bulk.sh` |
 | Angular frontend consuming the API, reflecting changes made through the API | ✅ | every endpoint used; background refresh; E2E suite ([chapter 7](07-frontend.md)) |
-| Unit tests for various scenarios; BDD optional | ✅ | 381 back-end tests (212 unit, 153 integration, 16 Reqnroll BDD scenarios); 187 front-end tests; 22 E2E ([chapter 10](10-testing-and-quality.md)) |
+| Unit tests for various scenarios; BDD optional | ✅ | 390 back-end tests (219 unit, 155 integration, 16 Reqnroll BDD scenarios); 187 front-end tests; 22 E2E ([chapter 10](10-testing-and-quality.md)) |
 | Documentation for running locally | ✅ | [README](../../README.md) "Run it"; this guide |
 
 ## 2. Quality expectations
@@ -46,7 +46,7 @@ Checked against the running system by `tools/check-requirements.py` (14 checks, 
 | Expectation | Status | Where |
 | --- | :---: | --- |
 | Clean architecture, thin controllers | ✅ | [ADR 0001](../adr/0001-clean-architecture.md); front-end layers data-access / feature / ui ([ADR 0007](../adr/0007-frontend-state.md)) |
-| SOLID, reviewed | ✅ | back-end review applied: the `migrate` command builds only the infrastructure services, so migrations need only a database connection string, never the token signing key; every options class is validated at start-up (`ValidateOnStart`); the API refuses to start without Redis outside Development, instead of silently running with per-replica idempotency and limits |
+| SOLID, reviewed | ✅ | back-end review applied: the migrations at startup use their own short-lived connection with the migrator's credentials, never the request pool; every options class is validated at start-up (`ValidateOnStart`); the API refuses to start without Redis outside Development, instead of silently running with per-replica idempotency and limits |
 | Decisions, assumptions and trade-offs documented | ✅ | the [ADRs](../adr/README.md); README "Assumptions" and "Trade-offs"; this guide |
 | API design, validation, error handling | ✅ | RFC 9457 problem details with stable `errorCode`s ([ADR 0005](../adr/0005-error-handling.md)) |
 | EF Core best practices, concurrency | ✅ | no-tracking projections, `xmin` + ETag/If-Match, atomic stock updates, idempotency in the database |
@@ -65,7 +65,7 @@ Checked against the running system by `tools/check-requirements.py` (14 checks, 
 | Exactly-once writes | ✅ | Idempotency-Key + unique request key in the ledger ([ADR 0017](../adr/0017-idempotency-keys.md)) |
 | Browser security | ✅ | strict CSP, no third-party requests, COOP/CORP, Permissions-Policy ([ADR 0019](../adr/0019-content-security-policy.md)) |
 | Fail fast on bad configuration | ✅ | signing key, consumers and every options section validated at start-up; no Redis outside Development → the API does not start |
-| Database privileges | ✅ | the API's user `pm_app` reads and writes rows only (`CREATE`, `ALTER`, `DROP` refused), 30 s statement timeout; only the migration step, a one-off pod, uses the schema owner `pm_migrator`; users from [`create-database.sh`](../../deploy/scripts/create-database.sh), grants from the migration [`GrantAppPermissions`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs) |
+| Database privileges | ✅ | the API's user `pm_app` reads and writes rows only (`CREATE`, `ALTER`, `DROP` refused), 30 s statement timeout; only the API's migration step at startup (its own unpooled connection, closed before it serves) uses the schema owner `pm_migrator`; users from [`create-database.sh`](../../deploy/scripts/create-database.sh), grants from the migration [`GrantAppPermissions`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs) |
 | Network | ⚠️ | NetworkPolicies: the API and the web pods accept connections only from the gateway. **Not enforced on Docker Desktop** (its network plugin ignores them; verified: a web pod reaches an API pod). Enforced on k3s and on production clusters with Calico or Cilium. PostgreSQL and Redis (namespace `infra`) are reachable only inside the cluster and protected by random credentials; between nodes only the k3s ports are open ([chapter 12](12-from-zero.md)). |
 | Containers | ⚠️ | api, web: non-root, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp. gateway: the same, but with a writable root filesystem (nginx renders its configuration at start-up). |
 | Secrets | ⚠️ | no password in any YAML, connection string or CI/CD variable: the database and Redis passwords are random and live only in the cluster (`database-credentials` from `deploy/scripts/create-database.sh`, `redis-credentials` copied by the deploy); the API's own keys in `api-secrets`, locally generated on each machine (`deploy/scripts/local-secrets.sh`, gitignored), staging and production from the deploy project's protected CI/CD variables (`deploy/scripts/deploy.sh`; the deploy pipeline fails if a Secret appears in their environment folders). Next: a secret manager (External Secrets / Vault) |
@@ -112,8 +112,8 @@ Checked against the running system by `tools/check-requirements.py` (14 checks, 
 | Item | Status | Notes |
 | --- | :---: | --- |
 | CI | ⚠️ | one GitLab pipeline per repository: build with warnings as errors, `dotnet format`, all test suites, lint, image scan (backend, frontend); every environment's manifests validated, shellcheck, the Alloy configuration (deploy); the PDF check and Playwright are run by hand against an environment; defined and validated against GitLab's CI schema, **not yet run on a GitLab instance** ([chapter 9](09-deployment-and-operations.md#cicd-pipelines)) |
-| CD to staging and production | ⚠️ | GitOps: backend (test → build → scan → migrate staging → release: a commit of the new tag to the deploy repository → manual migrate and release production: a merge request), frontend (test → build → scan → release staging → manual release production), deploy (validate → `deploy:staging` and smoke check on every change → manual `deploy:production` after a release merge request; manual infra jobs); rollback is a `git revert` in the deploy repository; **not yet run on a GitLab instance** ([chapter 12](12-from-zero.md)) |
-| Database migrations | ✅ | run once per deployment, before the rollout, by the image being deployed, as `pm_migrator`; large indexes built concurrently; expand/contract, never rolled back |
+| CD to staging and production | ⚠️ | GitOps with a pull model: backend and frontend (test → build → scan; a version tag publishes `X.Y.Z` and a GitLab Release), deploy (validate → `update:staging` on a schedule → `deploy:staging` and smoke check → `propose:production` merge request → manual `deploy:production`; manual infra jobs; the new API pods migrate the database as they start); rollback is `set-version.sh` with an older version; **not yet run on a GitLab instance** ([chapter 12](12-from-zero.md)) |
+| Database migrations | ✅ | applied by each new API version when its first pod starts, as `pm_migrator`, under an advisory lock (two instances starting together on an empty database: tested); a failure keeps the new pods unready while the old ones serve; large indexes built concurrently; expand/contract, never rolled back |
 | Independent deployment of each part | ✅ | the API and the web app are released on their own (each pipeline changes only its own image tags in the deploy repository); the shared infrastructure separately: `deploy/scripts/deploy.sh <environment> apps` or `infra`, locally `deploy/scripts/infra.sh up [postgres] [redis] [logs]` and `deploy/scripts/deploy.sh local` ([chapter 9](09-deployment-and-operations.md#the-layout-three-parts)) |
 | Environments | ✅ | one Kustomize folder each (`deploy/environments/local`, `staging`, `production`); the differences fit in one short file per environment |
 | GitOps | ⚠️ | the deploy repository is the only record of what runs (one commit per release, `git revert` to roll back) and only its pipeline changes the clusters, with `kubectl apply`; Argo CD pointed at `deploy/environments/<environment>` is the next step (pruning, drift detection) |
@@ -138,13 +138,13 @@ Environment work, in order, following the runbook in [chapter 12](12-from-zero.m
    the roles database, cache and apps) with a network plugin that enforces NetworkPolicies, Pod Security admission
    (`restricted`), a replicated Redis, and the HPAs' limits re-measured on the real nodes.
 6. **Client IPs** preserved by the load balancer in front of the Ingress controller; Argo CD (prepared in
-   `deploy/argocd/`: Applications, Image Updater, the migration as a PreSync hook).
+   `deploy/argocd/`: Applications, Image Updater; no migration hook needed).
 
 ## How to verify everything
 
 ```bash
 deploy/scripts/infra.sh up                 # PostgreSQL, Redis and the logs, in the namespace infra
-deploy/scripts/deploy.sh local             # database (first run), migrations, the API, the web app and the gateway
+deploy/scripts/deploy.sh local             # database (first run), the API (it migrates), the web app and the gateway
 python3 tools/check-requirements.py        # the PDF, 14 checks
 kubectl -n infra port-forward svc/grafana 3000:3000 &   # then http://localhost:3000: Grafana, dashboards, alert rules
 cd frontend && npm run e2e                 # Playwright, desktop and mobile

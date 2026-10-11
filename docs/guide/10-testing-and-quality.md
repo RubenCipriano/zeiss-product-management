@@ -12,11 +12,11 @@ prove, one real example of each, how to run every one of them, and the project a
 | Level | Suite | Tests | Runs against |
 | --- | --- | ---: | --- |
 | Unit | `UnitTests`, folder `Core/` | 116 | the domain as plain objects; the use cases with substitutes (NSubstitute) for their ports; validators |
-| Unit | `UnitTests`, folder `Infrastructure/` | 31 | registration, cache decorators, single-flight, in-memory fallbacks, Redis failures and cancellations |
+| Unit | `UnitTests`, folder `Infrastructure/` | 38 | registration, cache decorators, single-flight, in-memory fallbacks, Redis failures and cancellations, the migrations' connection |
 | Unit | `UnitTests`, folder `Api/` | 65 | token service, secret hashing, options validation, idempotency keys, rate-limit buckets, ETags |
-| Integration | `Api.IntegrationTests` | 153 | the real API over HTTP, with **real PostgreSQL and Redis** in Docker (Testcontainers) |
+| Integration | `Api.IntegrationTests` | 155 | the real API over HTTP, with **real PostgreSQL and Redis** in Docker (Testcontainers) |
 | Acceptance (BDD) | `Api.AcceptanceTests` | 16 | Gherkin scenarios (Reqnroll) against the same real stack |
-| **Back end total** | | **381** | `dotnet test` |
+| **Back end total** | | **390** | `dotnet test` |
 | Unit / component | front end (Vitest) | **187** (35 spec files) | Angular components, services and the store, in a simulated DOM |
 | End-to-end | Playwright | **22** | the running system (gateway, API, Redis, PostgreSQL) in a real browser: 11 scenarios × desktop and phone; the browser-errors scenario also reads Loki and is skipped when no Loki is reachable (e.g. `LOGS=off`) |
 | Requirements | `tools/check-requirements.py` | 14 checks | the running system, through the gateway |
@@ -41,7 +41,8 @@ request, version checks, conflicts mapped to 409/412, stock errors carrying the 
 
 **Infrastructure unit tests** (`Infrastructure/`) prove the wiring and the cache's own logic: the API refuses to start without Redis
 outside development, falls back to in-memory stores in development, rejects invalid options, invalidates only after a
-successful commit, collapses concurrent misses. Example: `WithoutRedis_WhenRedisIsRequired_RefusesToStart`
+successful commit, collapses concurrent misses, and connects the migrations as the migrator (unpooled, with a long
+command timeout). Example: `WithoutRedis_WhenRedisIsRequired_RefusesToStart`
 ([`InfrastructureRegistrationTests.cs`](../../backend/ProductManagement.UnitTests/Infrastructure/InfrastructureRegistrationTests.cs)).
 
 **API unit tests** (`Api/`) prove the security and HTTP building blocks: hashing, sign-in outcomes, key validation, request
@@ -60,6 +61,7 @@ against the same PostgreSQL and Redis, like two replicas.
 | Cache | hits, invalidation visible across instances, lists kept across stock changes yet showing the current stock, 404s not cached, works with Redis down | `StockChanges_KeepListsCached_WhileTheyStillShowTheCurrentStock` ([`CacheTests.cs`](../../backend/ProductManagement.Api.IntegrationTests/Products/CacheTests.cs)) |
 | Security | token endpoint (valid, invalid, missing, throttled, failures adding up across two instances); the 30-case role × operation matrix; missing, expired, foreign and forged tokens, `alg: none`, HS256 signed with the public key; JWKS without the private part | [`Security/`](../../backend/ProductManagement.Api.IntegrationTests/Security) |
 | Rate limits | per user, shared by two instances, stricter for writes, `Retry-After` | [`RateLimitingTests.cs`](../../backend/ProductManagement.Api.IntegrationTests/Security/RateLimitingTests.cs) |
+| Migrations at startup | two instances starting at once on an empty database (with the users of `create-database.sh`) both start and apply the schema once; it is owned by `pm_migrator`, and afterwards the API is connected as `pm_app` only | `TwoInstancesStartingTogether_OnAnEmptyDatabase_BothStart_AndMigrateItOnce` ([`MigrationsAtStartupTests.cs`](../../backend/ProductManagement.Api.IntegrationTests/Persistence/MigrationsAtStartupTests.cs)) |
 | Contract | every endpoint, problem details with stable `errorCode`s, the OpenAPI document | [`ApiBehaviourTests.cs`](../../backend/ProductManagement.Api.IntegrationTests/ApiBehaviourTests.cs) |
 
 **Acceptance tests (BDD)** state the behaviour in the business's words and run it against the real stack. Example
@@ -97,9 +99,9 @@ replicas, capacity, and that the data invariants hold afterwards ([chapter 6](06
 ## How to run them
 
 ```bash
-# Back end: 381 tests. Docker must be running (Testcontainers starts PostgreSQL and Redis).
+# Back end: 390 tests. Docker must be running (Testcontainers starts PostgreSQL and Redis).
 cd backend && dotnet test --solution ProductManagement.sln
-cd backend && dotnet test --project ProductManagement.UnitTests                 # one project: 212 unit tests, no Docker
+cd backend && dotnet test --project ProductManagement.UnitTests                 # one project: 219 unit tests, no Docker
 cd backend && dotnet test --project ProductManagement.UnitTests --filter-namespace "ProductManagement.UnitTests.Core*"   # one folder: 116
 
 # Front end: 187 tests, lint and format (ESLint and Prettier also cover e2e/)

@@ -68,7 +68,7 @@ There are three kinds of generation:
 | Generation | Moved by | Protects |
 | --- | --- | --- |
 | **data** (`catalog:generation`) | every write | stock-level pages |
-| **listing** (`catalog:listing-generation`) | create, update, delete, bulk seeding, and the `migrate` command when it is given the Redis connection | list and search counts and ids; product details; histories |
+| **listing** (`catalog:listing-generation`) | create, update, delete, bulk seeding, and the API's migration step at startup when it applied a migration or seeded sample data | list and search counts and ids; product details; histories |
 | **product** (`catalog:product:{id}:generation`, one per product) | any change to that product, stock included | that product's details and history |
 
 So keys look like these, read from the running Redis: `product-management:v1791571461580:products:all:count` and

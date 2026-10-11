@@ -15,7 +15,7 @@ the decision record (ADR) that explains why. The static picture (topology, compo
 | 6 | [Create a product, update with If-Match](#6-create-a-product-update-with-if-match) | sequences | `ProductCommandService`, `UnitOfWork` |
 | 7 | [Rate limiting](#7-rate-limiting) | flowchart | `SharedTokenBucketRateLimiter`, `RedisDistributedRateLimiter` |
 | 8 | [Frontend: the product list screen](#8-frontend-the-product-list-screen) | flowchart | `products-store.ts`, `products-api.ts` |
-| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `deploy/scripts/` (`deploy.sh`, `migrate.sh`, `infra.sh`, `create-database.sh`, `set-version.sh`, `update-versions.sh`), `ci/release-notes.sh`, `.gitlab-ci.yml` (×3) |
+| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `deploy/scripts/` (`deploy.sh`, `infra.sh`, `create-database.sh`, `set-version.sh`, `update-versions.sh`), `DatabaseMigrator.cs` (migrations at API startup), `ci/release-notes.sh`, `.gitlab-ci.yml` (×3) |
 | 10 | [Autoscaling](#10-autoscaling) | flowchart | `hpa.yaml`, `gateway.yaml`, `default.conf.template` |
 | 11 | [Load test and verification](#11-load-test-and-verification) | flowcharts | `tools/load-tests/`, `tools/check-requirements.py` |
 | 12 | [Logs, from a request to Grafana](#12-logs-from-a-request-to-grafana) | flowchart | `trace.js`, `logs.yaml` (Alloy's configuration), `browser-errors.ts` |
@@ -83,7 +83,7 @@ Entries under an old generation are simply never read again and expire on their 
 flowchart LR
     stock["stock change<br/>add-to-stock, decrement-stock<br/>CatalogChange.Stock"]
     edit["create, update, delete<br/>CatalogChange.Products"]
-    mig["migrate command<br/>(before each rollout)"]
+    mig["API startup, when it applied a migration<br/>or seeded sample data"]
 
     dg["data generation"]
     lg["listing generation"]
@@ -660,25 +660,67 @@ flowchart TD
         l3 -->|"no, first deploy"| d1["create-database.sh:<br/>kubectl exec psql in the postgres pod,<br/>database, users pm_migrator, pm_app,<br/>Secret database-credentials"]
         l3 -->|"yes"| l4
         d1 --> l4["Secret redis-credentials:<br/>copy of infra/redis-auth"]
-        l4 --> l5["migrate.sh local: kubectl run migrate pod,<br/>--rm --attach, the environment's API image,<br/>migrate as pm_migrator:<br/>migrations, seed, cache generations"]
-        l5 --> l6["kubectl apply -k environments/local<br/>secretGenerator api-secrets-hash"]
-        l6 --> l7["rollout status api, web, gateway"]
+        l4 --> l6["kubectl apply -k environments/local<br/>secretGenerator api-secrets-hash"]
+        l6 --> l7["rollout status api (15 min), web, gateway:<br/>each new api pod migrates<br/>as pm_migrator, then serves"]
     end
 
     i1 & i3 --> l0
     l7 --> done["http://localhost:8080"]
 ```
 
-`kubectl diff -k deploy/environments/local` compares the cluster with exactly what the last deploy applied. The
-migrations run inside the cluster because the database is reachable only there: `kubectl run --rm --attach` streams
-the pod's output, returns its exit code and leaves nothing behind. The API never migrates at start-up; its database
-user `pm_app` could not (what it may do is granted by the migration `GrantAppPermissions`). Code:
-[`deploy.sh`](../deploy/scripts/deploy.sh), [`migrate.sh`](../deploy/scripts/migrate.sh), [`infra.sh`](../deploy/scripts/infra.sh),
+`kubectl diff -k deploy/environments/local` compares the cluster with exactly what the last deploy applied. There is
+no migration step in the script: the database and its users must exist (`create-database.sh`), and the new API pods
+then apply the migrations themselves (next diagram). Code:
+[`deploy.sh`](../deploy/scripts/deploy.sh), [`infra.sh`](../deploy/scripts/infra.sh),
 [`postgres.yaml`](../deploy/infra/postgres.yaml), [`create-database.sh`](../deploy/scripts/create-database.sh),
 [`local-secrets.sh`](../deploy/scripts/local-secrets.sh),
 [`environments/local`](../deploy/environments/local/kustomization.yaml), [`collector.sh`](../frontend/gateway/collector.sh),
 [`DatabaseInitializer.cs`](../backend/ProductManagement.Infrastructure/Persistence/DatabaseInitializer.cs).
 Decision: [ADR 0021](adr/0021-deployment-layout.md).
+
+### Migrations at API startup
+
+Every API pod brings the schema up to date before it serves. Two pods of a new version starting together (a rollout
+with a surge, or a scale-up) take turns on a PostgreSQL advisory lock; the old version's pods keep serving meanwhile.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as new api pod A
+    participant B as new api pod B
+    participant PG as PostgreSQL<br/>(product_management)
+    participant K as Kubernetes
+
+    Note over A,B: Program.cs: InitializeDatabaseAsync() runs before app.RunAsync(),<br/>so neither pod answers /health/* yet (startup probe: up to 10 min)
+    A->>PG: connect as pm_migrator (Database__MigratorUsername/Password),<br/>own unpooled connection, CanConnect (retries 30 × 2 s)
+    B->>PG: connect as pm_migrator, CanConnect
+    A->>PG: SELECT pg_try_advisory_lock(key)
+    PG-->>A: true (A holds the lock for its session)
+    B->>PG: SELECT pg_try_advisory_lock(key)
+    PG-->>B: false
+    Note over B: logs "Another instance is migrating the database,<br/>waiting for it to finish", asks again every 2 s
+    A->>PG: pending migrations? → MigrateAsync:<br/>each migration commits on its own (CREATE INDEX CONCURRENTLY<br/>outside a transaction), rows in __ef_migrations_history
+    A->>PG: seeding hook (SeedSampleData: 24 products into an empty table)
+    A->>A: cache generations move on (Redis), log "Database is up to date<br/>(N migrations applied as pm_migrator, … s)"
+    A->>PG: close the lock connection (the session ends: lock released)
+    A->>K: HTTP server starts → startup probe, then readiness passes → traffic
+    B->>PG: SELECT pg_try_advisory_lock(key)
+    PG-->>B: true
+    B->>PG: pending migrations? none → MigrateAsync is a no-op
+    B->>PG: close (lock released), log "Database is up to date (0 migrations …)"
+    B->>K: serves
+    Note over A,K: If a migration fails, A exits: CrashLoopBackOff, never ready.<br/>maxUnavailable 0 keeps every old pod serving, the rollout stops.<br/>If A dies holding the lock, its session ends and PostgreSQL releases it.
+```
+
+Why an advisory lock and not EF Core's own migration lock: the Npgsql provider implements that lock as
+`LOCK TABLE __ef_migrations_history` inside each migration's transaction, so it is released between two migrations
+(and around the `CONCURRENTLY` steps); B could slip in and apply a migration A already applied. Why B polls instead of
+blocking in `pg_advisory_lock`: a blocked statement holds a snapshot, and A's `CREATE INDEX CONCURRENTLY` waits for
+every older snapshot to end, so the two would wait for each other forever. Code:
+[`DatabaseMigrator.cs`](../backend/ProductManagement.Infrastructure/Persistence/DatabaseMigrator.cs),
+[`Program.cs`](../backend/ProductManagement.Api/Program.cs),
+[`deployment.yaml`](../deploy/apps/backend/deployment.yaml) (the startup probe, the migrator's credentials);
+tests: [`MigrationsAtStartupTests.cs`](../backend/ProductManagement.Api.IntegrationTests/Persistence/MigrationsAtStartupTests.cs).
 
 ### CI/CD pipelines (GitLab, GitOps, pull releases)
 
@@ -686,8 +728,8 @@ One pipeline per repository. The backend and the frontend only build and publish
 pipeline add the tag `X.Y.Z` to the tested and scanned image(s) and create a GitLab Release; they never touch the
 deploy repository or a cluster. The deploy repository pulls versions in: the scheduled `update:staging` commits the
 newest `X.Y.Z` to `environments/staging` on `main`, and `environments/production` changes through a merge request
-(`propose:production` or `set-version.sh`). Its pipeline is the only one that changes the clusters: it migrates
-(`migrate.sh`, with the environment's API image), applies what `main` holds and smoke-checks it. Each environment's
+(`propose:production` or `set-version.sh`). Its pipeline is the only one that changes the clusters: it applies what
+`main` holds (the new API pods migrate the database as they start) and smoke-checks it. Each environment's
 jobs exist once it is switched on (`STAGING_ENABLED`, `PRODUCTION_ENABLED`). Every job runs on gitlab.com's shared
 runners; the staging and production jobs have not yet run against real clusters.
 
@@ -717,9 +759,9 @@ flowchart TB
         direction LR
         du["update:staging<br/>pipeline schedule:<br/>set-version.sh staging all latest,<br/>commit to main"]
         dpp["propose:production<br/>manual: merge request<br/>with staging's versions"]
-        dv["<b>validate</b><br/>validate.sh (+ argocd/),<br/>shellcheck, alloy validate"] --> dds["deploy:staging<br/>deploy.sh staging apps:<br/>migrate.sh, apply"]
+        dv["<b>validate</b><br/>validate.sh (+ argocd/),<br/>shellcheck, alloy validate"] --> dds["deploy:staging<br/>deploy.sh staging apps:<br/>apply (the API migrates)"]
         dds --> dss["smoke:staging<br/>scripts/smoke.sh"]
-        dv --> ddp["deploy:production<br/>manual, after the merge:<br/>migrate.sh, apply"]
+        dv --> ddp["deploy:production<br/>manual, after the merge:<br/>apply (the API migrates)"]
         ddp --> dsp["smoke:production"]
         dv --> di["infra:staging, infra:production<br/>manual: deploy.sh env infra"]
     end
@@ -729,28 +771,26 @@ flowchart TB
     dpp -.->|"merged by a person<br/>environments/production"| dv
 ```
 
-`deploy:staging` runs when a commit on `main` changes `environments/staging`, `apps/`, `infra/`, `scripts/deploy.sh`
-or `scripts/migrate.sh`; `deploy:production` when it changes `environments/production`, `apps/` or those scripts, and
-waits for a person. A scheduled pipeline runs only `update:staging`. `deploy.sh` refuses an environment while an image
-still has `newTag: unreleased`, creates the Secrets `gitlab-registry` (the group deploy token) and `api-secrets` (the
-deploy project's `API_SIGNING_KEY`, `API_CONSUMERS`), copies `redis-credentials`, runs `migrate.sh` (a failure stops
-the deploy), applies and waits for the rollouts. The smoke check calls the public URL: `/healthz`, `/`, an unknown
-client's `POST /api/auth/token` (401 `invalid_client`), and with `SMOKE_CLIENT_ID` / `SMOKE_CLIENT_SECRET` a signed-in
-`GET /api/categories`. **Rollback** is `set-version.sh <env> <image> <older version>` (or a `git revert` of the
-version commit) in the deploy repository; the pipeline applies the older images. Migrations are never rolled back
-(expand/contract). The cluster jobs reach it through the GitLab agent for Kubernetes (`KUBE_CONTEXT`) or a kubeconfig
-(`KUBECONFIG`), so no runner needs to be inside the private network; no database or Redis password is a CI/CD
-variable, and the app repositories hold no credential of the deploy repository. With Argo CD (prepared in
-`deploy/argocd/`), Argo CD Image Updater replaces `update:staging`, a PreSync hook Job replaces `migrate.sh`, and
-Argo CD's sync replaces the deploy jobs. The end-to-end tests and the requirements check are not pipeline jobs: they
-run by hand against an environment. Code:
-[`backend/.gitlab-ci.yml`](../backend/.gitlab-ci.yml), [`release-notes.sh`](../backend/ci/release-notes.sh),
-[`frontend/.gitlab-ci.yml`](../frontend/.gitlab-ci.yml), [`deploy/.gitlab-ci.yml`](../deploy/.gitlab-ci.yml),
-[`migrate.sh`](../deploy/scripts/migrate.sh), [`set-version.sh`](../deploy/scripts/set-version.sh),
+`deploy:staging` runs when a commit on `main` changes `environments/staging`, `apps/`, `infra/` or `scripts/deploy.sh`;
+`deploy:production` when it changes `environments/production`, `apps/` or that script, and waits for a person. A
+scheduled pipeline runs only `update:staging`. `deploy.sh` refuses an environment while an image still has `newTag:
+unreleased`, creates the Secrets `gitlab-registry` (the group deploy token) and `api-secrets` (the deploy project's
+`API_SIGNING_KEY`, `API_CONSUMERS`), copies `redis-credentials`, applies and waits for the rollouts (a failed migration
+in the new API pods fails the wait, with the old pods still serving). The smoke check calls the public URL: `/healthz`,
+`/`, an unknown client's `POST /api/auth/token` (401 `invalid_client`), and with `SMOKE_CLIENT_ID` /
+`SMOKE_CLIENT_SECRET` a signed-in `GET /api/categories`. **Rollback** is `set-version.sh <env> <image> <older version>`
+(or a `git revert` of the version commit) in the deploy repository; the pipeline applies the older images. Migrations
+are never rolled back (expand/contract). The cluster jobs reach it through the GitLab agent for Kubernetes
+(`KUBE_CONTEXT`) or a kubeconfig (`KUBECONFIG`), so no runner needs to be inside the private network; no database or
+Redis password is a CI/CD variable, and the app repositories hold no credential of the deploy repository. With Argo CD
+(prepared in `deploy/argocd/`), Argo CD Image Updater replaces `update:staging` and Argo CD's sync replaces the deploy
+jobs; the migrations need nothing (the API migrates itself). The end-to-end tests and the requirements check are not
+pipeline jobs: they run by hand against an environment. Code: [`backend/.gitlab-ci.yml`](../backend/.gitlab-ci.yml),
+[`release-notes.sh`](../backend/ci/release-notes.sh), [`frontend/.gitlab-ci.yml`](../frontend/.gitlab-ci.yml),
+[`deploy/.gitlab-ci.yml`](../deploy/.gitlab-ci.yml), [`set-version.sh`](../deploy/scripts/set-version.sh),
 [`update-versions.sh`](../deploy/scripts/update-versions.sh), [`validate.sh`](../deploy/scripts/validate.sh),
 [`smoke.sh`](../deploy/scripts/smoke.sh), [`environments/staging`](../deploy/environments/staging/kustomization.yaml),
-[`argocd/`](../deploy/argocd).
-Setup: [guide chapter 12](guide/12-from-zero.md).
+[`argocd/`](../deploy/argocd). Setup: [guide chapter 12](guide/12-from-zero.md).
 
 ---
 

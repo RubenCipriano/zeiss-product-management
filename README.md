@@ -42,7 +42,7 @@ With Docker Desktop's Kubernetes enabled (Settings → Kubernetes), from this fo
 ```bash
 kubectl config use-context docker-desktop
 deploy/scripts/infra.sh up        # namespace infra: PostgreSQL, Redis, Loki + Grafana + Alloy (+ metrics-server)
-deploy/scripts/deploy.sh local    # database and keys (first run), api + web + gateway images, migrations, rollout
+deploy/scripts/deploy.sh local    # database and keys (first run), api + web + gateway images, rollout (the API migrates)
 open http://localhost:8080        # (macOS) sign in as viewer/viewer, clerk/clerk or manager/manager
 ```
 
@@ -98,10 +98,11 @@ The API with `dotnet run` and the Angular dev server with `npm start`, for worki
 
 Every environment is a folder of the deploy repository (`deploy/environments/local`, `staging`, `production`) and is
 applied by `deploy/scripts/deploy.sh <environment> [infra|apps|all]`: locally by hand, in staging and production by
-the deploy repository's pipeline, which first migrates the database with the environment's API version
-(`deploy/scripts/migrate.sh`). A release is a version tag in backend or frontend (`v1.4.0`): its pipeline publishes
-the images `X.Y.Z`; the deploy repository pulls them in (a scheduled job commits the newest versions to
-`deploy/environments/staging`; production changes through a merge request made with `deploy/scripts/set-version.sh`).
+the deploy repository's pipeline. The database schema needs no step of its own: each new API pod applies its
+version's EF Core migrations when it starts (as the schema owner, one pod at a time), before it serves. A release is a
+version tag in backend or frontend (`v1.4.0`): its pipeline publishes the images `X.Y.Z`; the deploy repository pulls
+them in (a scheduled job commits the newest versions to `deploy/environments/staging`; production changes through a
+merge request made with `deploy/scripts/set-version.sh`).
 A rollback is the same command with an older version. The shared infrastructure, databases and passwords, nodes,
 CI/CD variables and Argo CD: [deploy/README.md](deploy/README.md). Each application's pipeline and how to release a
 version: [backend/README.md](backend/README.md#ci), [frontend/README.md](frontend/README.md#ci). The full
@@ -120,10 +121,9 @@ infrastructure any service on the cluster can use). Only the gateway is reachabl
 | --- | --- | --- | --- |
 | Namespace `product-management` | **gateway** (nginx, 2–6 pods, HPA): the only way in; per-IP rate limit, token check, 1 s microcache per role, routing | frontend | `deploy/apps/frontend/`; Service `gateway`, `LoadBalancer` on localhost:8080 locally (staging/production: an Ingress with TLS) |
 | | **web** (nginx, 2 pods): the Angular files | frontend | `deploy/apps/frontend/` |
-| | **api** (ASP.NET Core, 2–8 pods, HPA): its only Service, `api`, is headless, so the gateway balances per request and new pods get traffic at once. Its configuration is plain environment variables in the Deployment; the connection strings name `postgres.infra.svc.cluster.local:5432` and `redis.infra.svc.cluster.local:6379` | backend | `deploy/apps/backend/`; the connection strings in `deploy/environments/<environment>/api.yaml` (the same addresses in every environment) |
-| | **Secrets**: `api-secrets` (the token signing key, the registered consumers), `database-credentials` (the database users and passwords), `redis-credentials` (a copy of the Redis password) | deploy | `api-secrets`: `deploy/scripts/local-secrets.sh` locally, `deploy/scripts/deploy.sh` from the deploy project's CI/CD variables elsewhere; `database-credentials`: `deploy/scripts/create-database.sh`; `redis-credentials`: `deploy/scripts/deploy.sh` |
-| | **migrate pod** (temporary): the API image run with `migrate` as `pm_migrator`, before every rollout | backend | `deploy/scripts/migrate.sh`, run by `deploy/scripts/deploy.sh` for every environment (locally and in the deploy pipeline), before the rollout |
-| Namespace `infra` | **postgres** (StatefulSet, 1 pod): PostgreSQL 18, one database per service, data on the volume `data-postgres-0` (20 GiB); users `pm_migrator` (owns the schema, runs migrations) and `pm_app` (the API: rows only, 30 s statement timeout) | deploy | `deploy/infra/postgres.yaml`, `deploy/scripts/create-database.sh` |
+| | **api** (ASP.NET Core, 2–8 pods, HPA): its only Service, `api`, is headless, so the gateway balances per request and new pods get traffic at once. Each new pod first applies the database migrations as `pm_migrator` (a PostgreSQL advisory lock lets one pod at a time do it), then serves as `pm_app`. Its configuration is plain environment variables in the Deployment; the connection strings name `postgres.infra.svc.cluster.local:5432` and `redis.infra.svc.cluster.local:6379` | backend | `deploy/apps/backend/`; the connection strings in `deploy/environments/<environment>/api.yaml` (the same addresses in every environment) |
+| | **Secrets**: `api-secrets` (the token signing key, the registered consumers), `database-credentials` (the database users and passwords; the API reads `pm_app`'s for its requests and `pm_migrator`'s for its migrations), `redis-credentials` (a copy of the Redis password) | deploy | `api-secrets`: `deploy/scripts/local-secrets.sh` locally, `deploy/scripts/deploy.sh` from the deploy project's CI/CD variables elsewhere; `database-credentials`: `deploy/scripts/create-database.sh`; `redis-credentials`: `deploy/scripts/deploy.sh` |
+| Namespace `infra` | **postgres** (StatefulSet, 1 pod): PostgreSQL 18, one database per service, data on the volume `data-postgres-0` (20 GiB); users `pm_migrator` (owns the schema; the API's migration step at startup) and `pm_app` (the API: rows only, 30 s statement timeout) | deploy | `deploy/infra/postgres.yaml`, `deploy/scripts/create-database.sh` |
 | | **postgres-backup** (CronJob): every night at 02:30 a `pg_dump` of every database into the volume `postgres-backups`, kept 7 days | deploy | `deploy/infra/postgres.yaml` |
 | | **redis** (Deployment, 1 pod): Redis 8 for cache, idempotency keys, rate limits, failed sign-ins; memory only, password | deploy | `deploy/infra/redis.yaml` |
 | | **loki** (StatefulSet; stores the logs, 14 days, volume `data-loki-0`) and **grafana** (Deployment; two dashboards, 12 alert rules, all provisioned from ConfigMaps). Optional | deploy | `deploy/infra/logs.yaml`, `deploy/infra/dashboards/` |
@@ -212,7 +212,7 @@ cd frontend && npm ci && npm start    # http://localhost:4200; /api proxied to :
 ## Tests
 
 ```bash
-cd backend && dotnet test --solution ProductManagement.sln     # 381 tests (Docker must be running)
+cd backend && dotnet test --solution ProductManagement.sln     # 390 tests (Docker must be running)
 cd frontend && npm run test:ci                                   # 187 tests
 cd frontend && npm run e2e                                       # 22 Playwright tests against the running system
 python3 tools/check-requirements.py                              # the assessment PDF, checked against the running system
@@ -223,9 +223,9 @@ deploy/scripts/validate.sh                                       # every environ
 | Suite                                 | Tests | What it proves |
 | ------------------------------------- | ----: | -------------- |
 | `UnitTests`, folder `Core/`           | 116 | **Domain:** invariants (six-digit ids, price precision, stock range); a failed update leaves no partial changes; the stock rule at its edges, including deltas that would overflow naive arithmetic. **Use cases:** validation first, no id consumed by invalid requests, version checks, conflicts mapped to 409/412, stock errors carry the available quantity, an exhausted id sequence becomes `product.ids_exhausted`; validators at their boundaries. |
-| `UnitTests`, folder `Infrastructure/` | 31 | Registration (refuses to start without Redis outside development, in-memory fallbacks in development, invalid options rejected), cache invalidation only after a successful commit, single-flight, the caching decorator, a cancelled or abandoned Redis command treated like a Redis outage. |
+| `UnitTests`, folder `Infrastructure/` | 38 | Registration (refuses to start without Redis outside development, in-memory fallbacks in development, invalid options rejected), cache invalidation only after a successful commit, single-flight, the caching decorator, a cancelled or abandoned Redis command treated like a Redis outage, the migrations' connection (the migrator's user and password, unpooled, a long command timeout). |
 | `UnitTests`, folder `Api/`            | 65 | Token service (blocked callers refused before checking credentials), PBKDF2 secret hashing, authentication options validation, idempotency key rules and request fingerprints, the shared token-bucket rate limiter, `If-Match` and `If-None-Match` parsing. |
-| `Api.IntegrationTests`                | 153 | Real HTTP against **real PostgreSQL and Redis** (Testcontainers). Every endpoint and the problem-details contract. **Concurrency:** 60 parallel orders on 25 units → exactly 25 succeed; no lost updates; two API instances never produce a duplicate id. **Ledger:** every kind of change recorded, ledger sum = stock under concurrency. **Idempotency:** 20 simultaneous copies over two replicas run once; a retry on the other replica is replayed; a retry after Redis lost the claim is still not applied twice (database guard), for stock changes and creates; reused or invalid keys refused, also when Redis has forgotten the key (`422` from the ledger); no Redis → refused rather than risk a duplicate. **Ids:** an exhausted sequence answers `503 product.ids_exhausted`. **Conditional GET:** `If-None-Match` with the current `ETag` → `304`. **Readiness:** stays ready while the request pool is saturated. **Cache:** hits, invalidation visible across replicas, lists kept across stock changes yet showing current stock, 404s not cached, works with Redis down. **Security:** token endpoint (valid, invalid, missing, throttled, failed attempts adding up across two replicas); 30-case role × operation matrix; missing, expired, foreign and forged tokens, `alg: none`, HS256 signed with the public key; the published JWKS has no private part and matches the tokens' `kid`; anonymous probes. **Rate limiting:** per user, shared by two replicas, stricter for writes, `Retry-After`. |
+| `Api.IntegrationTests`                | 155 | Real HTTP against **real PostgreSQL and Redis** (Testcontainers). Every endpoint and the problem-details contract. **Concurrency:** 60 parallel orders on 25 units → exactly 25 succeed; no lost updates; two API instances never produce a duplicate id. **Ledger:** every kind of change recorded, ledger sum = stock under concurrency. **Idempotency:** 20 simultaneous copies over two replicas run once; a retry on the other replica is replayed; a retry after Redis lost the claim is still not applied twice (database guard), for stock changes and creates; reused or invalid keys refused, also when Redis has forgotten the key (`422` from the ledger); no Redis → refused rather than risk a duplicate. **Ids:** an exhausted sequence answers `503 product.ids_exhausted`. **Conditional GET:** `If-None-Match` with the current `ETag` → `304`. **Readiness:** stays ready while the request pool is saturated. **Cache:** hits, invalidation visible across replicas, lists kept across stock changes yet showing current stock, 404s not cached, works with Redis down. **Security:** token endpoint (valid, invalid, missing, throttled, failed attempts adding up across two replicas); 30-case role × operation matrix; missing, expired, foreign and forged tokens, `alg: none`, HS256 signed with the public key; the published JWKS has no private part and matches the tokens' `kid`; anonymous probes. **Rate limiting:** per user, shared by two replicas, stricter for writes, `Retry-After`. **Migrations at startup:** two API instances starting at once on an empty database both start and migrate it once; the schema is owned by `pm_migrator` and the API stays connected as `pm_app` only. |
 | `Api.AcceptanceTests` (BDD, Reqnroll) | 16 | Gherkin scenarios from the user's point of view (`Features/*.feature`): create, browse with stock, search, low stock, update, delete, conflicting edits, invalid details naming each problem, stock in and out, no overselling, unknown products → not found. |
 | Frontend (Vitest)                     | 187 | API client contract (URLs, `If-Match`, `Idempotency-Key`, cache bypass after own changes), **browser cache** (fresh hit without a request, stale-while-revalidate, bypass, cleared after writes, LRU eviction), store (next-page prefetch, page change vs background refresh), pipes, progress bar, stock history dialog, a retried stock change reuses its key, login opened without `returnUrl`, error normalisation, store (no duplicate requests, no flicker, background refresh paused in hidden tabs), auth (login against the token endpoint, session restore and expiry, role → permission mapping, guard, interceptor never leaks the token to other origins), login page (safe `returnUrl`, 401/429 messages), dialogs (validation, server field errors, 412 conflict + reload of the latest version past the gateway's microcache), role-specific UI, paginator, toasts, the product table's caption for screen readers, **browser error reporting** (errors only, queued until the SDK loads, no query string or token sent, never throws, off in dev mode), idempotency keys also over plain HTTP on a server's address. 35 spec files. |
 | End-to-end (Playwright)               | 22 | 11 scenarios on a desktop and a phone viewport against the running system: sign-in per role, the manager's full journey, paging served by the browser cache, security headers, `401` at the gateway, missing files are `404`, a real error thrown in the page read back from Loki (skipped when no Loki is reachable, e.g. with `LOGS=off`); any CSP violation or uncaught error fails the test. |
@@ -243,7 +243,7 @@ The GitLab pipelines, one per repository:
   prepared Argo CD objects with `deploy/scripts/validate.sh`, kubeconform and the project's rules, no Secret where
   there must be none; `validate:scripts`: shellcheck; `validate:alloy`: `alloy validate` and `alloy fmt`) →
   `update:staging` on a pipeline schedule (the newest published versions, committed to main) → `deploy:staging`
-  (migrations with `deploy/scripts/migrate.sh`, then apply) and `smoke:staging` when main changes staging, `apps/`,
+  (apply; the new API pods migrate the database as they start) and `smoke:staging` when main changes staging, `apps/`,
   `infra/` or the deploy scripts → manual `propose:production` (a merge request with staging's versions), manual
   `deploy:production` and `smoke:production` after it is merged; `infra:staging` / `infra:production` are manual.
 
@@ -273,10 +273,10 @@ creates over the replicas → 40 unique 6-digit ids, validation, stock in every 
 | Unique 6-digit id, no duplicates across instances           | PostgreSQL sequence `100000–999999 NO CYCLE` ([ADR 0002](docs/adr/0002-product-id-generation.md)); tested with two API hosts, with 40 concurrent creates over the replicas (`check-requirements.py`) and on 850,000 products (`verify-data.sh`) |
 | Validation of create/update                                 | FluentValidation + domain guards + database check constraints ([ADR 0005](docs/adr/0005-error-handling.md)) |
 | Stock included in every list response                       | `stockQuantity` on every `ProductResponse` |
-| EF Core code-first migrations                               | `backend/ProductManagement.Infrastructure/Persistence/Migrations` (generated by `dotnet ef`), applied once per deployment, before the rollout, by the API image's `migrate` command as the schema owner, in a one-off pod inside the cluster (`deploy/scripts/deploy.sh local` locally, the backend pipeline's migrate jobs in CI/CD) |
+| EF Core code-first migrations                               | `backend/ProductManagement.Infrastructure/Persistence/Migrations` (generated by `dotnet ef`), applied by the API itself when it starts, before it serves, as the schema owner `pm_migrator`, one replica at a time (a PostgreSQL advisory lock), in every environment |
 | Database seeding                                            | Categories via `HasData`; sample products via `UseSeeding`/`UseAsyncSeeding` |
 | Angular frontend; reflects changes made through the API     | `frontend/`: every endpoint used; refetch after changes + background refresh ([ADR 0007](docs/adr/0007-frontend-state.md)) |
-| Unit tests for various scenarios                            | 212 backend unit tests + 187 frontend tests (plus 153 integration tests, 16 BDD scenarios and 22 end-to-end tests) |
+| Unit tests for various scenarios                            | 219 backend unit tests + 187 frontend tests (plus 155 integration tests, 16 BDD scenarios and 22 end-to-end tests) |
 | *Optional:* BDD tests                                       | `ProductManagement.Api.AcceptanceTests` (Reqnroll / Gherkin) |
 | Documentation for running locally                           | [Quick start](#quick-start), [deploy/README.md](deploy/README.md), [backend/README.md](backend/README.md), [frontend/README.md](frontend/README.md) |
 
@@ -296,8 +296,8 @@ ProductManagement.Api ───────────────────�
 | Project          | Responsibility |
 | ---------------- | -------------- |
 | `Core`           | The domain and the use cases, organised by feature (`Products/`, `Categories/`, `Common/`). **Domain:** `Product`, `Category`, invariants, `ProductRules` (single source of limits), the stock rule (`StockAdjustment`: the change, its ledger entry and the range the current stock must be in), `StockMovement`. **Use cases:** `ProductQueryService`, `ProductCommandService`, `StockCommandService`, contracts, FluentValidation, `Result`/`Error`, ports (`IProductRepository`, `IProductQueries`, `IProductIdGenerator`, `IUnitOfWork`). No EF Core, no ASP.NET Core: the compiler keeps it that way, because the project does not reference them. |
-| `Infrastructure` | `DbContext`, configurations, migrations, repositories and queries (stock changes as one SQL statement), sequence-based id generator, **Redis cache decorator**, seeding, health checks. |
-| `Api`            | Thin controllers, HTTP mapping (status codes, ETag/If-Match, problem details), **token endpoint, JWT verification, authorization policies, rate limiting**, OpenAPI, health endpoints, the `migrate` and `hash-secret` commands. |
+| `Infrastructure` | `DbContext`, configurations, migrations and the migrator that applies them at startup (as the schema owner, under an advisory lock), repositories and queries (stock changes as one SQL statement), sequence-based id generator, **Redis cache decorator**, seeding, health checks. |
+| `Api`            | Thin controllers, HTTP mapping (status codes, ETag/If-Match, problem details), **token endpoint, JWT verification, authorization policies, rate limiting**, OpenAPI, health endpoints, the `hash-secret` and `generate-signing-key` commands. |
 
 A request end to end (`PUT /api/products/{id}`):
 
@@ -319,8 +319,8 @@ A request end to end (`PUT /api/products/{id}`):
   `UPDATE` and the ledger `INSERT`, so they succeed or fail together;
 * everything is async and honours cancellation, with `DbContext` pooling;
 * the database repeats the domain constraints;
-* migrations run once per deployment, before the rollout, with the API image's `migrate` command as `pm_migrator`;
-  the API pods never migrate (`ApplyMigrationsOnStartup=false`) and their database user cannot change the schema.
+* the API applies its migrations when it starts, before it serves: as `pm_migrator` on short-lived connections of its
+  own, one replica at a time (a PostgreSQL advisory lock); its requests use `pm_app`, which cannot change the schema.
 
 ### Frontend
 
@@ -520,7 +520,7 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 | [0018](docs/adr/0018-autoscaling-and-scale-testing.md) | Autoscaling and testing at scale |
 | [0019](docs/adr/0019-content-security-policy.md) | Strict Content Security Policy, no third-party assets |
 | [0020](docs/adr/0020-edge-token-verification.md) | Token verification at the gateway, microcache shared per role |
-| [0021](docs/adr/0021-deployment-layout.md) | Deployment layout: a deploy repository applied by its own pipeline (GitOps), one Kustomize folder per environment, migrations before the rollout; revised: pull model with SemVer releases |
+| [0021](docs/adr/0021-deployment-layout.md) | Deployment layout: a deploy repository applied by its own pipeline (GitOps), one Kustomize folder per environment, revised: pull model with SemVer releases; revised: the API applies its migrations at startup |
 | [0022](docs/adr/0022-database-at-scale.md) | The database at scale: indexes, vacuum, the ledger beyond 20 million rows |
 
 ---
@@ -564,7 +564,8 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 * health probes, zero-downtime rolling updates, PodDisruptionBudgets, NetworkPolicies;
 * hardened non-root containers, immutable image tags;
 * authentication, RBAC, rate limiting, caching, optimistic concurrency, database constraints;
-* least-privilege database users; migrations as a deploy step, before the rollout, with the API version being deployed;
+* least-privilege database users; migrations applied by the API at startup, as the schema owner, one replica at a
+  time (no separate step to forget);
 * a nightly `pg_dump` of every database (CronJob `postgres-backup`, 7 days), on the database's node;
 * one Kustomize folder per environment in the deploy repository, local, staging and production (Ingress with a
   cert-manager certificate in staging and production); Secrets created by the deploy pipeline from CI/CD variables
@@ -573,8 +574,8 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
   dashboards, 12 alert rules and their runbooks;
 * one GitLab pipeline per repository, GitOps with a pull release model: the application pipelines only publish SemVer
   versions and GitLab Releases; the deploy repository pulls the newest into staging on a schedule and promotes to
-  production by merge request, then migrates and applies; rollback is the same command with an older version
-  (written, not yet run on a GitLab instance); load tests with SLO thresholds.
+  production by merge request, then applies (the new API pods migrate the database as they start); rollback is the same
+  command with an older version (written, not yet run on a GitLab instance); load tests with SLO thresholds.
 
 **Next** (full assessment: [chapter 11](docs/guide/11-production-readiness.md); runbook: [chapter 12](docs/guide/12-from-zero.md)):
 
@@ -592,8 +593,8 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
   50–100 million rows ([ADR 0022](docs/adr/0022-database-at-scale.md)).
 * A replicated Redis, so idempotency claims survive a Redis restart.
 * **Argo CD** pointed at `deploy/environments/<environment>` instead of `kubectl apply` from the deploy pipeline
-  (pruning, drift detection), with Argo CD Image Updater for staging and the migration as a PreSync hook: prepared and
-  validated in `deploy/argocd/`, not installed.
+  (pruning, drift detection), with Argo CD Image Updater for staging (no migration hook needed: the API migrates
+  itself): prepared and validated in `deploy/argocd/`, not installed.
 
 ---
 

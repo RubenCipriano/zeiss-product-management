@@ -1,6 +1,12 @@
 # 0006 — PostgreSQL as the database
 
-**Status:** accepted; the current setup is the second update below.
+**Status:** accepted; the current setup is the second update below, with the migrations as in the third.
+
+> **Update (2026-10-11, third):** `pm_migrator` is now used by the API itself, for its migration step at startup only
+> (`Database__MigratorUsername` / `Database__MigratorPassword`, a short-lived, unpooled connection), instead of by a
+> separate migration pod; requests still run as `pm_app`. Replicas starting together take turns on a PostgreSQL
+> advisory lock, because EF Core's own migration lock on PostgreSQL (a table lock per migration transaction) does not
+> cover the whole run ([0021, revision of 2026-10-11](0021-deployment-layout.md#revision-2026-10-11-the-api-applies-its-migrations-at-startup)).
 
 > **Update (2026-10-10, second):** PostgreSQL runs in the cluster again, now as shared infrastructure for every
 > service ([0021, update](0021-deployment-layout.md#update-2026-10-10-the-infrastructure-moves-into-kubernetes)):

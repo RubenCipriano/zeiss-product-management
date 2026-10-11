@@ -57,7 +57,7 @@ namespace can be deleted and redeployed from Git at any time without touching th
 | **api** | ASP.NET Core (.NET 10), 2–8 pods (autoscaled) | The REST API: issues and verifies tokens, permissions, per-user limits, validation, business rules. |
 | **PostgreSQL** | PostgreSQL 18, a StatefulSet in `infra` with a 20 GiB volume and a nightly backup | The source of truth: products, categories, the stock ledger, the id sequence. The API connects as `pm_app`, which can read and write rows but not change the schema. |
 | **Redis** | Redis 8, a Deployment in `infra`, memory only, password protected | Shared state for the API replicas: read cache, idempotency keys, rate-limit buckets, failed sign-ins. |
-| **migrations** | the API image run once with `migrate`, as the schema owner `pm_migrator` | Applies EF Core migrations and seed data once per deployment, before the rollout, as a one-off pod in the cluster: started by `deploy/scripts/deploy.sh local` locally, by the backend pipeline's migrate job in CI/CD. |
+| **migrations** | applied by the API itself, when each pod starts, as the schema owner `pm_migrator` | Brings the schema up to date (EF Core migrations, and the sample data where configured) before the pod serves; replicas starting together take turns on a PostgreSQL advisory lock, so they are applied once. No separate job or pod. |
 | **HPAs** | two HorizontalPodAutoscalers | Add or remove API and gateway pods based on CPU. |
 | **logs** (optional) | Alloy, Loki and Grafana in `infra`; Alloy reads every pod's log, PostgreSQL's and Redis' included | Every log line in one place, the browser's errors included, kept 14 days; two dashboards, twelve alerts, one trace id per request ([chapter 8](08-observability.md)). |
 
@@ -70,22 +70,22 @@ feature, no EF Core and no HTTP) ← `Infrastructure` (EF Core, Redis) ← `Api`
 
 The system is in three GitLab repositories: backend, frontend and deploy. The two application repositories hold code,
 tests, Dockerfiles and a pipeline that builds images and publishes SemVer versions of them (a tag `v1.4.0`); the deploy
-repository holds what runs in every environment (GitOps): the Kubernetes manifests with the chosen versions, the
-shared infrastructure and the scripts that migrate and apply them. Only its pipeline changes the clusters, and it
-pulls new versions in (a pull release model):
+repository holds what runs in every environment (GitOps): the Kubernetes manifests with the chosen versions, the shared
+infrastructure and the scripts that apply them (the API then migrates its own database). Only its pipeline changes the
+clusters, and it pulls new versions in (a pull release model):
 
 | Part | What it holds | Released or deployed by |
 | --- | --- | --- |
 | `backend/` | The .NET solution, its Dockerfile and tests; `ci/release-notes.sh` for its GitLab Releases. | its pipeline publishes `api:X.Y.Z` for a tag `vX.Y.Z`; the deploy repository picks it up (staging by schedule, production by merge request) |
 | `frontend/` | The Angular workspace, the web and gateway Dockerfiles, unit and Playwright tests; `ci/release-notes.sh`. | its pipeline publishes `web:X.Y.Z` and `gateway:X.Y.Z` for a tag `vX.Y.Z`, like the backend |
-| `deploy/` | `apps/backend/` (the API's Deployment, with its configuration as environment variables, the headless Service `api`, autoscaler, disruption budget, network policy) and `apps/frontend/` (the web app and the gateway); `environments/<local, staging, production>/` (one Kustomize folder per environment: connection strings, a few settings, the image tags); `infra/` (the shared infrastructure in the namespace `infra`: PostgreSQL in `postgres.yaml` with its settings, StatefulSet and nightly backup, Redis in `redis.yaml`, the logs in `logs.yaml`: Loki, Grafana with its alert rules, Alloy; the dashboards in `dashboards/`); `scripts/` (`deploy.sh`, `migrate.sh`, `infra.sh`, `create-database.sh` for a service's database, users and the Secret `database-credentials`, `versions.sh` and `set-version.sh` for the versions, `add-node.sh` for a k3s node); `argocd/` (prepared for Argo CD). | its pipeline (`update:staging` on a schedule, `deploy:staging`, `deploy:production`) runs `scripts/deploy.sh <environment> apps` (migrations, then apply); locally `deploy/scripts/infra.sh up` and `deploy/scripts/deploy.sh local` |
+| `deploy/` | `apps/backend/` (the API's Deployment, with its configuration as environment variables, the headless Service `api`, autoscaler, disruption budget, network policy) and `apps/frontend/` (the web app and the gateway); `environments/<local, staging, production>/` (one Kustomize folder per environment: connection strings, a few settings, the image tags); `infra/` (the shared infrastructure in the namespace `infra`: PostgreSQL in `postgres.yaml` with its settings, StatefulSet and nightly backup, Redis in `redis.yaml`, the logs in `logs.yaml`: Loki, Grafana with its alert rules, Alloy; the dashboards in `dashboards/`); `scripts/` (`deploy.sh`, `infra.sh`, `create-database.sh` for a service's database, users and the Secret `database-credentials`, `versions.sh` and `set-version.sh` for the versions, `add-node.sh` for a k3s node); `argocd/` (prepared for Argo CD). | its pipeline (`update:staging` on a schedule, `deploy:staging`, `deploy:production`) runs `scripts/deploy.sh <environment> apps` (migrations, then apply); locally `deploy/scripts/infra.sh up` and `deploy/scripts/deploy.sh local` |
 
 The documentation (`docs/`) and the local tools (`tools/`: the load tests and the requirements check) are in no
 repository; they sit next to the three.
 
 | Image | Built from | Used by |
 | --- | --- | --- |
-| `product-management/api` | `backend/Dockerfile` | the API pods, and the migrations (the same image run with `migrate`) |
+| `product-management/api` | `backend/Dockerfile` | the API pods (which also apply the migrations when they start) |
 | `product-management/web` | `frontend/Dockerfile` | the web pods |
 | `product-management/gateway` | `frontend/gateway/Dockerfile` | the gateway pods |
 
@@ -117,7 +117,7 @@ The contract between the API and the web app is small and made of names only:
 | Worst-case mix (25 % writes, reads spread over all products) | ~2,400 requests/s, 0 errors | same |
 | Ten teams, 30 % of stock changes sent twice | 281 requests/s, 0 errors, p95 4.3 ms, no change applied twice | same |
 | 300 simultaneous orders for 100 units | exactly 100 succeed, stock ends at 0 | [load-test-results.md](../load-test-results.md#docker-desktop-cluster-final-setup) |
-| Automated tests | 381 back end, 187 front end, 22 end-to-end | [chapter 10](10-testing-and-quality.md) |
+| Automated tests | 390 back end, 187 front end, 22 end-to-end | [chapter 10](10-testing-and-quality.md) |
 
 ## Map of the rest of the documentation
 
@@ -150,7 +150,7 @@ listed in the [documentation home](../README.md#reference-material).
 ```bash
 kubectl config use-context docker-desktop
 deploy/scripts/infra.sh up                             # PostgreSQL, Redis and the logs, in the namespace infra
-deploy/scripts/deploy.sh local                         # database (first run), images, migrations, API, web app, gateway
+deploy/scripts/deploy.sh local                         # database (first run), images, API (migrates), web app, gateway
 kubectl -n product-management get pods,svc,hpa         # the pieces in the cluster
 deploy/scripts/infra.sh status                         # the shared infrastructure
 python3 tools/check-requirements.py                    # the assessment PDF, 14 checks against the running system

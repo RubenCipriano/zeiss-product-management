@@ -1,15 +1,17 @@
 # 0021 — Deployment layout: Kustomize overlays, servers outside the cluster, migrations in the pipeline
 
 **Status:** accepted (supersedes the per-project manifests and the migration Job of [0011](0011-kubernetes-deployment.md)),
-amended four times. **Current state:** where things run is
+amended five times. **Current state:** where things run is
 [Update (2026-10-10): the infrastructure moves into Kubernetes](#update-2026-10-10-the-infrastructure-moves-into-kubernetes)
 (PostgreSQL, Redis and the logs in the cluster, in the shared namespace `infra`); the layout is
 [Revision (2026-10-10): GitOps with a deploy repository](#revision-2026-10-10-gitops-with-a-deploy-repository)
 (every manifest and environment in the deploy repository, whose pipeline is the only one that applies); the release
 flow is [Revision (2026-10-10): pull model with SemVer releases](#revision-2026-10-10-pull-model-with-semver-releases)
-(the app pipelines only publish versions; the deploy repository pulls them in and runs the migrations). The servers
-outside the cluster, the Docker Compose files, the private runner for migrations, the password variables and the
-per-repository deploy scripts and manifests described below are history.
+(the app pipelines only publish versions; the deploy repository pulls them in); the migrations are
+[Revision (2026-10-11): the API applies its migrations at startup](#revision-2026-10-11-the-api-applies-its-migrations-at-startup)
+(no migration job, pod or hook any more). The servers outside the cluster, the Docker Compose files, the private
+runner for migrations, the migration pod (`migrate.sh`, the `migrate` command, the PreSync hook), the password
+variables and the per-repository deploy scripts and manifests described below are history.
 
 ## Context
 
@@ -106,6 +108,8 @@ the GitLab agent for Kubernetes, so no cluster API is exposed to the runners.
   in-cluster operator later changes one name per overlay.
 * **Migrations at startup or in a Job.** Startup migrations race between replicas and need schema rights in every
   pod; a Job needs the owner's credentials in the cluster and separates the migration's failure from the pipeline.
+  (Revisited on 2026-10-11: the API now migrates at startup, with an advisory lock against the race and the schema
+  rights confined to a startup step; see the last revision.)
 
 ## Consequences
 
@@ -451,3 +455,82 @@ switch procedure.
 * **Argo CD readiness.** The switch changes who does each step, not the flow: Argo CD applies instead of `deploy:*`,
   its PreSync hook migrates instead of `migrate.sh`, Image Updater writes the versions instead of `update:staging`;
   production stays a merge request plus a manual sync. Releasing in the app repositories does not change at all.
+
+## Revision (2026-10-11): the API applies its migrations at startup
+
+**Status:** accepted. Replaces the migration step of every earlier section (the pipeline's migrate jobs, then the
+one-off pod of `deploy/scripts/migrate.sh` and the prepared Argo CD PreSync hook).
+
+### Context
+
+Migrations had become a step of their own: the API image run with the command `migrate` as a one-off pod
+(`kubectl run --rm --attach`), started by `deploy/scripts/migrate.sh` before every `kubectl apply`, with a PreSync hook
+Job prepared for Argo CD. It worked, but it was a second path to keep in step with the first: a script that had to
+read the image tag out of the rendered environment, a pod spec duplicated in shell and in a hook manifest, a separate
+Redis and registry wiring, and a step that anything else that runs the image (`docker run`, Compose, Argo CD without
+the hook) had to remember. The request was simple: "the migrations should be done in the API itself instead of a
+pod". The two classic objections to startup migrations were the ones recorded under "Alternatives considered": replicas
+race, and every pod needs schema rights.
+
+### Decision
+
+**The API applies its own EF Core migrations when it starts, before it serves**
+(`ProductManagement.Infrastructure/Persistence/DatabaseMigrator.cs`, called from `Program.cs` before
+`app.RunAsync()`), whenever `Database:ApplyMigrationsOnStartup` is `true`: the default in `appsettings.json`, and set
+explicitly in `deploy/apps/backend/deployment.yaml`. One path for every environment and every way of running the image.
+
+* **The migrator's credentials, for the migration only.** `Database:MigratorUsername` and `Database:MigratorPassword`
+  (in Kubernetes from the Secret `database-credentials`, keys `migrator-user` and `migrator-password`) replace the user
+  and password of the API's connection string for a short-lived context on unpooled connections, closed before the API
+  serves. Requests keep using `pm_app`, which cannot change the schema. Without a migrator configured (local
+  development, the tests) the connection string is used as it is.
+* **One replica at a time: a PostgreSQL advisory lock.** The first pod takes `pg_try_advisory_lock(<key>)` on a
+  connection of its own and holds it for the whole run (migrations and the seeding hook); the others ask again every
+  2 s, then find the schema up to date. If the holder dies, its session ends and PostgreSQL releases the lock.
+* **Evidence for our own lock.** EF Core 9+ takes a migration lock, but Npgsql 10.0.3 implements it as
+  `LOCK TABLE "__ef_migrations_history" IN ACCESS EXCLUSIVE MODE` with `LockReleaseBehavior.Transaction`
+  (`NpgsqlHistoryRepository`), and EF Core's `Migrator` commits each migration's transaction separately (and commits
+  before a `suppressTransaction` statement such as `CREATE INDEX CONCURRENTLY`), so the lock is released between
+  migrations while the list of pending migrations was computed once at the start. Two instances started together on an
+  empty database failed with a duplicate key in the history (one applied `GrantAppPermissions` again). With the
+  advisory lock, the integration test `MigrationsAtStartupTests` starts two instances at once on an empty database:
+  both come up and the schema is applied once.
+* **Waiting replicas poll.** Blocking in `pg_advisory_lock` deadlocked against `CREATE INDEX CONCURRENTLY`: the blocked
+  statement holds a snapshot, and the index build waits for every older snapshot to end (measured: the test hung).
+* **Serving waits for the schema.** The HTTP server starts after the migrations, so neither `/health/live` nor
+  `/health/ready` answers before. The startup probe allows 10 minutes (`periodSeconds: 5`, `failureThreshold: 120`)
+  for a long migration or the wait for another pod's; the migration's statements and the lock wait are bounded by the
+  same 10 minutes. `progressDeadlineSeconds: 900` and a 15-minute rollout wait in `deploy.sh` keep a long migration
+  from being reported as a stuck rollout.
+* **A failed migration stops the rollout, not the service.** The new pod exits and restarts (`CrashLoopBackOff`), never
+  becomes ready, and `maxUnavailable: 0` keeps every old pod serving; `deploy.sh` fails at the rollout wait.
+* **Sample data per environment.** `Database__SeedSampleData` in `environments/<env>/api.yaml`: `true` locally and in
+  staging, `false` in production (what `migrate.sh`'s `SEED_SAMPLE_DATA` defaulted to).
+* **Removed:** `deploy/scripts/migrate.sh`, `deploy/argocd/hooks/`, the API's `migrate` command, the `migrate-<version>`
+  pod and its rules in the deploy pipeline. **Kept:** `create-database.sh` before the apply (the database and its users
+  must exist before the API can migrate), and the backend's `migrations:sql` job (the idempotent SQL, for review in the
+  merge request).
+
+### Why
+
+* **One path, nothing to forget.** Whatever starts the image (the pipeline, `deploy.sh local`, Argo CD, `docker run`,
+  Compose) gets the schema of exactly that code. Argo CD needs no hook.
+* **The two objections are met.** Replicas take turns on the advisory lock instead of racing; the requests never have
+  schema rights, only the startup step does, on connections of its own.
+* **Operational behaviour stays the same where it matters**: the old version keeps serving until the new one is ready
+  on the new schema, a failure is visible in the rollout, and expand/contract still governs every migration.
+
+### Trade-offs
+
+* **The pods hold the migrator's password.** Before, only the migration pod did. A request (or an injected query)
+  still cannot use it, because requests never use that connection; code execution inside a pod could. Mitigations: the
+  container runs non-root with a read-only filesystem and no service account token, and `pm_migrator` owns only this
+  service's schema. A team that wants the strict separation back can run the same image with
+  `Database__ApplyMigrationsOnStartup=false` in the Deployment and `true` in a Job (no code change).
+* **A long migration delays the first new pod** (up to the startup probe's 10 minutes) instead of the deploy job; the
+  old pods serve meanwhile, so users do not notice, but a rollout takes longer.
+* **Every pod start checks the schema** (a lock and one query on the history: 0.4 s on the local cluster, a few
+  seconds on a small, cold node); a pod restart or a scale-up therefore needs the database, which it needs anyway to
+  become ready.
+* **A failed migration is seen in the pod's log** (`kubectl logs deployment/api`), not in the deploy job's own output;
+  the job still fails, at the rollout wait.
