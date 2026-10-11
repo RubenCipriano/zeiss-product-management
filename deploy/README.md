@@ -2,8 +2,9 @@
 
 This repository describes everything that runs on the Kubernetes clusters of the Product Management system, and it is
 the only place that changes them. It holds the Kubernetes manifests (YAML files that describe what should run), one
-folder per environment with the versions it runs, the shared infrastructure (PostgreSQL, Redis, logs), the eleven
-scripts that a person or the pipeline runs, and the Argo CD objects that can take over the applying later. The
+folder per environment with the versions it runs, the shared infrastructure (PostgreSQL, Redis, logs), the scripts
+that a person or the pipeline runs (with a menu in front of them, `menu.sh`), and the Argo CD objects that can take
+over the applying later. The
 application code lives in two other repositories: the API in [backend](https://gitlab.com/zeiss/backend), the web app
 and the gateway in [frontend](https://gitlab.com/zeiss/frontend).
 
@@ -16,6 +17,7 @@ database are, but not Kubernetes; every Kubernetes term is explained in [Concept
 
 ## Contents
 
+- [Start here: the menu](#start-here-the-menu)
 - [What this repository is](#what-this-repository-is)
 - [The system in one picture](#the-system-in-one-picture)
 - [Concepts in plain words](#concepts-in-plain-words)
@@ -25,6 +27,7 @@ database are, but not Kubernetes; every Kubernetes term is explained in [Concept
 - [Configuration](#configuration)
 - [Secrets](#secrets)
 - [Environments](#environments)
+- [Where the images come from](#where-the-images-come-from-backend-frontend-or-the-registry)
 - [Where it runs](#where-it-runs)
 - [Deploy](#deploy)
 - [Use it](#use-it)
@@ -32,6 +35,51 @@ database are, but not Kubernetes; every Kubernetes term is explained in [Concept
 - [CI/CD](#cicd)
 - [Troubleshooting](#troubleshooting)
 - [Status](#status)
+
+## Start here: the menu
+
+`./menu.sh` is the front door for people: a numbered menu of the common tasks, with a status line on top (the
+`kubectl` context and its kind, whether the shared infrastructure runs, which api, web and gateway versions run, the
+application's URL). Each item asks only what it needs, shows the exact command it is about to run, then runs it, so
+the menu also teaches the scripts behind it. Nothing depends on it: every item is a plain script
+([Scripts](#scripts)), and `./menu.sh --help` lists them.
+
+```text
+Product Management: deploy menu
+  Cluster:      default (k3s on this machine)
+  Infra:        5 of 5 pods running
+  Application:  api 1.0.0, web 1.0.0, gateway 1.0.0 (published)
+  URL:          http://10.20.30.40:8080
+
+  1) Prepare this Ubuntu server
+  2) Shared infrastructure: up, status, stop
+  3) Deploy the application
+  4) Published versions
+  5) Change an environment's version
+  6) Add a node
+  7) Status
+  8) Smoke check
+  9) Start over (deletes all data)
+  0) Exit
+Choose:
+```
+
+| Item | Runs | Asks |
+| --- | --- | --- |
+| 1 Prepare this Ubuntu server | `scripts/setup-ubuntu.sh` | a confirmation; offered on Ubuntu only |
+| 2 Shared infrastructure | `scripts/infra.sh up`, `status` or `down` | which; stopping asks for a confirmation, deleting the data a second one (type the context's name) |
+| 3 Deploy the application | `scripts/deploy.sh local --version <X.Y.Z\|latest>`, or `scripts/deploy.sh local --build` | the version (default `latest`) and, when no registry login is set, the deploy token's user and the token (typed hidden); building is offered only when `../backend` and `../frontend` exist. Staging and production: explains that the pipeline deploys them and offers item 5 |
+| 4 Published versions | `scripts/versions.sh all` | the registry login, when none is set |
+| 5 Change an environment's version | `scripts/set-version.sh <staging\|production> <image> <version\|latest>` | environment, image, version; then says what to commit (production: a merge request) |
+| 6 Add a node | `scripts/add-node.sh <user@host> <role> [--server <url>]` | the machine, its role and the server; offers `--dry-run` first |
+| 7 Status | `kubectl get pods,pvc,services` in `product-management` and `infra` | nothing; prints the application's URL and the Grafana and Swagger port-forward commands |
+| 8 Smoke check | `scripts/ci/smoke.sh <url>` | the URL (default: the detected one) |
+| 9 Start over | the [Start over](#start-over) block | the image source; then you type `delete everything`. Only on a cluster of this machine |
+
+A token typed in the menu is read without echo, kept in the menu's own process and given only to the command that
+needs it, as `REGISTRY_PASSWORD` in that command's environment (the screen shows `<hidden>`). Variables reach the
+scripts as they are (`LOGS=off ./menu.sh`). Ctrl-C stops the running command and returns to the menu; at the menu's
+prompt it leaves. The commands behind a first deploy are in [Local quick start](#local-quick-start).
 
 ## What this repository is
 
@@ -72,7 +120,7 @@ Why this split:
   starts, and there is no separate job or pod to forget. Replicas starting together take turns on a database lock.
 * **Shared infrastructure with plain names.** PostgreSQL, Redis and the logs run once per cluster (`postgres`,
   `redis`, `loki`, `grafana` in `infra`) and serve every service. A new service gets its own database with
-  `scripts/create-database.sh` and its logs without doing anything.
+  `scripts/lib/create-database.sh` and its logs without doing anything.
 * **Configuration you can read.** Every setting is a plain environment variable in the YAML. Only passwords, the
   token signing key and the accounts are Secrets, and none of them is committed.
 
@@ -166,8 +214,9 @@ backward-compatible functionality MINOR (1.4.0 → 1.5.0), fixes only PATCH (1.4
 pre-release (release candidate) of 1.5.0 and sorts before it. The app repositories' READMEs say when to raise which.
 
 **Registry.** A server that stores images. Staging and production pull from GitLab's private Container Registry
-(`registry.gitlab.com/zeiss/...`). Locally there is no registry: the images are built on the same machine and used
-from there.
+(`registry.gitlab.com/zeiss/...`). Locally, either the images are built on the same machine and used from there, or a
+published version is pulled from that registry, like staging
+([Where the images come from](#where-the-images-come-from-backend-frontend-or-the-registry)).
 
 ### Kubernetes and its parts
 
@@ -341,7 +390,7 @@ manifests without templates:
 | **base**: plain manifests, the same everywhere | `apps/backend`, `apps/frontend` |
 | **overlay**: a folder that includes the base and changes it with **patches** | `environments/local`, `staging`, `production`: `api.yaml` and `gateway.yaml` patch environment variables (and, in staging and production, `api.yaml` and `registry.yaml` add the image pull Secret); `ingress.yaml` adds a resource |
 | **images transformer** | the `images:` list in each environment's `kustomization.yaml` replaces `product-management/api` by `registry.gitlab.com/zeiss/backend/api` with the chosen version; `scripts/set-version.sh` edits exactly that `newTag` |
-| **component** | `environments/local` includes `generated/build`, a Kustomize Component that `scripts/deploy.sh local` writes with the tags of the images it just built |
+| **component** | `environments/local` includes `generated/build`, a Kustomize Component that `scripts/deploy.sh local` writes on every deploy: the tags of the images it built, or the registry names, version and pull Secret of a published version ([Where the images come from](#where-the-images-come-from-backend-frontend-or-the-registry)) |
 | **secretGenerator** | `environments/local` builds `api-secrets` from two local files and adds a hash of their content to its name (`api-secrets-<hash>`), updating every reference; a new key therefore changes the pod template and rolls the API pods |
 | **labels** | every object gets `app.kubernetes.io/part-of: product-management` |
 
@@ -382,6 +431,8 @@ token permissions → "Allow Git push requests to the repository"), `update:stag
 version changes here with it, with the rights of the user who started the job. No token is stored for that. A
 **deploy key** is an SSH key registered on one project; with write permission it is what Argo CD Image Updater would
 push with ([Moving to Argo CD](#moving-to-argo-cd)). Backend and frontend hold no credential of this repository.
+A server that runs published images gets a group deploy token of its own (for example `server-pull`, `read_registry`
+only), so it can be revoked without touching the pipeline's ([Where the images come from](#where-the-images-come-from-backend-frontend-or-the-registry)).
 
 ## Why Kubernetes and not Docker Compose
 
@@ -429,6 +480,7 @@ deploy/
 ├── .gitlab-ci.yml                     the pipeline: validate every change; update staging's versions (schedule); apply staging (automatic) and production (manual); smoke checks; infra (manual)
 ├── .gitattributes                     shell scripts keep LF line endings in every checkout (bash cannot run CRLF scripts, e.g. on Windows)
 ├── .gitignore                         never commit: environments/local/generated/, .env, editor and OS files, local AI-tool files
+├── menu.sh                            the menu for people: the common tasks, numbered, over the scripts below (./menu.sh --help)
 │
 ├── apps/                              WHAT RUNS: the application, identical in every environment (Kustomize bases)
 │   ├── backend/
@@ -450,9 +502,9 @@ deploy/
 │   │   ├── api.yaml                   connection strings to postgres.infra and redis.infra; sample data; OpenAPI (Swagger) on
 │   │   ├── gateway.yaml               Service type LoadBalancer (port 8080 on the machine); API, JWKS and collector addresses
 │   │   └── generated/                 NOT COMMITTED (gitignored), made on each machine:
-│   │       ├── signing-key.pem        the API's local ES256 private key (scripts/local-secrets.sh)
-│   │       ├── consumers.json         the demo accounts viewer, clerk, manager with PBKDF2 hashes (scripts/local-secrets.sh)
-│   │       └── build/kustomization.yaml   the tags of the images scripts/deploy.sh local built (and, with LOGS=off, the collector switched off)
+│   │       ├── signing-key.pem        the API's local ES256 private key (scripts/lib/local-secrets.sh)
+│   │       ├── consumers.json         the demo accounts viewer, clerk, manager with PBKDF2 hashes (scripts/lib/local-secrets.sh)
+│   │       └── build/kustomization.yaml   the images of the last scripts/deploy.sh local: the tags it built, or a published version's registry names, tag and pull Secret (and, with LOGS=off, the collector switched off)
 │   ├── staging/
 │   │   ├── kustomization.yaml         apps + Ingress + patches + images: THE VERSIONS (newTag X.Y.Z; written by set-version.sh / update:staging)
 │   │   ├── api.yaml                   connection strings, image pull Secret, sample data, OpenAPI on
@@ -476,18 +528,20 @@ deploy/
 │       ├── production.yaml            Application product-management-production: manual sync, never updated automatically
 │       └── image-updater.yaml         ImageUpdater (Image Updater 1.x): applies the annotations of the labelled Applications
 │
-└── scripts/                           THE ONLY THINGS A PERSON RUNS (bash; GNU or BSD tools)
+└── scripts/                           WHAT A PERSON RUNS (bash 3.2 or later; GNU or BSD tools)
     ├── setup-ubuntu.sh                prepares a fresh Ubuntu server: Docker Engine, kubectl, single-node k3s
     ├── infra.sh                       starts, stops and shows the shared infrastructure
-    ├── create-database.sh             gives a service its database, two users and a Secret with their passwords
-    ├── local-secrets.sh               the API's local signing key and demo accounts (and .NET user-secrets for dotnet run)
-    ├── deploy.sh                      deploys an environment (local: builds the images; every environment: applies what is committed and waits for the rollouts)
+    ├── deploy.sh                      deploys an environment (local: images built from ../backend and ../frontend, or a published version; every environment: applies and waits for the rollouts)
     ├── versions.sh                    lists the versions published in the registry, newest first
     ├── set-version.sh                 sets an environment's version of an image (upgrade or downgrade); edits kustomization.yaml only
-    ├── update-versions.sh             the pipeline's commit of new versions: staging to main, production as a merge request
-    ├── validate.sh                    renders and checks every environment, infra/ and argocd/ without a cluster
-    ├── smoke.sh                       checks a deployed environment from outside, through its URL
-    └── add-node.sh                    joins a machine to a k3s cluster as a database, cache or apps node
+    ├── add-node.sh                    joins a machine to a k3s cluster as a database, cache or apps node
+    ├── ci/                            ONLY THE PIPELINE RUNS THESE
+    │   ├── validate.sh                renders and checks every environment, infra/ and argocd/ without a cluster
+    │   ├── update-versions.sh         the pipeline's commit of new versions: staging to main, production as a merge request
+    │   └── smoke.sh                   checks a deployed environment from outside, through its URL (by hand too: menu item 8)
+    └── lib/                           CALLED BY THE OTHERS, not needed by hand for this system
+        ├── local-secrets.sh           the API's local signing key and demo accounts (and .NET user-secrets for dotnet run)
+        └── create-database.sh         gives a service its database, two users and a Secret with their passwords (by hand: another service, --rotate)
 ```
 
 Why the folders are separate:
@@ -498,24 +552,55 @@ Why the folders are separate:
   Secret, OpenAPI on or off. Small files, so a reviewer sees exactly what makes production different from staging.
 * **`infra/`: shared by every service, and stateful.** It holds the data of every service, so it is applied only
   deliberately (`scripts/infra.sh`, or the manual `infra:<env>` jobs), never on every commit.
-* **`scripts/`: the only entry points for people and the pipeline.** Each one wraps steps that would otherwise be
-  typed by hand and done in the wrong order; they are idempotent where possible (safe to run again).
+* **`menu.sh` and `scripts/`: the entry points, fewest in view.** People run the menu or the six scripts at the top
+  of `scripts/`; the pipeline also runs `scripts/ci/`; `scripts/lib/` holds what the others call. Each one wraps steps
+  that would otherwise be typed by hand and done in the wrong order; they are idempotent where possible (safe to run
+  again).
 * **`argocd/`: the next step, ready.** Not applied by anything today; kept here so it is reviewed and validated with
   every change, and switching to Argo CD is a short, known procedure.
 
 ## Scripts
 
-All eleven scripts run on macOS, Linux and WSL 2 (bash 3.2 or later), on the current `kubectl` context. None of them
-stores a password in a file of this repository or puts one on a command line. The three that deal with versions
-(`versions.sh`, `set-version.sh`, `update-versions.sh`) also need `curl`, `jq` and `yq` (macOS: `brew install yq`;
-all three are in the pipeline's `alpine/k8s` image, which also runs them anywhere:
-`docker run --rm -v "$PWD:/work" -w /work -e REGISTRY_USER -e REGISTRY_PASSWORD alpine/k8s:1.34.11 scripts/versions.sh all`).
+People use six scripts (or the menu in front of them), the pipeline three more, and two are only called by the
+others. The folders say which is which:
+
+| Folder | Run by | Scripts |
+| --- | --- | --- |
+| `menu.sh` | people | the menu over the scripts below ([Start here: the menu](#start-here-the-menu)) |
+| `scripts/` | people | `setup-ubuntu.sh`, `infra.sh`, `deploy.sh`, `versions.sh`, `set-version.sh`, `add-node.sh` |
+| `scripts/ci/` | the pipeline (`smoke.sh` is handy by hand too: menu item 8) | `validate.sh`, `update-versions.sh`, `smoke.sh` |
+| `scripts/lib/` | the other scripts, never needed by hand for this system | `local-secrets.sh`, `create-database.sh` (still usable by hand: a database for another service, `--rotate`) |
+
+Each one in a line:
+
+| Script | What it does | When |
+| --- | --- | --- |
+| `scripts/setup-ubuntu.sh` | turns a fresh Ubuntu server into a single-node k3s (Docker Engine, kubectl, k3s) | once per server |
+| `scripts/infra.sh` | starts, stops and shows the shared infrastructure (PostgreSQL, Redis, logs) | once per cluster, then when `infra/` changes |
+| `scripts/deploy.sh` | deploys an environment: `local` with images built from `../backend`, `../frontend` or published ones; `staging`, `production` as committed | every deploy |
+| `scripts/versions.sh` | lists the versions published in the registry, newest first | before choosing a version |
+| `scripts/set-version.sh` | sets the version of an image in `environments/<env>/kustomization.yaml` (upgrade or downgrade) | to release or roll back; then commit |
+| `scripts/add-node.sh` | joins a machine to a k3s cluster as a database, cache or apps node | when the cluster grows |
+| `scripts/ci/validate.sh` | renders and checks every environment, `infra/` and `argocd/` without a cluster | every merge request and commit |
+| `scripts/ci/update-versions.sh` | commits new versions: staging to `main`, production as a merge request | `update:staging`, `propose:production` |
+| `scripts/ci/smoke.sh` | checks a deployed environment from outside, through its URL | after every deployment |
+| `scripts/lib/local-secrets.sh` | the API's local signing key and demo accounts | called by `deploy.sh local` |
+| `scripts/lib/create-database.sh` | a service's database, its two users and a Secret with their passwords | called by `deploy.sh` on a cluster's first deploy |
+
+All of them run on macOS, Linux and WSL 2 (bash 3.2 or later), on the current `kubectl` context. None of them stores
+a password in a file of this repository or prints one; registry and git tokens reach `kubectl`, `curl` and `git` on
+stdin or through the environment, never on a command line. `versions.sh` needs `curl` and `jq`; `set-version.sh` and
+`update-versions.sh` also `yq` (macOS: `brew install yq`; Ubuntu: `sudo snap install yq`). All three are in the
+pipeline's `alpine/k8s` image, which also runs them anywhere:
+`docker run --rm -v "$PWD:/work" -w /work -e REGISTRY_USER -e REGISTRY_PASSWORD alpine/k8s:1.34.11 scripts/versions.sh all`.
+
+**For people** (`scripts/`):
 
 ### setup-ubuntu.sh: prepare an Ubuntu server
 
 | | |
 | --- | --- |
-| Purpose | turn a fresh Ubuntu 22.04 or 24.04 server into a single-node k3s that can build and run the system, like Docker Desktop on a laptop |
+| Purpose | turn a fresh Ubuntu 22.04 or 24.04 server into a single-node k3s that runs the system (published images, or images built from `../backend` and `../frontend`), like Docker Desktop on a laptop |
 | When | once per server (again to upgrade the pinned versions) |
 | Usage | `scripts/setup-ubuntu.sh` (as your own user with sudo, not as root; internet access needed). Variables: `DOCKER_VERSION` (default `29.9.0`), `K3S_VERSION` (default `v1.34.1+k3s1`) |
 | Changes | apt packages `ca-certificates curl git jq openssl python3`; Docker Engine from Docker's apt repository, held at its version (`apt-mark hold`); adds you to the group `docker`; kubectl at k3s' Kubernetes version from dl.k8s.io (checksum verified) into `/usr/local/bin`; k3s as a systemd service (`get.k3s.io`, `INSTALL_K3S_EXEC=server`); copies `/etc/rancher/k3s/k3s.yaml` to `~/.kube/config` (mode 600, context `default`), keeping a previous one as `config.<time>.bak` |
@@ -526,7 +611,9 @@ all three are in the pipeline's `alpine/k8s` image, which also runs them anywher
 
 It installs the upstream kubectl *before* k3s on purpose: otherwise k3s links its own `kubectl`, which reads root's
 kubeconfig. At the end it prints the next commands, including `newgrp docker` (group membership applies to new
-sessions only).
+sessions only) and the deploy command that fits the server: `scripts/deploy.sh local` when `../backend` and
+`../frontend` are there, otherwise the published images with a registry login. Docker is only needed to build images;
+k3s pulls published ones itself.
 
 ### infra.sh: the shared infrastructure
 
@@ -557,7 +644,8 @@ What each command does:
 * **`down`**: deletes a component's StatefulSets, Deployments, CronJobs, Jobs, Services, ConfigMaps, ServiceAccounts,
   NetworkPolicies and cluster roles (selected by the label `app.kubernetes.io/component`). **Volumes and password
   Secrets are kept**, so `up` brings the component back with its data. `--delete-data` deletes them too, without
-  asking; after deleting PostgreSQL's data it reminds you to run `create-database.sh` again for each service.
+  asking (the menu asks twice before it runs this); after deleting PostgreSQL's data it reminds you to run
+  `scripts/lib/create-database.sh` again for each service.
 * **`status`**: the context, the pods, Services and PVCs in `infra`, and the commands to reach Grafana, Loki,
   PostgreSQL and Redis from your machine.
 
@@ -565,82 +653,65 @@ Never: deletes the namespace `infra`; touches the application namespace; publish
 Why: the shared infrastructure needs one-time steps (random passwords, metrics-server) and restarts after
 configuration changes that `kubectl apply` alone does not do.
 
-### create-database.sh: a database for a service
-
-| | |
-| --- | --- |
-| Purpose | give a service its own database on the shared PostgreSQL, with two users, and put their passwords in a Secret in the service's namespace |
-| When | never by hand for this system: the first `deploy.sh` to a cluster (local, staging or production) runs it when `database-credentials` is missing. By hand: to give **another** service a database, again after restoring a dump, or with `--rotate` to change passwords |
-| Usage | `scripts/create-database.sh <service-namespace> <database> [app-user] [migrator-user] [--rotate]`; for this system: `scripts/create-database.sh product-management product_management pm_app pm_migrator` (defaults for the users: `<database>_app`, `<database>_migrator`) |
-| Needs | `kubectl` only: it runs `psql` inside the PostgreSQL pod (`kubectl exec`); passwords travel on stdin |
-| Idempotent | yes; keeps the existing passwords unless `--rotate` |
-
-What it does in PostgreSQL:
-
-* the **migrator** user: owns the schema `public`, may create tables and trusted extensions; the migrations run as it;
-* the **app** user: may connect and use the schema, nothing more; its sessions end a statement after **30 s** and an
-  idle open transaction after **60 s** (guard rails against runaway queries and leaked transactions). Which tables it
-  may read and write is granted by the service's own migrations (for this API: the migration `GrantAppPermissions`);
-* the database itself, closed to everyone else (`REVOKE ALL ... FROM PUBLIC`);
-* the extension `pg_stat_statements` (query statistics);
-* hands tables and sequences owned by someone else (for example after a restore as `postgres`) to the migrator.
-
-Then it writes the Secret `<service-namespace>/database-credentials` with the keys `host`, `port`, `database`,
-`app-user`, `app-password`, `migrator-user`, `migrator-password`, creating the namespace if needed. With `--rotate` it
-prints how to restart the service's pods. Names must be lower-case letters, digits and `_`. Why: one PostgreSQL for
-the platform is cheaper to run and back up than one per service, and least-privilege users are easy to get wrong by
-hand.
-
-### local-secrets.sh: the API's local keys
-
-| | |
-| --- | --- |
-| Purpose | create the API's local development secrets on this machine, so no key is ever committed |
-| When | automatically by `scripts/deploy.sh local`; by hand with `FORCE=1` to make new ones |
-| Usage | `scripts/local-secrets.sh`; `FORCE=1 scripts/local-secrets.sh` (new key and hashes: signs everyone out; then `scripts/deploy.sh local`). Variable `BACKEND_DIR` (default `../backend`) |
-| Writes | `environments/local/generated/signing-key.pem` (a new ES256 P-256 private key, PKCS#8 PEM) and `generated/consumers.json` (the demo accounts `viewer`, `clerk`, `manager` with role `viewer`, `stock-clerk`, `manager`; each secret equals its client id; stored as PBKDF2-SHA256 hashes, 100,000 iterations, the API's own format). Files are readable only by you (`umask 077`). If `../backend` and the .NET SDK are there, it also stores the same key and accounts in the API's .NET user-secrets, for `dotnet run` |
-| Needs | `openssl`, `python3`; the .NET SDK only for the user-secrets step (skipped without it) |
-| Idempotent | yes: creates only what is missing |
-| Never | used for staging or production: their keys come from CI/CD variables |
-
 ### deploy.sh: deploy an environment
 
 | | |
 | --- | --- |
 | Purpose | deploy one environment |
-| Usage | `scripts/deploy.sh <local\|staging\|production> [infra\|apps\|all]` (default `apps`); `infra` = `scripts/infra.sh up`; `all` = infra, then apps |
-| Who runs it | you, for `local`; the pipeline (`deploy:staging`, `deploy:production`, `infra:*`) for the others, or a laptop whose kubectl reaches that cluster |
-| Which versions | local: the images it builds from the checkouts; staging, production: exactly the versions in `environments/<env>/kustomization.yaml` (chosen with `set-version.sh`) |
+| Usage | `scripts/deploy.sh <local\|staging\|production> [infra\|apps\|all] [--build \| --version <X.Y.Z\|latest>]` (default `apps`); `infra` = `scripts/infra.sh up`; `all` = infra, then apps |
+| Who runs it | you, for `local` (or the menu, item 3); the pipeline (`deploy:staging`, `deploy:production`, `infra:*`) for the others, or a laptop whose kubectl reaches that cluster |
+| Which versions | local: the images it builds from `../backend` and `../frontend`, or a published version (`--version`, default `latest`); staging, production: exactly the versions in `environments/<env>/kustomization.yaml` (chosen with `set-version.sh`) |
 | Idempotent | yes |
 
-**`local`** (a cluster on this machine: context `docker-desktop`, or a k3s node with this machine's host name):
+**`local`** takes its images from one of two places ([Where the images come from](#where-the-images-come-from-backend-frontend-or-the-registry)),
+and says which in one line of its output:
 
-1. runs `scripts/local-secrets.sh` (creates the keys if missing);
-2. checks Docker is reachable;
-3. builds `product-management/api`, `product-management/web` and `product-management/gateway` with Docker from
-   `../backend` and `../frontend` (or `BACKEND_DIR`, `FRONTEND_DIR`). The tag is the checkout's short commit, plus
-   `-dirty-<time>` when it has uncommitted changes, so every build has a unique tag. The web image gets
-   `APP_VERSION=<tag>` (the release it reports with browser errors);
-4. on k3s, copies the images into k3s' own container runtime (`docker save | sudo k3s ctr images import`); Docker
-   Desktop's Kubernetes runs the images of its Docker engine as they are;
-5. writes `environments/local/generated/build/kustomization.yaml` with the three tags (and, with `LOGS=off`, a patch
-   that empties `COLLECTOR_UPSTREAM`), so `kubectl diff -k environments/local` compares against exactly what was
-   applied;
-6. applies the namespace; if the Secret `database-credentials` does not exist yet, runs
-   `create-database.sh product-management product_management pm_app pm_migrator`;
-7. copies the shared Redis' password from `infra/redis-auth` into `product-management/redis-credentials` (a pod can
+| Images | When | Output |
+| --- | --- | --- |
+| **built** from `../backend` and `../frontend` (or `BACKEND_DIR`, `FRONTEND_DIR`) | both folders exist, or `--build` | `Images: built from ../backend and ../frontend` |
+| **published**, a released version from `registry.gitlab.com/zeiss/...` | the folders are missing, or `--version X.Y.Z` / `--version latest` | `Images: published 1.0.0 from registry.gitlab.com` |
+
+Steps:
+
+1. **published only, before anything changes:** finds the registry login (`REGISTRY_USER` / `REGISTRY_PASSWORD`, else
+   `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`, else this machine's `docker login registry.gitlab.com`) and asks the
+   registry (`scripts/versions.sh`) whether the version exists for api, web and gateway; `latest` is the newest
+   `X.Y.Z` (no release candidate) that all three have. Then whether the images are built for the nodes' platform
+   (`versions.sh --platforms`; a node never pulls another platform's image). A missing login, version or platform
+   stops it here, with the reason and what is published;
+2. runs `scripts/lib/local-secrets.sh` (creates the API's keys if missing);
+3. **built:** checks Docker is reachable and builds `product-management/api`, `product-management/web` and
+   `product-management/gateway` from the checkouts. The tag is the checkout's short commit, plus `-dirty-<time>` when
+   it has uncommitted changes, so every build has a unique tag. The web image gets `APP_VERSION=<tag>` (the release
+   it reports with browser errors). On k3s it copies the images into k3s' own container runtime
+   (`docker save | sudo k3s ctr images import`); Docker Desktop's Kubernetes runs the images of its Docker engine as
+   they are. Only these two kinds of cluster can run images built on the machine;
+4. writes `environments/local/generated/build/kustomization.yaml`, the Kustomize Component `environments/local`
+   includes: built, the three tags; published, the registry names (`newName`, from `environments/staging`), the
+   version (`newTag`) and `imagePullSecrets: gitlab-registry` on every Deployment. With `LOGS=off` also a patch that
+   empties `COLLECTOR_UPSTREAM`. The committed `environments/local` stays the same for both, and
+   `kubectl diff -k environments/local` compares against exactly what was applied;
+5. applies the namespace; **published:** creates or updates the pull Secret `gitlab-registry` from the login (the
+   cluster pulls the images itself, Docker Desktop and k3s alike; no `docker save` in this mode); if the Secret
+   `database-credentials` does not exist yet, runs
+   `scripts/lib/create-database.sh product-management product_management pm_app pm_migrator`;
+6. copies the shared Redis' password from `infra/redis-auth` into `product-management/redis-credentials` (a pod can
    read only its own namespace's Secrets);
-8. `kubectl apply -k environments/local`, waits for the rollouts (api 15 minutes, web and gateway 5 minutes each),
+7. `kubectl apply -k environments/local`, waits for the rollouts (api 15 minutes, web and gateway 5 minutes each),
    restarts the API if one of its Secrets changed, prints the pods and the application's address. The new API pods
    apply the database migrations themselves when they start (as `pm_migrator`, from `database-credentials`), and on
    an empty database insert the sample catalogue (24 products; `Database__SeedSampleData` in
    `environments/local/api.yaml`).
 
-**`staging`, `production`**:
+Switching between the two is one command either way (`--build`, or `--version 1.0.0`): the component is rewritten and
+the pods roll to the other images; the data stays.
+
+**`staging`, `production`** never build and never read `../backend` or `../frontend` (`--build` and `--version` are
+refused there):
 
 1. renders the environment and **refuses** if any image is still `newTag: unreleased` (no version chosen yet);
 2. applies the namespace; if the Secret `database-credentials` does not exist yet (first deploy to this cluster),
-   runs `create-database.sh product-management product_management pm_app pm_migrator`;
+   runs `scripts/lib/create-database.sh product-management product_management pm_app pm_migrator`;
 3. with `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`: creates or updates the image pull Secret `gitlab-registry`
    (registry `CI_REGISTRY`, default `registry.gitlab.com`); requires it to exist;
 4. with `API_SIGNING_KEY` and `API_CONSUMERS` (paths of files): checks the key is a PKCS#8 PEM and the JSON has
@@ -653,32 +724,36 @@ hand.
 
 Every environment therefore migrates the same way: the API does it when its new pods start (no separate step, so the
 schema always comes from exactly the image that runs). The database and its users must exist first, which is why
-`create-database.sh` runs before the apply. It never applies a local image to a remote cluster, and refuses
-`staging`/`production` on the `docker-desktop` context.
+`create-database.sh` runs before the apply. It never applies an image built on the machine to a remote cluster, and
+refuses `staging`/`production` on the `docker-desktop` context. The pull Secret is made from a docker config that `jq`
+builds from the environment and `kubectl` reads on stdin: the token is on no command line.
 
 | Variable | For | Effect |
 | --- | --- | --- |
 | `KUBE_CONTEXT` | all | the `kubectl` context to use (the GitLab agent: `<project path>:<agent name>`); default: the current one |
-| `BACKEND_DIR`, `FRONTEND_DIR` | local | other checkouts to build (default `../backend`, `../frontend`) |
-| `LOCAL_CLUSTER` | local | `docker-desktop` or `k3s`: how the images reach the cluster, when the detection is wrong |
+| `BACKEND_DIR`, `FRONTEND_DIR` | local, built | other checkouts to build (default `../backend`, `../frontend`); their existence also picks built over published |
+| `LOCAL_CLUSTER` | local, built | `docker-desktop` or `k3s`: how the images reach the cluster, when the detection is wrong |
 | `LOGS=off` | local | no log collector: the gateway answers the browser's error reports with 204 |
+| `REGISTRY_USER`, `REGISTRY_PASSWORD` | local, published | a deploy token with `read_registry` (for a server: a group deploy token such as `server-pull`) → Secret `gitlab-registry`; `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD` or `docker login registry.gitlab.com` work too |
 | `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD`, `CI_REGISTRY` | staging, production | the group deploy token `gitlab-deploy-token` (`read_registry`, on the zeiss group) → Secret `gitlab-registry` |
 | `API_SIGNING_KEY`, `API_CONSUMERS` | staging, production | files: the ES256 private key (PEM) and `consumers.json` → Secret `api-secrets` |
 
-Why: a local deploy is eight steps in a fixed order (keys before apply, the database and its users before the API
-starts); a remote deploy needs Secrets that must not be committed. The script makes both one command.
+Why: a local deploy is a fixed sequence (keys before apply, the database and its users before the API starts, the
+pull Secret before the pods); a remote deploy needs Secrets that must not be committed. The script makes both one
+command.
 
 ### versions.sh: the published versions
 
 | | |
 | --- | --- |
 | Purpose | list the versions of `api`, `web` or `gateway` that the app pipelines published (what an environment can be set to) |
-| Usage | `scripts/versions.sh <api\|web\|gateway\|all> [--stable] [--builds] [--registry <host>]`: `--stable` without pre-releases, `--builds` also the commit builds (`<short sha>` tags), `--registry` another registry host (a mirror, or a test registry such as `localhost:5050`) |
+| Usage | `scripts/versions.sh <api\|web\|gateway\|all> [--stable] [--builds] [--registry <host>]`: `--stable` without pre-releases, `--builds` also the commit builds (`<short sha>` tags), `--registry` another registry host (a mirror, or a test registry such as `localhost:5050`). `scripts/versions.sh <image\|all> --platforms <version>`: the platforms that version is built for (`linux/amd64`, ...), from its manifest |
 | Output | SemVer tags newest first, one per line (`1.4.0`, `1.4.0-rc.2`, `1.3.2`, ...); with `all` under a heading per image. Other tags (commit builds, `buildcache`) are not versions |
 | Changes | nothing (read-only) |
 
 How: the repositories are the `newName`s in `environments/staging/kustomization.yaml`
-(`registry.gitlab.com/zeiss/backend/api`, ...). It asks the registry's standard HTTP API
+(`registry.gitlab.com/zeiss/backend/api`, ...), read with `awk` (no `yq` needed, so it runs on a fresh server).
+`deploy.sh local --version` uses it to check a version exists before it deploys. It asks the registry's standard HTTP API
 (`GET /v2/<repository>/tags/list`, following its pages) with `curl`; GitLab's registry first sends it to its token
 service for a short-lived pull token. Credentials, the first that is set: `REGISTRY_USER` / `REGISTRY_PASSWORD` (e.g. a
 personal access token or deploy token with `read_registry`), `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD` (in the pipeline:
@@ -713,68 +788,6 @@ hand), it stays. An image with no release yet keeps its tag, with a warning.
 Why a script and not editing the YAML: it checks the version exists before anything is committed (a typo would
 otherwise become an `ImagePullBackOff` in the cluster), and it is the same command for a person and for the pipeline.
 
-### update-versions.sh: the pipeline's version commits
-
-| | |
-| --- | --- |
-| Purpose | turn `set-version.sh` into a git change, from the pipeline |
-| Usage | `scripts/update-versions.sh staging` (job `update:staging`); `scripts/update-versions.sh production` (job `propose:production`) |
-| Needs | `CI_JOB_TOKEN` (the job's own token; the project setting "Allow Git push requests to the repository" on, and the user who started the job allowed to push to `main`), or `DEPLOY_PUSH_TOKEN` instead (optional: any token with `write_repository` on this repository, for a GitLab before 18.4); either is read by a git credential helper, never printed. The registry credentials of `versions.sh`. `DEPLOY_REPO_URL` (default this project), `DEPLOY_REPO_BRANCH` (default `main`), `DRY_RUN=1` (no push) |
-
-* **staging**: clones `main`, runs `set-version.sh staging all latest` in the clone and, if anything changed, commits
-  `staging: api 1.4.0, web 1.4.0, gateway 1.4.0` (only the images that changed), pushes it to `main` and writes the file
-  `.updated` (the commit's subject). If `main` moved meanwhile it starts again from the new `main` (up to 5 times). A
-  push made with the job token starts no pipeline, so the job `update:staging` deploys that commit itself when
-  `.updated` exists: it checks out the new `main`, runs `deploy.sh staging apps` (the manifests; the new API pods
-  migrate) and `smoke.sh`. No new version: no commit, no `.updated`, nothing deployed.
-* **production**: sets production's images to the versions staging runs (each checked by `set-version.sh`), pushes the
-  branch `production/api-1.4.0-web-1.4.0-gateway-1.4.0` and opens the merge request
-  `production: api 1.4.0, web 1.4.0, gateway 1.4.0` with git push options. Merging it is the release decision.
-
-It is what Argo CD Image Updater's git write-back does for staging, and is switched off when Argo CD takes over.
-
-### validate.sh: check without a cluster
-
-| | |
-| --- | --- |
-| Purpose | prove that every environment, `infra/` and `argocd/` render and are valid, before anything is applied |
-| When | on every merge request and commit (`validate:manifests`), and before you push |
-| Usage | `scripts/validate.sh` (needs `kubectl`, `kubeconform`, `yq`, `jq`, `curl` and internet access for the schemas), or with only Docker: `docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 scripts/validate.sh`. Variables `KUBERNETES_VERSION` (default `1.34.0`), `ARGOCD_VERSION` (`v3.5.4`), `IMAGE_UPDATER_VERSION` (`v1.3.1`) |
-| Never | writes to the repository (works on a temporary copy, with placeholders for the gitignored `generated/` files) or talks to a cluster |
-
-Checks, per environment: it renders (`kubectl kustomize`); every object is valid against the Kubernetes schemas
-(`kubeconform -strict`: unknown fields are errors); every object is labelled `app.kubernetes.io/part-of=product-management`;
-the API has both connection strings, `Database__ApplyMigrationsOnStartup=true`, the migrator's user and password from
-`database-credentials` (keys `migrator-user`, `migrator-password`) and a `Database__SeedSampleData` of `true` or
-`false` (never `true` in production); the gateway has `API_UPSTREAM`, `JWKS_URL` and `COLLECTOR_UPSTREAM`. Staging and
-production: no Secret in the output, every Deployment pulls with `gitlab-registry`, every image is a registry image
-with a tag. Local: the only Secret is the generated `api-secrets`. For `infra/`: the three files and the dashboards'
-ConfigMap are valid, every dashboard is valid JSON, every object is labelled `part-of=infra` and has a
-`component` of `postgres`, `redis` or `logs` (what `infra.sh down` selects by), and there is no Secret. For
-`argocd/`: the Applications and the ImageUpdater are valid (`-strict`) against
-the custom resource definitions of the pinned Argo CD and Image Updater versions (downloaded from their release tags
-and turned into JSON schemas), and each Application points at an existing environment.
-
-### smoke.sh: check a deployed environment
-
-| | |
-| --- | --- |
-| Purpose | check an environment from outside, through its public URL, the way a user reaches it |
-| When | after every deployment (`smoke:staging`, `smoke:production`), and by hand |
-| Usage | `scripts/smoke.sh <base url>`, e.g. `scripts/smoke.sh http://localhost:8080`. Optional `SMOKE_CLIENT_ID`, `SMOKE_CLIENT_SECRET` (a viewer account of that environment) |
-| Changes | nothing (read-only requests) |
-
-Each check is retried up to 6 times, 10 s apart (the gateway may still be picking up new API pods):
-
-1. `GET /healthz` → 200 `ok`: the gateway is up (behind the Ingress, with TLS);
-2. `GET /` → 200 containing `<app-root`: the gateway reaches the web app;
-3. `POST /api/auth/token` with an unknown client → 401 `invalid_client`: the gateway reaches the API and the API
-   answers;
-4. with `SMOKE_CLIENT_ID` / `SMOKE_CLIENT_SECRET`: signs in and `GET /api/categories` → 200: tokens, the edge's token
-   check, the API and the database end to end.
-
-Example output: `[PASS] gateway /healthz (200)` … `Smoke check passed.`
-
 ### add-node.sh: add a machine to a k3s cluster
 
 | | |
@@ -796,6 +809,112 @@ taint. PostgreSQL (and its backup job) prefer a `database` node and tolerate its
 `cache`; `apps` nodes take any pod. Without such a node, the preference is simply not met and everything runs on the
 nodes there are. A volume stays on the node where it was created: add the database node *before* the first
 `scripts/infra.sh up postgres`, or move the database with a dump and restore.
+
+**For the pipeline** (`scripts/ci/`):
+
+### ci/validate.sh: check without a cluster
+
+| | |
+| --- | --- |
+| Purpose | prove that every environment, `infra/` and `argocd/` render and are valid, before anything is applied |
+| When | on every merge request and commit (`validate:manifests`); by hand before you push, if you like |
+| Usage | `scripts/ci/validate.sh` (needs `kubectl`, `kubeconform`, `yq`, `jq`, `curl` and internet access for the schemas), or with only Docker: `docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 scripts/ci/validate.sh`. Variables `KUBERNETES_VERSION` (default `1.34.0`), `ARGOCD_VERSION` (`v3.5.4`), `IMAGE_UPDATER_VERSION` (`v1.3.1`) |
+| Never | writes to the repository (works on a temporary copy, with placeholders for the gitignored `generated/` files) or talks to a cluster |
+
+Checks, per environment: it renders (`kubectl kustomize`); every object is valid against the Kubernetes schemas
+(`kubeconform -strict`: unknown fields are errors); every object is labelled `app.kubernetes.io/part-of=product-management`;
+the API has both connection strings, `Database__ApplyMigrationsOnStartup=true`, the migrator's user and password from
+`database-credentials` (keys `migrator-user`, `migrator-password`) and a `Database__SeedSampleData` of `true` or
+`false` (never `true` in production); the gateway has `API_UPSTREAM`, `JWKS_URL` and `COLLECTOR_UPSTREAM`. Staging and
+production: no Secret in the output, every Deployment pulls with `gitlab-registry`, every image is a registry image
+with a tag. Local: the only Secret is the generated `api-secrets`; it is rendered twice, once per image source of
+`deploy.sh local` (built: local names; published: registry names, a version and `gitlab-registry`, checked like
+staging). For `infra/`: the three files and the dashboards'
+ConfigMap are valid, every dashboard is valid JSON, every object is labelled `part-of=infra` and has a
+`component` of `postgres`, `redis` or `logs` (what `infra.sh down` selects by), and there is no Secret. For
+`argocd/`: the Applications and the ImageUpdater are valid (`-strict`) against
+the custom resource definitions of the pinned Argo CD and Image Updater versions (downloaded from their release tags
+and turned into JSON schemas), and each Application points at an existing environment.
+
+### ci/update-versions.sh: the pipeline's version commits
+
+| | |
+| --- | --- |
+| Purpose | turn `set-version.sh` into a git change, from the pipeline (a person runs `set-version.sh` and commits instead) |
+| Usage | `scripts/ci/update-versions.sh staging` (job `update:staging`); `scripts/ci/update-versions.sh production` (job `propose:production`) |
+| Needs | `CI_JOB_TOKEN` (the job's own token; the project setting "Allow Git push requests to the repository" on, and the user who started the job allowed to push to `main`), or `DEPLOY_PUSH_TOKEN` instead (optional: any token with `write_repository` on this repository, for a GitLab before 18.4); either is read by a git credential helper, never printed. The registry credentials of `versions.sh`. `DEPLOY_REPO_URL` (default this project), `DEPLOY_REPO_BRANCH` (default `main`), `DRY_RUN=1` (no push) |
+
+* **staging**: clones `main`, runs `set-version.sh staging all latest` in the clone and, if anything changed, commits
+  `staging: api 1.4.0, web 1.4.0, gateway 1.4.0` (only the images that changed), pushes it to `main` and writes the file
+  `.updated` (the commit's subject). If `main` moved meanwhile it starts again from the new `main` (up to 5 times). A
+  push made with the job token starts no pipeline, so the job `update:staging` deploys that commit itself when
+  `.updated` exists: it checks out the new `main`, runs `deploy.sh staging apps` (the manifests; the new API pods
+  migrate) and `smoke.sh`. No new version: no commit, no `.updated`, nothing deployed.
+* **production**: sets production's images to the versions staging runs (each checked by `set-version.sh`), pushes the
+  branch `production/api-1.4.0-web-1.4.0-gateway-1.4.0` and opens the merge request
+  `production: api 1.4.0, web 1.4.0, gateway 1.4.0` with git push options. Merging it is the release decision.
+
+It is what Argo CD Image Updater's git write-back does for staging, and is switched off when Argo CD takes over.
+
+### ci/smoke.sh: check a deployed environment
+
+| | |
+| --- | --- |
+| Purpose | check an environment from outside, through its public URL, the way a user reaches it |
+| When | after every deployment (`smoke:staging`, `smoke:production`); by hand after a local deploy (menu item 8 finds the URL) |
+| Usage | `scripts/ci/smoke.sh <base url>`, e.g. `scripts/ci/smoke.sh http://localhost:8080`. Optional `SMOKE_CLIENT_ID`, `SMOKE_CLIENT_SECRET` (a viewer account of that environment) |
+| Changes | nothing (read-only requests) |
+
+Each check is retried up to 6 times, 10 s apart (the gateway may still be picking up new API pods):
+
+1. `GET /healthz` → 200 `ok`: the gateway is up (behind the Ingress, with TLS);
+2. `GET /` → 200 containing `<app-root`: the gateway reaches the web app;
+3. `POST /api/auth/token` with an unknown client → 401 `invalid_client`: the gateway reaches the API and the API
+   answers;
+4. with `SMOKE_CLIENT_ID` / `SMOKE_CLIENT_SECRET`: signs in and `GET /api/categories` → 200: tokens, the edge's token
+   check, the API and the database end to end.
+
+Example output: `[PASS] gateway /healthz (200)` … `Smoke check passed.`
+
+**Called by the others** (`scripts/lib/`):
+
+### lib/local-secrets.sh: the API's local keys
+
+| | |
+| --- | --- |
+| Purpose | create the API's local development secrets on this machine, so no key is ever committed |
+| When | automatically by `scripts/deploy.sh local` (both image sources); by hand only with `FORCE=1`, to make new ones |
+| Usage | `scripts/lib/local-secrets.sh`; `FORCE=1 scripts/lib/local-secrets.sh` (new key and hashes: signs everyone out; then `scripts/deploy.sh local`). Variable `BACKEND_DIR` (default `../backend`) |
+| Writes | `environments/local/generated/signing-key.pem` (a new ES256 P-256 private key, PKCS#8 PEM) and `generated/consumers.json` (the demo accounts `viewer`, `clerk`, `manager` with role `viewer`, `stock-clerk`, `manager`; each secret equals its client id; stored as PBKDF2-SHA256 hashes, 100,000 iterations, the API's own format). Files are readable only by you (`umask 077`). If `../backend` and the .NET SDK are there, it also stores the same key and accounts in the API's .NET user-secrets, for `dotnet run` |
+| Needs | `openssl`, `python3`; the .NET SDK only for the user-secrets step (skipped without it) |
+| Idempotent | yes: creates only what is missing |
+| Never | used for staging or production: their keys come from CI/CD variables |
+
+### lib/create-database.sh: a database for a service
+
+| | |
+| --- | --- |
+| Purpose | give a service its own database on the shared PostgreSQL, with two users, and put their passwords in a Secret in the service's namespace |
+| When | never by hand for this system: the first `deploy.sh` to a cluster (local, staging or production) runs it when `database-credentials` is missing (that is why it is in `scripts/lib/`). By hand, from `scripts/lib/` as it is: to give **another** service a database, again after restoring a dump, or with `--rotate` to change passwords |
+| Usage | `scripts/lib/create-database.sh <service-namespace> <database> [app-user] [migrator-user] [--rotate]`; for this system: `scripts/lib/create-database.sh product-management product_management pm_app pm_migrator` (defaults for the users: `<database>_app`, `<database>_migrator`) |
+| Needs | `kubectl` only: it runs `psql` inside the PostgreSQL pod (`kubectl exec`); passwords travel on stdin |
+| Idempotent | yes; keeps the existing passwords unless `--rotate` |
+
+What it does in PostgreSQL:
+
+* the **migrator** user: owns the schema `public`, may create tables and trusted extensions; the migrations run as it;
+* the **app** user: may connect and use the schema, nothing more; its sessions end a statement after **30 s** and an
+  idle open transaction after **60 s** (guard rails against runaway queries and leaked transactions). Which tables it
+  may read and write is granted by the service's own migrations (for this API: the migration `GrantAppPermissions`);
+* the database itself, closed to everyone else (`REVOKE ALL ... FROM PUBLIC`);
+* the extension `pg_stat_statements` (query statistics);
+* hands tables and sequences owned by someone else (for example after a restore as `postgres`) to the migrator.
+
+Then it writes the Secret `<service-namespace>/database-credentials` with the keys `host`, `port`, `database`,
+`app-user`, `app-password`, `migrator-user`, `migrator-password`, creating the namespace if needed. With `--rotate` it
+prints how to restart the service's pods. Names must be lower-case letters, digits and `_`. Why: one PostgreSQL for
+the platform is cheaper to run and back up than one per service, and least-privilege users are easy to get wrong by
+hand.
 
 ## Configuration
 
@@ -891,8 +1010,8 @@ No Secret value is in git. Each one is created in the cluster by a script or a p
 | `loki-external` | infra | `url`, `username`, `password` | `infra.sh up logs` with `LOKI_URL` | `LOKI_URL`, `LOKI_USERNAME`, `LOKI_PASSWORD` | run `infra.sh up logs` with the new values (Alloy restarts) |
 | `database-credentials` | product-management | `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password` | `create-database.sh` | random | `create-database.sh product-management product_management pm_app pm_migrator --rotate`, then `kubectl -n product-management rollout restart deployment/api`. The API reads `app-password` (`PGPASSWORD`, its requests) and `migrator-user` / `migrator-password` (its migrations at startup) |
 | `redis-credentials` | product-management | `password` | `deploy.sh` on every run | a copy of `infra/redis-auth` | follows `redis-auth` automatically; the API restarts when it changes |
-| `api-secrets` (locally `api-secrets-<hash>`) | product-management | `signing-key`, `consumers.json` | local: Kustomize `secretGenerator` from `environments/local/generated/`; staging, production: `deploy.sh` | local: `local-secrets.sh`; remote: the File variables `API_SIGNING_KEY`, `API_CONSUMERS` | local: `FORCE=1 scripts/local-secrets.sh && scripts/deploy.sh local`; remote: change the CI/CD variable and re-run the deploy job. A new signing key signs every user out |
-| `gitlab-registry` | product-management | `.dockerconfigjson` | `deploy.sh` (staging, production) | `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD` (the group deploy token) | create a new deploy token named `gitlab-deploy-token` in the zeiss group, revoke the old one, re-run the deploy job |
+| `api-secrets` (locally `api-secrets-<hash>`) | product-management | `signing-key`, `consumers.json` | local: Kustomize `secretGenerator` from `environments/local/generated/`; staging, production: `deploy.sh` | local: `local-secrets.sh`; remote: the File variables `API_SIGNING_KEY`, `API_CONSUMERS` | local: `FORCE=1 scripts/lib/local-secrets.sh && scripts/deploy.sh local`; remote: change the CI/CD variable and re-run the deploy job. A new signing key signs every user out |
+| `gitlab-registry` | product-management | `.dockerconfigjson` | `deploy.sh` (staging, production; local with published images) | `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD` (the group deploy token); local: `REGISTRY_USER`, `REGISTRY_PASSWORD` (e.g. a group deploy token `server-pull`) or the machine's docker login | create a new deploy token named `gitlab-deploy-token` in the zeiss group, revoke the old one, re-run the deploy job; local: `scripts/deploy.sh local --version <the version it runs>` with the new token |
 | `gateway-tls` | product-management | `tls.crt`, `tls.key` | cert-manager | Let's Encrypt | automatic, before expiry |
 
 With Argo CD, three more Secrets in the namespace `argocd` (made once, by hand; see
@@ -908,8 +1027,8 @@ trusts the local socket), so `kubectl exec` rights on `infra` are database admin
 | | local | staging | production |
 | --- | --- | --- | --- |
 | Cluster | Docker Desktop (`docker-desktop`) or a single-node k3s (`default`) | its k3s cluster, through the GitLab agent (`KUBE_CONTEXT`) or a kubeconfig (`KUBECONFIG`) | its own |
-| How images arrive | built on the machine from `../backend`, `../frontend`; on k3s imported into containerd | pulled from `registry.gitlab.com/zeiss/{backend/api,frontend/web,frontend/gateway}:<version>` with `gitlab-registry` | the same versions, after staging |
-| Who chooses the versions | `deploy.sh local` (the checkouts' commits, in `generated/build`, not committed) | `update:staging` (schedule: the newest `X.Y.Z`, a commit to `main`), or a person with `set-version.sh` | a person: a merged merge request (`set-version.sh production ...` or `propose:production`) |
+| How images arrive | built on the machine from `../backend`, `../frontend` (on k3s imported into containerd), or a published version pulled from the registry with `gitlab-registry` ([which](#where-the-images-come-from-backend-frontend-or-the-registry)) | pulled from `registry.gitlab.com/zeiss/{backend/api,frontend/web,frontend/gateway}:<version>` with `gitlab-registry` | the same versions, after staging |
+| Who chooses the versions | `deploy.sh local`: the checkouts' commits, or `--version` (default: the newest release); in `generated/build`, not committed | `update:staging` (schedule: the newest `X.Y.Z`, a commit to `main`), or a person with `set-version.sh` | a person: a merged merge request (`set-version.sh production ...` or `propose:production`) |
 | Who applies | you, `scripts/deploy.sh local` | `deploy:staging`, automatic on `main` | `deploy:production`, started by a person |
 | Exposure | Service `LoadBalancer`: http://localhost:8080 (k3s: also http://&lt;server-ip&gt;:8080) | Ingress, https://staging.products.example.com (placeholder) | Ingress, https://products.example.com (placeholder) |
 | TLS | none | cert-manager, Let's Encrypt | the same |
@@ -919,33 +1038,91 @@ trusts the local socket), so `kubectl exec` rights on `infra` are database admin
 | Migrations | applied by the new API pods when they start (as `pm_migrator`), after `deploy.sh local` applies | the same, after `deploy:staging` (or `update:staging`) applies | the same, after `deploy:production` applies |
 | Sample data | 24 sample products on an empty database (`Database__SeedSampleData: "true"` in `api.yaml`) | the same | none (`"false"`) |
 | Swagger (OpenAPI) | on (port-forward) | on (port-forward) | off |
-| Smoke check | `scripts/smoke.sh http://localhost:8080` by hand | `smoke:staging` after each deploy | `smoke:production` after each deploy |
+| Smoke check | `scripts/ci/smoke.sh http://localhost:8080` by hand | `smoke:staging` after each deploy | `smoke:production` after each deploy |
 
 The hosts `*.example.com` are placeholders: replace them in `environments/<env>/ingress.yaml` and `STAGING_URL` /
 `PRODUCTION_URL` (in `.gitlab-ci.yml` or as project variables).
 
+## Where the images come from: `../backend`, `../frontend` or the registry
+
+The three repositories are cloned side by side, into one folder of your choice. Seen from this repository, `..` is
+that folder (the one above `deploy`), so `../backend` and `../frontend` are the other two checkouts:
+
+```text
+zeiss/                        any folder of yours
+├── backend/                  git clone https://gitlab.com/zeiss/backend.git     the API: code, Dockerfile
+├── frontend/                 git clone https://gitlab.com/zeiss/frontend.git    the web app and the gateway
+└── deploy/                   git clone https://gitlab.com/zeiss/deploy.git      this repository: run the scripts here
+    └── scripts/deploy.sh     finds ../backend and ../frontend next to it
+```
+
+`scripts/deploy.sh local` (and the menu's item 3) runs the application's images from one of two places, and says which
+in one line of its output:
+
+* **Built from `../backend` and `../frontend`**: for a developer who wants to see local changes in a real cluster
+  before releasing anything. Edit the API or the web app, run `scripts/deploy.sh local`, and the cluster runs exactly
+  that code (tags like `f920344-dirty-20261011121613` include uncommitted changes). It needs the two checkouts, Docker,
+  and a cluster that can run images built on the machine (Docker Desktop's Kubernetes, or k3s on the same machine).
+  Output: `Images: built from ../backend and ../frontend`.
+* **Published, from the registry**: for a server or a demo that has only this repository. It runs the versions the
+  backend and frontend pipelines released (`registry.gitlab.com/zeiss/backend/api:1.0.0`, `.../frontend/web:1.0.0`,
+  `.../frontend/gateway:1.0.0`), the same images staging and production run. It needs a registry login with the scope
+  `read_registry`, and no Docker at all (the cluster pulls the images itself). Output:
+  `Images: published 1.0.0 from registry.gitlab.com`.
+
+| You have | `scripts/deploy.sh local` runs | To choose otherwise |
+| --- | --- | --- |
+| `../backend` and `../frontend` (or `BACKEND_DIR`, `FRONTEND_DIR`) | images built from them | `--version X.Y.Z` (or `latest`): a published version instead |
+| only this repository | the newest version published for api, web and gateway alike (`latest`) | `--version X.Y.Z`: that version; `--build` insists on building and stops without the checkouts |
+| staging or production (the pipeline) | always the versions committed in `environments/<env>/kustomization.yaml` | nothing: `--build` and `--version` are refused there; staging and production never use `../backend` or `../frontend` |
+
+**The registry login** for published images is the first that is set: `REGISTRY_USER` / `REGISTRY_PASSWORD`,
+`CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`, or the machine's `docker login registry.gitlab.com`. `deploy.sh` first asks the
+registry whether the version exists for all three images (`scripts/versions.sh`) and stops with the published versions
+listed if it does not, and whether the images are built for the platform of the cluster's nodes (a node pulls only
+images of its own platform: `linux/amd64`, `linux/arm64`); then it stores the login in the cluster as the pull Secret
+`gitlab-registry` in `product-management`, as staging does. For a server, create a **group deploy token of its own** (zeiss group →
+Settings → Repository → Deploy tokens: name e.g. `server-pull`, scope `read_registry` only, an expiry date) rather
+than reusing the pipeline's `gitlab-deploy-token`: each server's token can then be revoked on its own, and the
+pipeline's never leaves GitLab. Keep the token out of the shell's history: use the menu (it reads the token hidden),
+or `read -rs REGISTRY_PASSWORD` and `export REGISTRY_USER=<the token's username> REGISTRY_PASSWORD` first.
+
+The difference never reaches the committed files: `environments/local` names the images `product-management/api`,
+`product-management/web` and `product-management/gateway`, and the generated, uncommitted Component
+`environments/local/generated/build` either sets the tags built here, or swaps in the registry names, the version and
+the pull Secret. Switching is one command (`--build`, or `--version 1.0.0`); the pods roll and the data stays.
+
+**Platforms.** The app pipelines publish what their builds produce: version `1.0.0` is built for `linux/amd64` only
+(`scripts/versions.sh all --platforms 1.0.0` shows it). It runs on an ordinary x86-64 server, but not on an ARM
+machine: a VM on a Mac with Apple silicon (Docker Desktop's Kubernetes there too), a Raspberry Pi, an AWS Graviton
+instance. There `deploy.sh` stops before it changes anything, with "Version 1.0.0 cannot run on this cluster: its
+images are built for linux/amd64, the nodes are linux/arm64"; build from the checkouts instead (`--build`), or publish
+the versions for both platforms (`docker buildx build --platform linux/amd64,linux/arm64` in the backend and frontend
+pipelines).
+
 ## Where it runs
 
-The whole system runs on one machine with `scripts/infra.sh up` and `scripts/deploy.sh local`, on a Kubernetes that can
-run images built on that machine: Docker Desktop's on macOS and Windows, or k3s on an Ubuntu server. The scripts are
-the same everywhere.
+The whole system runs on one machine with `scripts/infra.sh up` and `scripts/deploy.sh local` (or the menu): Docker
+Desktop's Kubernetes on macOS and Windows, or k3s on an Ubuntu server. The scripts are the same everywhere, and so are
+the two image sources ([Where the images come from](#where-the-images-come-from-backend-frontend-or-the-registry)).
 
 | | macOS | Windows | Ubuntu server (22.04, 24.04) |
 | --- | --- | --- | --- |
 | Kubernetes | Docker Desktop, Kubernetes enabled | Docker Desktop (WSL 2 backend), Kubernetes enabled | k3s v1.34.1+k3s1, one node, installed by `scripts/setup-ubuntu.sh` |
 | Shell | Terminal | an Ubuntu shell in WSL 2 | ssh |
-| You install | Docker Desktop; `git`, `openssl`, `python3`, `curl` come with macOS (Xcode command line tools) | Docker Desktop with WSL integration for Ubuntu; in Ubuntu: `sudo apt install -y git openssl python3 curl` | nothing: `scripts/setup-ubuntu.sh` installs Docker Engine 29.9.0, k3s, `kubectl`, `git`, `openssl`, `python3`, `curl`, `jq` |
+| You install | Docker Desktop; `git`, `openssl`, `python3`, `curl`, `jq` come with macOS (Xcode command line tools; `jq` since macOS 15) | Docker Desktop with WSL integration for Ubuntu; in Ubuntu: `sudo apt install -y git openssl python3 curl jq` | nothing: `scripts/setup-ubuntu.sh` installs Docker Engine 29.9.0, k3s, `kubectl`, `git`, `openssl`, `python3`, `curl`, `jq` |
 | Resources | Docker Desktop: 4 CPUs, 8 GB of memory | the same | 4 CPUs, 8 GB of memory, 30 GB of disk |
 | `kubectl` context | `docker-desktop` | `docker-desktop` | `default` |
-| Images | built by Docker Desktop, run as they are | the same | built by Docker Engine, copied into k3s (`docker save \| sudo k3s ctr images import`) |
+| Images | built by Docker Desktop and run as they are, or published ones pulled from the registry | the same | built by Docker Engine and copied into k3s (`docker save \| sudo k3s ctr images import`), or published ones pulled by k3s |
 | Application | http://localhost:8080 | http://localhost:8080 | http://localhost:8080 on the server, http://&lt;server-ip&gt;:8080 from elsewhere (k3s' ServiceLB) |
 | Storage class | `hostpath` | `hostpath` | `local-path` |
 | NetworkPolicies | ignored | ignored | enforced |
-| Verified | yes, every change | the scripts' portability (no macOS-only commands); not run on Windows | yes, end to end on a fresh Ubuntu 24.04 VM |
+| Verified | yes, every change | the scripts' portability (no macOS-only commands); not run on Windows | yes, end to end on a fresh Ubuntu 24.04 VM (arm64) with images built there; with only this repository, the published path up to the image pull (see [Status](#status)) |
 
-`scripts/deploy.sh local` tells the two kinds of cluster apart by the context (`docker-desktop`) or by a k3s node named
-like this machine; `LOCAL_CLUSTER=docker-desktop|k3s` overrides that. Any other cluster (a remote k3s, a cloud cluster)
-cannot run images built on the laptop: release versions through the app pipelines and deploy staging or production.
+For images built on the machine, `scripts/deploy.sh local` tells the two kinds of cluster apart by the context
+(`docker-desktop`) or by a k3s node named like this machine; `LOCAL_CLUSTER=docker-desktop|k3s` overrides that. Any
+other cluster (a remote k3s, a cloud cluster) cannot run images built on the laptop: give it published images
+(`--version`), or deploy staging or production.
 
 **macOS.** Docker Desktop → Settings → Kubernetes → Enable Kubernetes; Resources: 4 CPUs, 8 GB. Then the
 [local quick start](#local-quick-start).
@@ -958,20 +1135,25 @@ its home directory (`~`, not `/mnt/c`: Linux line endings and file modes, and mu
 [local quick start](#local-quick-start); the browser on Windows opens http://localhost:8080. (Git Bash works in
 principle too, with `python3` on the `PATH`; `.gitattributes` keeps the scripts' LF line endings.)
 
-**Ubuntu server.** A fresh server with sudo and internet access:
+**Ubuntu server.** A fresh server with sudo and internet access needs only this repository and a deploy token: it
+runs the published images.
 
 ```bash
-git clone https://gitlab.com/zeiss/backend.git
-git clone https://gitlab.com/zeiss/frontend.git
 git clone https://gitlab.com/zeiss/deploy.git
 cd deploy
 scripts/setup-ubuntu.sh          # Docker Engine, k3s and kubectl, pinned; about 2 minutes; safe to run again
 newgrp docker                    # you were added to the group docker: start a shell in it (or log in again)
 
 scripts/infra.sh up              # as on Docker Desktop (k3s brings its own metrics-server)
-scripts/deploy.sh local          # builds the images, copies them into k3s → http://<server-ip>:8080
-scripts/smoke.sh http://localhost:8080
+REGISTRY_USER=<token username> REGISTRY_PASSWORD=<token> \
+  scripts/deploy.sh local --version 1.0.0     # k3s pulls the published images → http://<server-ip>:8080
+scripts/ci/smoke.sh http://localhost:8080
 ```
+
+Or all of it from the menu: `./menu.sh`, items 1, 2, 3 and 8 (it reads the token hidden). The token is a group deploy
+token with `read_registry` ([Where the images come from](#where-the-images-come-from-backend-frontend-or-the-registry)); `--version latest` takes the newest release. To
+try your own changes on the server instead, clone `backend` and `frontend` next to `deploy` and run
+`scripts/deploy.sh local`: Docker builds the images there and copies them into k3s.
 
 On k3s the volumes are directories on the server (`local-path`; `postgres-backups` stays `Pending` until the first
 backup uses it), and the NetworkPolicies are enforced. From a laptop, `kubectl` reaches the server with a copy of its
@@ -994,34 +1176,40 @@ but then the tools of every job (`kubectl`, `kubeconform`, `yq`, `jq`, `shellche
 
 ### Local quick start
 
-Clone the three repositories side by side (`scripts/deploy.sh local` builds the images from `../backend` and
-`../frontend`), on a machine prepared as in [Where it runs](#where-it-runs):
+The menu does all of this (`./menu.sh`, [Start here](#start-here-the-menu)); these are the commands behind it. On a
+machine prepared as in [Where it runs](#where-it-runs), clone the three repositories side by side to build the images
+from the code, or only this one to run a published version
+([Where the images come from](#where-the-images-come-from-backend-frontend-or-the-registry)):
 
 ```bash
-git clone https://gitlab.com/zeiss/backend.git
-git clone https://gitlab.com/zeiss/frontend.git
+git clone https://gitlab.com/zeiss/backend.git    # only to build from source
+git clone https://gitlab.com/zeiss/frontend.git   # only to build from source
 git clone https://gitlab.com/zeiss/deploy.git
 cd deploy
-kubectl config use-context docker-desktop    # macOS, Windows; on the Ubuntu server: default (k3s)
+kubectl config use-context docker-desktop         # macOS, Windows; on the Ubuntu server: default (k3s)
 
-scripts/infra.sh up              # namespace infra: PostgreSQL, Redis, Loki + Grafana + Alloy (and metrics-server)
-scripts/deploy.sh local          # the API, web app and gateway → http://localhost:8080 (k3s: also http://<server-ip>:8080)
-scripts/smoke.sh http://localhost:8080
+scripts/infra.sh up                 # namespace infra: PostgreSQL, Redis, Loki + Grafana + Alloy (and metrics-server)
+scripts/deploy.sh local             # the API, web app and gateway → http://localhost:8080 (k3s: http://<server-ip>:8080)
+                                    #   with ../backend and ../frontend: built from them; without: the newest
+                                    #   published version (set REGISTRY_USER and REGISTRY_PASSWORD, a deploy token)
+scripts/ci/smoke.sh http://localhost:8080
 ```
 
 Sign in with `viewer`/`viewer`, `clerk`/`clerk` or `manager`/`manager`. The first `scripts/deploy.sh local` also
 creates the service's database (`create-database.sh`) and the API's local keys (`local-secrets.sh`). The images are
-built in Docker, so neither .NET nor Node is needed to deploy.
+built in Docker or pulled from the registry, so neither .NET nor Node is needed to deploy.
 
 After a code change in backend or frontend, run `scripts/deploy.sh local` again: it rebuilds and rolls the pods (the
-new API pods apply any new migration first). `kubectl diff -k environments/local` shows what differs from the last
-deploy (nothing, normally).
+new API pods apply any new migration first). `scripts/deploy.sh local --version 1.0.0` switches the same cluster to a
+published version, and `--build` back; the data stays. `kubectl diff -k environments/local` shows what differs from
+the last deploy (nothing, normally).
 
 ### Start over
 
 Removes everything a previous deploy left, **including every row in the database and every log line**, and deploys
 from nothing. The API creates the tables in the empty database when it starts (its migrations) and inserts the sample
-catalogue (24 products).
+catalogue (24 products). The menu's item 9 runs this block after you type `delete everything`, and only on a cluster
+of this machine.
 
 ```bash
 kubectl config use-context docker-desktop                         # on the Ubuntu server: default
@@ -1031,11 +1219,13 @@ rm -rf environments/local/generated                               # the local si
 
 scripts/infra.sh up                                               # fresh infrastructure and random passwords
 scripts/deploy.sh local                                           # database + users, keys, images, apply (the API migrates)
-scripts/smoke.sh http://localhost:8080                            # 4 checks through the gateway (3 without SMOKE_CLIENT_*)
+scripts/ci/smoke.sh http://localhost:8080                         # 4 checks through the gateway (3 without SMOKE_CLIENT_*)
 ```
 
-To keep the data and only rebuild the application, skip the first four commands. k3s itself stays installed (to remove
-it too: `/usr/local/bin/k3s-uninstall.sh`, then `scripts/setup-ubuntu.sh` installs it again).
+`scripts/deploy.sh local` builds from `../backend` and `../frontend` when they are there; with only this repository it
+needs the registry login (`REGISTRY_USER=... REGISTRY_PASSWORD=... scripts/deploy.sh local --version 1.0.0`). To keep
+the data and only redeploy the application, skip the first four commands. k3s itself stays installed (to remove it
+too: `/usr/local/bin/k3s-uninstall.sh`, then `scripts/setup-ubuntu.sh` installs it again).
 
 ### A new environment, the first time
 
@@ -1125,10 +1315,10 @@ flowchart LR
   creates a GitLab Release with the image digests and the changes. That is all the app repositories do.
 * **Updating staging.** The pipeline schedule runs `update:staging` here (every 15 minutes): `scripts/versions.sh` reads
   the registry, `scripts/set-version.sh staging all latest` takes the newest `X.Y.Z` of each image (never a release
-  candidate, never backwards), and `scripts/update-versions.sh` commits `staging: api 1.4.0` to `main` with the job's
+  candidate, never backwards), and `scripts/ci/update-versions.sh` commits `staging: api 1.4.0` to `main` with the job's
   own token. A push made with the job token starts no pipeline, so the same job then deploys that commit:
   `scripts/deploy.sh staging apps` (apply, then wait for the rollouts; the new API pods migrate first) and
-  `scripts/smoke.sh`, under staging's lock (`resource_group: staging`). Nothing new: no commit, no deployment. A
+  `scripts/ci/smoke.sh`, under staging's lock (`resource_group: staging`). Nothing new: no commit, no deployment. A
   person's commit to `environments/staging` (or a merge) starts the normal pipeline instead: `validate:*`,
   `deploy:staging`, `smoke:staging`. A release candidate reaches staging only when a person sets it
   (`set-version.sh staging api 1.5.0-rc.1`, commit).
@@ -1156,7 +1346,7 @@ flowchart LR
 ### Moving to Argo CD
 
 Today the pipeline applies; Argo CD can take over without changing the environments' layout. Everything it needs is
-prepared in `argocd/` and checked by `scripts/validate.sh` on every change, but nothing is installed:
+prepared in `argocd/` and checked by `scripts/ci/validate.sh` on every change, but nothing is installed:
 
 | Today (pipeline) | With Argo CD | Prepared in |
 | --- | --- | --- |
@@ -1220,7 +1410,7 @@ What changes for people: releasing in backend and frontend does not change at al
 newest version by itself, now through Image Updater's commits (`build: automatic update of ...`). Production is still a
 merge request; after merging, the release is the Sync button in Argo CD (or `argocd app sync
 product-management-production`) instead of the `deploy:production` job, and Argo CD shows at any time whether a
-cluster differs from git. The smoke check becomes a manual `scripts/smoke.sh <url>` (or an Argo CD PostSync hook).
+cluster differs from git. The smoke check becomes a manual `scripts/ci/smoke.sh <url>` (or an Argo CD PostSync hook).
 `infra/` can become a third Application with manual sync.
 
 ## Use it
@@ -1314,7 +1504,7 @@ opens up to 10 connections and `max_connections` is 200.
 
 ### Rotate passwords and keys
 
-* **Database users:** `scripts/create-database.sh product-management product_management pm_app pm_migrator --rotate`,
+* **Database users:** `scripts/lib/create-database.sh product-management product_management pm_app pm_migrator --rotate`,
   then `kubectl -n product-management rollout restart deployment/api` (the API reads both passwords: `pm_app` for its
   requests, `pm_migrator` for its migrations at startup).
 * **Redis:** `kubectl -n infra delete secret redis-auth && scripts/infra.sh up redis && scripts/deploy.sh <env> apps`
@@ -1331,12 +1521,13 @@ opens up to 10 connections and `max_connections` is 200.
     | kubectl apply -f -
   ```
 
-* **Token signing key, accounts:** locally `FORCE=1 scripts/local-secrets.sh && scripts/deploy.sh local`; in staging
+* **Token signing key, accounts:** locally `FORCE=1 scripts/lib/local-secrets.sh && scripts/deploy.sh local`; in staging
   and production change the File variables `API_SIGNING_KEY` / `API_CONSUMERS` and re-run the deploy job (it restarts
   the API). Every existing token becomes invalid; the gateway fetches the new public key by itself (an unknown key id
   triggers a JWKS download, at most once per 30 s).
 * **Registry token:** a new deploy token `gitlab-deploy-token` in the zeiss group, revoke the old one, then re-run the
-  deploy job.
+  deploy job. A server's own token (`server-pull`): a new one, then `scripts/deploy.sh local --version <the version it
+  runs>` with it (it replaces the Secret `gitlab-registry`), then revoke the old one.
 * **Pushing to this repository:** nothing to rotate: `update:staging` and `propose:production` push with the job
   token, which lives only as long as the job. (A `DEPLOY_PUSH_TOKEN`, where one is used, is replaced like any token.)
 
@@ -1369,8 +1560,8 @@ kubectl -n infra delete pod backup-reader
 kubectl -n product-management scale deployment/api --replicas=0
 kubectl -n infra exec -i statefulset/postgres -- \
   pg_restore -U postgres -d product_management --clean --if-exists < product_management.dump
-scripts/create-database.sh product-management product_management pm_app pm_migrator   # hands the objects to pm_migrator
-kubectl -n infra rollout restart deployment/redis                                       # the cache must not outlive the data
+scripts/lib/create-database.sh product-management product_management pm_app pm_migrator   # hands the objects to pm_migrator
+kubectl -n infra rollout restart deployment/redis                                           # the cache must not outlive the data
 kubectl -n product-management scale deployment/api --replicas=2
 ```
 
@@ -1388,8 +1579,9 @@ scripts/add-node.sh admin@apps-1.example.internal apps
 scripts/add-node.sh admin@db-1.example.internal database --dry-run      # print the steps only
 ```
 
-`scripts/deploy.sh local` copies its images only into the k3s of the machine it runs on, so a cluster of several
-machines runs registry images, as staging and production do.
+Images built by `scripts/deploy.sh local` exist only on the machine that built them, so a cluster of several
+machines runs published images: `scripts/deploy.sh local --version <X.Y.Z>` (every node pulls them with
+`gitlab-registry`), or staging and production as committed.
 
 ### Upgrade
 
@@ -1416,17 +1608,17 @@ The pipeline of this repository ([`.gitlab-ci.yml`](.gitlab-ci.yml)):
 
 | Job | Stage | When | Does |
 | --- | --- | --- | --- |
-| `validate:manifests` | validate | every merge request and commit | `scripts/validate.sh` (environments, `infra/`, `argocd/`); extracts the Alloy configuration for the next job |
-| `validate:scripts` | validate | every merge request and commit | `shellcheck scripts/*.sh` |
+| `validate:manifests` | validate | every merge request and commit | `scripts/ci/validate.sh` (environments, `infra/`, `argocd/`); extracts the Alloy configuration for the next job |
+| `validate:scripts` | validate | every merge request and commit | `shellcheck menu.sh scripts/*.sh scripts/ci/*.sh scripts/lib/*.sh` |
 | `validate:alloy` | validate | every merge request and commit | `alloy validate` and `alloy fmt` on the configuration inside `infra/logs.yaml` |
-| `update:staging` | staging | the **pipeline schedule** on `main` with `STAGING_ENABLED`; also **manual** in any pipeline on `main` | `scripts/update-versions.sh staging`: the newest released versions into `environments/staging`, committed to `main` with the job token; when something was committed, deploys it in the same job (`scripts/deploy.sh staging apps`, then `scripts/smoke.sh $STAGING_URL`), since a job-token push starts no pipeline |
-| `deploy:staging` | staging | `main`, `STAGING_ENABLED`, when `environments/staging/`, `apps/`, `infra/` or `scripts/deploy.sh` changed (people's commits and merges) | `scripts/deploy.sh staging apps`: Secrets, apply, rollouts (the new API pods migrate the database as they start) |
-| `smoke:staging` | staging | after `deploy:staging` | `scripts/smoke.sh $STAGING_URL` |
+| `update:staging` | staging | the **pipeline schedule** on `main` with `STAGING_ENABLED`; also **manual** in any pipeline on `main` | `scripts/ci/update-versions.sh staging`: the newest released versions into `environments/staging`, committed to `main` with the job token; when something was committed, deploys it in the same job (`scripts/deploy.sh staging apps`, then `scripts/ci/smoke.sh $STAGING_URL`), since a job-token push starts no pipeline |
+| `deploy:staging` | staging | `main`, `STAGING_ENABLED`, when `environments/staging/`, `apps/`, `infra/`, `scripts/deploy.sh` or `scripts/lib/` changed (people's commits and merges) | `scripts/deploy.sh staging apps`: Secrets, apply, rollouts (the new API pods migrate the database as they start) |
+| `smoke:staging` | staging | after `deploy:staging` | `scripts/ci/smoke.sh $STAGING_URL` |
 | `infra:staging` | staging | `main`, `STAGING_ENABLED`, **manual** | `scripts/deploy.sh staging infra` |
-| `deploy:production` | production | `main`, `PRODUCTION_ENABLED`, when `environments/production/`, `apps/` or `scripts/deploy.sh` changed; **manual** | `scripts/deploy.sh production apps`: Secrets, apply, rollouts (the new API pods migrate the database as they start) |
-| `smoke:production` | production | after `deploy:production` | `scripts/smoke.sh $PRODUCTION_URL` |
+| `deploy:production` | production | `main`, `PRODUCTION_ENABLED`, when `environments/production/`, `apps/`, `scripts/deploy.sh` or `scripts/lib/` changed; **manual** | `scripts/deploy.sh production apps`: Secrets, apply, rollouts (the new API pods migrate the database as they start) |
+| `smoke:production` | production | after `deploy:production` | `scripts/ci/smoke.sh $PRODUCTION_URL` |
 | `infra:production` | production | `main`, `PRODUCTION_ENABLED`, **manual** | `scripts/deploy.sh production infra` |
-| `propose:production` | production | `main`, `PRODUCTION_ENABLED`, **manual** (protected environment `production`) | `scripts/update-versions.sh production`: the merge request "production: api 1.4.0, ..." with the versions staging runs |
+| `propose:production` | production | `main`, `PRODUCTION_ENABLED`, **manual** (protected environment `production`) | `scripts/ci/update-versions.sh production`: the merge request "production: api 1.4.0, ..." with the versions staging runs |
 
 Deploy, infra and update jobs of one environment share a `resource_group`, so two never run at once. A branch with an open
 merge request gets only the merge-request pipeline. Without `STAGING_ENABLED` / `PRODUCTION_ENABLED` the pipeline only
@@ -1469,13 +1661,18 @@ a credential of this repository or of a cluster.
 | --- | --- | --- |
 | `No Kubernetes context: set KUBE_CONTEXT ... or KUBECONFIG` | kubectl has no current context | `kubectl config use-context <name>`; in CI set `KUBE_CONTEXT` or a File `KUBECONFIG` |
 | `staging runs on its own cluster, not docker-desktop` | deploying a remote environment to the laptop's cluster | select that cluster's context |
-| `local builds the images on this machine, and the context X cannot run them` | the context is not Docker Desktop nor a k3s node of this machine | switch context, or `LOCAL_CLUSTER=docker-desktop\|k3s` if the detection is wrong |
+| `Images built on this machine cannot reach the context X without a registry` | building images (the checkouts exist, or `--build`) for a context that is neither Docker Desktop nor a k3s node of this machine | switch context; `LOCAL_CLUSTER=docker-desktop\|k3s` if the detection is wrong; or run published images there: `--version <X.Y.Z\|latest>` |
 | `Docker is not reachable (docker info)` | Docker Desktop not started; on Ubuntu, your shell is not in the group `docker` yet | start Docker; after `setup-ubuntu.sh`: `newgrp docker` or log in again |
-| `No backend checkout at ../backend` | the three repositories are not side by side | clone them next to each other, or set `BACKEND_DIR` / `FRONTEND_DIR` |
+| `No checkout at ../backend to build (--build)` | `--build` without the checkouts next to this repository | clone backend and frontend next to it ([Where the images come from](#where-the-images-come-from-backend-frontend-or-the-registry)), set `BACKEND_DIR` / `FRONTEND_DIR`, or leave out `--build` to run a published version |
+| `Published images need a login to registry.gitlab.com` | no `../backend` and `../frontend` (or `--version`), so the published images are used, and no registry login is set | `REGISTRY_USER` / `REGISTRY_PASSWORD` (a deploy token with `read_registry`, e.g. `server-pull`), or `docker login registry.gitlab.com`, or the menu (it asks); or clone the two repositories to build |
+| `Version 1.2.3 is not published for: web gateway` (with the published versions listed) | that version does not exist for every image: a typo, or api and the frontend were released with different numbers | one of the listed versions (`scripts/versions.sh all`); `--version latest` takes the newest one all three have |
+| `Version 1.0.0 cannot run on this cluster: its images are built for linux/amd64, the nodes are linux/arm64` | the published images are for another processor architecture than the cluster's nodes (an ARM machine: a VM on Apple silicon, a Raspberry Pi, Graviton) | build from the checkouts on that machine (`--build`), or publish multi-platform images (`docker buildx build --platform linux/amd64,linux/arm64` in the app pipelines) |
+| pod `ImagePullBackOff`: `no match for platform in manifest` | the same, deployed without that check (or a node of another architecture joined later) | as above; `scripts/versions.sh all --platforms <version>` shows what a version is built for |
+| `No released version X.Y.Z is published for all of api, web and gateway yet` | nothing released yet, or no version number in common | release one (a `vX.Y.Z` tag in backend and in frontend), or build from the checkouts |
 | `environments/staging names no version yet for some images (newTag: unreleased)` | no version chosen for an image: backend or frontend has not published one, or nobody set it | tag a version in that repository (`v1.0.0`), then `update:staging` (or `scripts/set-version.sh staging all latest` and commit) |
 | `set-version.sh`: `api 1.4.0 is not in the registry` | a typo, or the tag pipeline did not publish it (yet) | `scripts/versions.sh api`; check the tag's pipeline in backend |
 | `publish:*` fails (backend or frontend): `... already exists as another image ...: versions are never overwritten` | the version `X.Y.Z` was published before from another build (a tag deleted and re-created, or moved) | versions are never overwritten: release a new one (`v1.4.1`); a re-run of the same pipeline is fine (same image, nothing to do) |
-| `versions.sh`: `No registry token ...` / `Not allowed to read ... (401/403)` | no or wrong registry credentials | `REGISTRY_USER` / `REGISTRY_PASSWORD` (a token with `read_registry`), or `docker login registry.gitlab.com`; in CI the group deploy token `gitlab-deploy-token` must exist |
+| `versions.sh` or `deploy.sh local --version`: `No registry token ...`, `Not allowed to read ... (401/403)` or `... is private and no credentials are set` | no registry login, or a wrong one: a typo, revoked or expired, without `read_registry`, or a project token that sees one project's images only | `REGISTRY_USER` / `REGISTRY_PASSWORD` (a group deploy token with `read_registry`), or `docker login registry.gitlab.com`; `scripts/versions.sh all` checks it; in CI the group deploy token `gitlab-deploy-token` must exist |
 | `update-versions.sh`: `No token to push with` | run outside a pipeline (no `CI_JOB_TOKEN`) and without `DEPLOY_PUSH_TOKEN` | run it through the job, or set `DEPLOY_PUSH_TOKEN` (a token with `write_repository`), or `DRY_RUN=1` |
 | `update:staging` / `propose:production` fails to push (`403`, `You are not allowed to push code`, `pre-receive hook declined`) | the job token may not push: the project setting is off, or the user who started the job (the schedule's owner) cannot push to the protected `main` | Settings → CI/CD → Job token permissions → turn on "Allow Git push requests to the repository"; the schedule's owner must be a Maintainer and Maintainers allowed to push to `main` (Protected branches). On a GitLab before 18.4: `DEPLOY_PUSH_TOKEN` |
 | staging changed in git (`staging: api 1.4.0`) but no pipeline ran for that commit | expected: a push made with the job token starts no pipeline | nothing: `update:staging` deployed it itself (its log shows `deploy.sh` and `smoke.sh`); if that step failed, fix the cause and run a pipeline on `main` (Build → Pipelines → Run pipeline): `deploy:staging` applies it (re-running `update:staging` finds nothing new to commit) |
@@ -1487,8 +1684,8 @@ a credential of this repository or of a cluster.
 | `No Secret gitlab-registry` / `No Secret api-secrets` | the CI/CD variables are missing | create the group deploy token; set `API_SIGNING_KEY`, `API_CONSUMERS` (File type) for the environment |
 | `API_SIGNING_KEY is not a PKCS#8 PEM private key` | wrong key format | `docker run --rm <api image> generate-signing-key` |
 | `No Secret infra/redis-auth` | the shared Redis is not running | `scripts/infra.sh up redis` (or `deploy.sh <env> infra`) |
-| pod `ImagePullBackOff` / `ErrImagePull` | remote: the tag does not exist or `gitlab-registry` is wrong; local: the image is not on the node (k3s import skipped) | `kubectl describe pod <pod>`; check the tag in the registry and the deploy token; locally run `deploy.sh local` again |
-| new api pods fail at startup with `The database is still unreachable ... (or the migrator's user or password is wrong)`, or `password authentication failed for user "pm_migrator"` | the database's users were deleted (`infra.sh down postgres --delete-data`) but the old `database-credentials` remains | `scripts/create-database.sh product-management product_management pm_app pm_migrator` (it re-creates the users with the stored passwords) |
+| pod `ImagePullBackOff` / `ErrImagePull` | remote, or local with published images: the tag does not exist, or the token in `gitlab-registry` was revoked or expired (`401 Unauthorized` / `403 Forbidden` in the pod's events); local, built: the image is not on the node (k3s import skipped) | `kubectl describe pod <pod>`; check the tag (`scripts/versions.sh all`) and the deploy token; locally run `deploy.sh local` again (with a valid token: it replaces `gitlab-registry`) |
+| new api pods fail at startup with `The database is still unreachable ... (or the migrator's user or password is wrong)`, or `password authentication failed for user "pm_migrator"` | the database's users were deleted (`infra.sh down postgres --delete-data`) but the old `database-credentials` remains | `scripts/lib/create-database.sh product-management product_management pm_app pm_migrator` (it re-creates the users with the stored passwords) |
 | `postgres-backups` PVC `Pending` on k3s | normal: `local-path` binds a volume only when a pod first uses it | nothing; it binds at the first backup (or `create job --from=cronjob/postgres-backup`) |
 | a pod `Pending` with `Insufficient cpu` / `memory` | the requests do not fit the node | give Docker Desktop 4 CPUs and 8 GB; or lower `resources.requests` |
 | `kubectl get hpa` shows `<unknown>` targets | no metrics-server | `scripts/infra.sh up` installs it (on k3s: wait for k3s' own) |
@@ -1506,9 +1703,11 @@ a credential of this repository or of a cluster.
 | | |
 | --- | --- |
 | Verified locally (Docker Desktop Kubernetes, macOS) | `scripts/infra.sh up`, `scripts/deploy.sh local`: the API, web and gateway with the shared infrastructure, 850,000 products and a 20-million-row stock ledger; every assessment requirement, the end-to-end tests (Playwright), load tests (k6) and the log pipeline (Loki, Grafana, 12 alert rules) pass against it |
+| Verified, published images (k3s on an Ubuntu 24.04 VM, arm64, with only this repository) | after a start over and `scripts/infra.sh up`: `scripts/deploy.sh local` without a login stops with its explanation, `--version 1.2.3` lists what is published, `--version 1.0.0` creates `gitlab-registry`, writes the component (registry names, `1.0.0`, `imagePullSecrets`) and applies; k3s authenticates to registry.gitlab.com with that Secret and fetches the image index, which holds `linux/amd64` only, so the arm64 node cannot run it (`no match for platform in manifest`). The check that now stops this beforehand was added and verified there and on the Mac. The same folder then switched to built images (`--build`): the API migrated the empty database (24 products), smoke check and every assessment requirement pass from the Mac. An end-to-end run of published images needs an x86-64 machine, or multi-platform images |
+| Verified, the menu | `./menu.sh` driven with piped input on macOS (status, versions, infrastructure status, smoke check, add-node dry run, start over declined) and on the Ubuntu VM; Ctrl-C during a command returns to the menu, at the prompt it leaves |
 | Verified on k3s (a fresh Ubuntu 24.04 VM) | `scripts/setup-ubuntu.sh`, `scripts/infra.sh up`, `scripts/deploy.sh local`, a start over from nothing, a backup; the smoke check, every assessment requirement and the 22 Playwright tests (from a laptop) pass through http://&lt;server-ip&gt;:8080 |
-| Verified locally, release flow | `scripts/versions.sh` and `scripts/set-version.sh` against a throwaway registry (latest, `--pre`, downgrade, unknown version refused; also the token flow against registry.gitlab.com); `scripts/update-versions.sh` against a throwaway git repository (commit, retry after a rejected push, production merge request branch); the app pipelines' publish step with crane against a throwaway registry (a new version is tagged, a re-run is a no-op, another image under an existing version is refused) |
+| Verified locally, release flow | `scripts/versions.sh` and `scripts/set-version.sh` against a throwaway registry (latest, `--pre`, downgrade, unknown version refused; also the token flow against registry.gitlab.com); `scripts/ci/update-versions.sh` against a throwaway git repository (commit, retry after a rejected push, production merge request branch); the app pipelines' publish step with crane against a throwaway registry (a new version is tagged, a re-run is a no-op, another image under an existing version is refused) |
 | Verified locally, migrations at startup | `scripts/deploy.sh local` and `kubectl rollout restart deployment/api` on the local cluster with its 850,000 products: every new pod logs "Database is up to date (0 migrations applied as pm_migrator)" and becomes ready, no data changed; on the Ubuntu VM, a start over from nothing: the first API pod creates the schema in the empty database and inserts the 24 sample products, the smoke check passes |
-| Validated, not yet run on a real cluster | `environments/staging` and `environments/production` (rendered and schema-checked by `scripts/validate.sh`), the GitLab pipelines (schema-valid; jobs that need no cluster run on gitlab.com), `scripts/add-node.sh` (dry run) |
+| Validated, not yet run on a real cluster | `environments/staging` and `environments/production` (rendered and schema-checked by `scripts/ci/validate.sh`), the GitLab pipelines (schema-valid; jobs that need no cluster run on gitlab.com), `scripts/add-node.sh` (dry run) |
 | Prepared, not installed | Argo CD and Argo CD Image Updater: `argocd/` (Applications, ImageUpdater) is validated against their pinned CRDs on every change; [Moving to Argo CD](#moving-to-argo-cd) is the procedure |
 | Still to provide per environment | a k3s (or any) cluster with cert-manager and the ClusterIssuer `letsencrypt`; the real hosts in `ingress.yaml` and `STAGING_URL` / `PRODUCTION_URL` (now `*.example.com`); the CI/CD variables above, the job token push setting and the `update:staging` schedule; the first versions (`newTag: unreleased` until then); a real alert contact point; off-node backups |

@@ -15,7 +15,7 @@ the decision record (ADR) that explains why. The static picture (topology, compo
 | 6 | [Create a product, update with If-Match](#6-create-a-product-update-with-if-match) | sequences | `ProductCommandService`, `UnitOfWork` |
 | 7 | [Rate limiting](#7-rate-limiting) | flowchart | `SharedTokenBucketRateLimiter`, `RedisDistributedRateLimiter` |
 | 8 | [Frontend: the product list screen](#8-frontend-the-product-list-screen) | flowchart | `products-store.ts`, `products-api.ts` |
-| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `deploy/scripts/` (`deploy.sh`, `infra.sh`, `create-database.sh`, `set-version.sh`, `update-versions.sh`), `DatabaseMigrator.cs` (migrations at API startup), `ci/release-notes.sh`, `.gitlab-ci.yml` (×3) |
+| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `deploy/scripts/` (`deploy.sh`, `infra.sh`, `lib/create-database.sh`, `set-version.sh`, `ci/update-versions.sh`), `DatabaseMigrator.cs` (migrations at API startup), `ci/release-notes.sh`, `.gitlab-ci.yml` (×3) |
 | 10 | [Autoscaling](#10-autoscaling) | flowchart | `hpa.yaml`, `gateway.yaml`, `default.conf.template` |
 | 11 | [Load test and verification](#11-load-test-and-verification) | flowcharts | `tools/load-tests/`, `tools/check-requirements.py` |
 | 12 | [Logs, from a request to Grafana](#12-logs-from-a-request-to-grafana) | flowchart | `trace.js`, `logs.yaml` (Alloy's configuration), `browser-errors.ts` |
@@ -635,12 +635,15 @@ fresh, so a crowd of open screens is answered by the microcache. An empty name f
 Everything that runs in a cluster is described by the deploy repository (`deploy/`) and applied by its
 `scripts/deploy.sh <local|staging|production> [infra|apps|all]`. `infra` (`scripts/infra.sh up`) creates the shared
 infrastructure in the namespace `infra` (PostgreSQL, Redis, and the logs: Loki, Grafana, Alloy) and installs
-metrics-server when the cluster has none; `scripts/create-database.sh` gives the API its database, its two users and
+metrics-server when the cluster has none; `scripts/lib/create-database.sh` gives the API its database, its two users and
 their Secret, once per cluster; `apps` deploys the API, the web app and the gateway from `environments/<environment>`.
-Locally (`deploy.sh local`, Docker Desktop only) it builds the three images from the sibling checkouts `../backend`
-and `../frontend`, with an immutable tag (the commit, plus a timestamp when the working tree is dirty), straight into
-the local Docker engine, and creates the database itself on the first run. Staging and production apply exactly what
-is committed (below).
+Locally (`deploy.sh local`, Docker Desktop or a k3s on the same machine) the images come from one of two places:
+when the sibling checkouts `../backend` and `../frontend` exist (or with `--build`) it builds the three images from
+them, with an immutable tag (the commit, plus a timestamp when the working tree is dirty), straight into the local
+Docker engine (on k3s, copied into its containerd); with only the deploy repository (or with `--version X.Y.Z`) it
+runs a published version from the registry, after checking that it exists, with the pull Secret `gitlab-registry`.
+It creates the database itself on the first run. Staging and production apply exactly what is committed (below).
+`deploy/menu.sh` runs the same scripts from a numbered menu.
 
 ```mermaid
 flowchart TD
@@ -654,8 +657,11 @@ flowchart TD
     end
 
     subgraph local["deploy/scripts/deploy.sh local"]
-        l0["local-secrets.sh, first run:<br/>signing key, consumers<br/>(environments/local/generated)"] --> l1["docker build ../backend,<br/>../frontend, ../frontend/gateway<br/>tag = short SHA + dirty timestamp"]
-        l1 --> l2["tags into<br/>environments/local/generated/build<br/>(LOGS=off: COLLECTOR_UPSTREAM empty)"]
+        l0["local-secrets.sh, first run:<br/>signing key, consumers<br/>(environments/local/generated)"] --> ls{"../backend and ../frontend?<br/>(--build / --version force one)"}
+        ls -->|"yes: built"| l1["docker build ../backend,<br/>../frontend, ../frontend/gateway<br/>tag = short SHA + dirty timestamp"]
+        ls -->|"no: published"| lp["versions.sh: the version exists?<br/>(latest = newest common X.Y.Z)<br/>Secret gitlab-registry from<br/>REGISTRY_USER / REGISTRY_PASSWORD"]
+        l1 --> l2["images into<br/>environments/local/generated/build:<br/>built tags, or registry names, version,<br/>imagePullSecrets (LOGS=off: no collector)"]
+        lp --> l2
         l2 --> l3{"Secret database-credentials?"}
         l3 -->|"no, first deploy"| d1["create-database.sh:<br/>kubectl exec psql in the postgres pod,<br/>database, users pm_migrator, pm_app,<br/>Secret database-credentials"]
         l3 -->|"yes"| l4
@@ -672,8 +678,8 @@ flowchart TD
 no migration step in the script: the database and its users must exist (`create-database.sh`), and the new API pods
 then apply the migrations themselves (next diagram). Code:
 [`deploy.sh`](../deploy/scripts/deploy.sh), [`infra.sh`](../deploy/scripts/infra.sh),
-[`postgres.yaml`](../deploy/infra/postgres.yaml), [`create-database.sh`](../deploy/scripts/create-database.sh),
-[`local-secrets.sh`](../deploy/scripts/local-secrets.sh),
+[`postgres.yaml`](../deploy/infra/postgres.yaml), [`create-database.sh`](../deploy/scripts/lib/create-database.sh),
+[`local-secrets.sh`](../deploy/scripts/lib/local-secrets.sh),
 [`environments/local`](../deploy/environments/local/kustomization.yaml), [`collector.sh`](../frontend/gateway/collector.sh),
 [`DatabaseInitializer.cs`](../backend/ProductManagement.Infrastructure/Persistence/DatabaseInitializer.cs).
 Decision: [ADR 0021](adr/0021-deployment-layout.md).
@@ -760,7 +766,7 @@ flowchart TB
         du["update:staging<br/>pipeline schedule:<br/>set-version.sh staging all latest,<br/>commit to main"]
         dpp["propose:production<br/>manual: merge request<br/>with staging's versions"]
         dv["<b>validate</b><br/>validate.sh (+ argocd/),<br/>shellcheck, alloy validate"] --> dds["deploy:staging<br/>deploy.sh staging apps:<br/>apply (the API migrates)"]
-        dds --> dss["smoke:staging<br/>scripts/smoke.sh"]
+        dds --> dss["smoke:staging<br/>scripts/ci/smoke.sh"]
         dv --> ddp["deploy:production<br/>manual, after the merge:<br/>apply (the API migrates)"]
         ddp --> dsp["smoke:production"]
         dv --> di["infra:staging, infra:production<br/>manual: deploy.sh env infra"]
@@ -771,8 +777,9 @@ flowchart TB
     dpp -.->|"merged by a person<br/>environments/production"| dv
 ```
 
-`deploy:staging` runs when a commit on `main` changes `environments/staging`, `apps/`, `infra/` or `scripts/deploy.sh`;
-`deploy:production` when it changes `environments/production`, `apps/` or that script, and waits for a person. A
+`deploy:staging` runs when a commit on `main` changes `environments/staging`, `apps/`, `infra/`, `scripts/deploy.sh`
+or `scripts/lib/`; `deploy:production` when it changes `environments/production`, `apps/` or those scripts, and waits
+for a person. A
 scheduled pipeline runs only `update:staging`. `deploy.sh` refuses an environment while an image still has `newTag:
 unreleased`, creates the Secrets `gitlab-registry` (the group deploy token) and `api-secrets` (the deploy project's
 `API_SIGNING_KEY`, `API_CONSUMERS`), copies `redis-credentials`, applies and waits for the rollouts (a failed migration
@@ -788,8 +795,8 @@ jobs; the migrations need nothing (the API migrates itself). The end-to-end test
 pipeline jobs: they run by hand against an environment. Code: [`backend/.gitlab-ci.yml`](../backend/.gitlab-ci.yml),
 [`release-notes.sh`](../backend/ci/release-notes.sh), [`frontend/.gitlab-ci.yml`](../frontend/.gitlab-ci.yml),
 [`deploy/.gitlab-ci.yml`](../deploy/.gitlab-ci.yml), [`set-version.sh`](../deploy/scripts/set-version.sh),
-[`update-versions.sh`](../deploy/scripts/update-versions.sh), [`validate.sh`](../deploy/scripts/validate.sh),
-[`smoke.sh`](../deploy/scripts/smoke.sh), [`environments/staging`](../deploy/environments/staging/kustomization.yaml),
+[`update-versions.sh`](../deploy/scripts/ci/update-versions.sh), [`validate.sh`](../deploy/scripts/ci/validate.sh),
+[`smoke.sh`](../deploy/scripts/ci/smoke.sh), [`environments/staging`](../deploy/environments/staging/kustomization.yaml),
 [`argocd/`](../deploy/argocd). Setup: [guide chapter 12](guide/12-from-zero.md).
 
 ---

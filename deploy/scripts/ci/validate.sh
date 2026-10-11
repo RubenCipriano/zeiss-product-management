@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Checks every environment and the shared infrastructure without touching a cluster. The pipeline's validate job runs
-# it on every merge request and commit; it works anywhere kubectl (with Kustomize), kubeconform, yq and jq are
-# installed, e.g. in the pipeline's image:
+# it on every merge request and commit (scripts/ci/: run by the pipeline; by hand before you push, if you like); it
+# works anywhere kubectl (with Kustomize), kubeconform, yq and jq are installed, e.g. in the pipeline's image:
 #
-#   scripts/validate.sh
-#   docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 scripts/validate.sh
+#   scripts/ci/validate.sh
+#   docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 scripts/ci/validate.sh
 #
 # environments/local, environments/staging, environments/production:
 #   1. it renders (kubectl kustomize);
@@ -16,6 +16,8 @@
 #   5. staging and production: no Secret (scripts/deploy.sh creates them from CI/CD variables, the repository never
 #      holds their values), every Deployment pulls with the Secret gitlab-registry, and every image is a registry
 #      image with a tag; local: the only Secret is api-secrets, generated from files that are never committed.
+#   local is rendered twice, once per image source of scripts/deploy.sh local: images built on this machine, and
+#   published images (registry names, a version, the pull Secret gitlab-registry: the checks of staging in 5).
 # infra/:
 #   6. postgres.yaml, redis.yaml, logs.yaml and the dashboards' ConfigMap (as scripts/infra.sh renders it) are valid;
 #      every dashboard is valid JSON;
@@ -28,10 +30,11 @@
 #
 # The local environment reads files from environments/local/generated/ (made by scripts/deploy.sh local), which a
 # fresh clone or a CI runner does not have: it is rendered from a copy, with placeholders for missing files (their
-# content does not change the objects' shape). The repository itself is never written to.
+# content does not change the objects' shape), and the image component in the two shapes deploy.sh writes. The
+# repository itself is never written to.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 KUBERNETES_VERSION="${KUBERNETES_VERSION:-1.34.0}"
 # The versions of README.md, "Moving to Argo CD".
 ARGOCD_VERSION="${ARGOCD_VERSION:-v3.5.4}"
@@ -61,8 +64,11 @@ generated="$work/environments/local/generated"
 mkdir -p "$generated/build"
 [[ -f "$generated/signing-key.pem" ]] || echo placeholder > "$generated/signing-key.pem"
 [[ -f "$generated/consumers.json" ]] || echo '{"Authentication":{"Consumers":[]}}' > "$generated/consumers.json"
-# The same shape scripts/deploy.sh writes (Kustomize rejects a component with nothing in it as "empty").
-[[ -f "$generated/build/kustomization.yaml" ]] || cat > "$generated/build/kustomization.yaml" <<'EOF'
+
+# The image component in the two shapes scripts/deploy.sh local writes (Kustomize rejects a component with nothing in
+# it as "empty"). Built here: local names and tags. Published: registry names, a version and the pull Secret.
+built_images() {
+  cat <<'EOF'
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 images:
@@ -73,10 +79,41 @@ images:
   - name: product-management/gateway
     newTag: validate
 EOF
+}
+published_images() {
+  cat <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+images:
+  - name: product-management/api
+    newName: registry.gitlab.com/zeiss/backend/api
+    newTag: "1.0.0"
+  - name: product-management/web
+    newName: registry.gitlab.com/zeiss/frontend/web
+    newTag: "1.0.0"
+  - name: product-management/gateway
+    newName: registry.gitlab.com/zeiss/frontend/gateway
+    newTag: "1.0.0"
+patches:
+  - target: { kind: Deployment }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/imagePullSecrets
+        value: [{ name: gitlab-registry }]
+EOF
+}
+[[ -f "$generated/build/kustomization.yaml" ]] || built_images > "$generated/build/kustomization.yaml"
 
-for environment in local staging production; do
-  echo "==> environments/$environment"
-  if ! kubectl kustomize "$work/environments/$environment" > "$rendered"; then
+# local-published: environments/local with published images (deploy.sh local --version).
+for environment in local local-published staging production; do
+  folder="${environment%-published}"
+  if [[ "$environment" == local-published ]]; then
+    echo "==> environments/local, published images"
+    published_images > "$generated/build/kustomization.yaml"
+  else
+    echo "==> environments/$environment"
+  fi
+  if ! kubectl kustomize "$work/environments/$folder" > "$rendered"; then
     fail "does not render"
     continue
   fi
@@ -88,7 +125,7 @@ for environment in local staging production; do
 
   for key in ConnectionStrings__ProductManagement ConnectionStrings__Redis; do
     value="$(query "select(.kind == \"Deployment\" and .metadata.name == \"api\") | .spec.template.spec.containers[].env[] | select(.name == \"$key\") | .value")"
-    [[ -n "$value" ]] || fail "$key is not set (environments/$environment/api.yaml)"
+    [[ -n "$value" ]] || fail "$key is not set (environments/$folder/api.yaml)"
   done
   [[ "$(api_env Database__ApplyMigrationsOnStartup .value)" == true ]] \
     || fail "Database__ApplyMigrationsOnStartup is not \"true\" (apps/backend/deployment.yaml)"
@@ -98,29 +135,31 @@ for environment in local staging production; do
   done
   seed="$(api_env Database__SeedSampleData .value)"
   [[ "$seed" == true || "$seed" == false ]] \
-    || fail "Database__SeedSampleData is not \"true\" or \"false\" (environments/$environment/api.yaml)"
+    || fail "Database__SeedSampleData is not \"true\" or \"false\" (environments/$folder/api.yaml)"
   [[ "$environment" != production || "$seed" == false ]] || fail "production seeds sample data"
   for key in API_UPSTREAM JWKS_URL COLLECTOR_UPSTREAM; do
     found="$(query "select(.kind == \"Deployment\" and .metadata.name == \"gateway\") | .spec.template.spec.containers[].env[] | select(.name == \"$key\") | .name")"
-    [[ -n "$found" ]] || fail "$key is not set (environments/$environment/gateway.yaml)"
+    [[ -n "$found" ]] || fail "$key is not set (environments/$folder/gateway.yaml)"
   done
 
   secrets="$(query 'select(.kind == "Secret") | .metadata.name')"
-  if [[ "$environment" == local ]]; then
+  if [[ "$folder" == local ]]; then
     others="$(grep -v '^api-secrets-' <<<"$secrets" || true)"
     [[ -z "$others" ]] || fail "Secrets other than the generated api-secrets: $others"
-    continue
+  else
+    [[ -z "$secrets" ]] || fail "Secrets (scripts/deploy.sh creates them; never commit their values): $secrets"
   fi
-  [[ -z "$secrets" ]] || fail "Secrets (scripts/deploy.sh creates them; never commit their values): $secrets"
+  # Images built on this machine have local names and need no pull Secret.
+  [[ "$environment" != local ]] || continue
 
   for deployment in api web gateway; do
     pull="$(query "select(.kind == \"Deployment\" and .metadata.name == \"$deployment\") | .spec.template.spec.imagePullSecrets[].name")"
     [[ "$pull" == gitlab-registry ]] \
-      || fail "$deployment does not pull with imagePullSecrets gitlab-registry (environments/$environment/*.yaml)"
+      || fail "$deployment does not pull with imagePullSecrets gitlab-registry (environments/$folder/*.yaml)"
   done
   while read -r image; do
     [[ "$image" == */*/*:* ]] \
-      || fail "image $image is not a registry image with a tag (images: in environments/$environment/kustomization.yaml)"
+      || fail "image $image is not a registry image with a tag (images: in environments/$folder/kustomization.yaml)"
   done < <(query 'select(.kind == "Deployment") | .spec.template.spec.containers[].image')
 done
 

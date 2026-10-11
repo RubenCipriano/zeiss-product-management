@@ -15,7 +15,7 @@
 #
 # `up` also creates what must never be committed, once: the namespace and the random passwords (Secrets
 # postgres-admin and redis-auth), and installs metrics-server when the cluster has none (the autoscalers need it).
-# A service then gets its database with scripts/create-database.sh, and its logs without doing anything.
+# A service then gets its database with scripts/lib/create-database.sh, and its logs without doing anything.
 #
 # Another Loki instead of the one in the cluster (e.g. Grafana Cloud): Loki and Grafana are not deployed (Loki's
 # volume is kept) and Alloy pushes there.
@@ -189,8 +189,9 @@ down_component() {
     echo "    --delete-data: deleting its volumes and Secrets"
     kubectl -n "$NAMESPACE" delete pvc,secret -l app.kubernetes.io/component="$component" --ignore-not-found --wait=false
     if [[ "$component" == postgres ]]; then
-      echo "    The services' database-credentials Secrets now name users that no longer exist: run"
-      echo "    create-database.sh again for each service after the next scripts/infra.sh up postgres."
+      echo "    The services' database-credentials Secrets now name users that no longer exist: after the next"
+      echo "    scripts/infra.sh up postgres, run scripts/lib/create-database.sh again for each service (or delete"
+      echo "    their database-credentials, and their next deploy creates them)."
     fi
   else
     local kept

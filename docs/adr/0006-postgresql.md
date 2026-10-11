@@ -13,7 +13,7 @@
 > a StatefulSet with one replica in the namespace `infra` (`deploy/infra/postgres.yaml`), its data on a PersistentVolumeClaim,
 > the settings inline in a ConfigMap (sized from measurements, [0022](0022-database-at-scale.md)), and a CronJob that
 > writes a nightly `pg_dump` of every database to a second volume, kept 7 days. One server for the platform, one
-> database per service: `deploy/scripts/create-database.sh` creates a service's database and two least-privilege users
+> database per service: `deploy/scripts/lib/create-database.sh` creates a service's database and two least-privilege users
 > (`pm_migrator` owns the schema and runs the migrations; `pm_app`, the API, may only connect and use the schema, with
 > a 30 s statement timeout) with random passwords in the Secret `database-credentials`. What `pm_app` may do on the
 > tables is granted by the service's own EF Core migration `GrantAppPermissions` (rows and sequences, including

@@ -46,6 +46,11 @@ deploy/scripts/deploy.sh local    # database and keys (first run), api + web + g
 open http://localhost:8080        # (macOS) sign in as viewer/viewer, clerk/clerk or manager/manager
 ```
 
+Or the same from a menu: `deploy/menu.sh` (numbered items, a status line, each command shown before it runs). Here
+`deploy.sh local` builds the images from `backend/` and `frontend/`, the checkouts next to `deploy/` (`../backend`,
+`../frontend` as seen from it); with only the deploy repository (a server, a demo) it runs the published images
+instead: [deploy/README.md → Where the images come from](deploy/README.md#where-the-images-come-from-backend-frontend-or-the-registry).
+
 On Windows (Docker Desktop with WSL 2) and on an Ubuntu server (k3s, set up by `deploy/scripts/setup-ubuntu.sh`):
 [deploy/README.md → Where it runs](deploy/README.md#where-it-runs).
 
@@ -122,8 +127,8 @@ infrastructure any service on the cluster can use). Only the gateway is reachabl
 | Namespace `product-management` | **gateway** (nginx, 2–6 pods, HPA): the only way in; per-IP rate limit, token check, 1 s microcache per role, routing | frontend | `deploy/apps/frontend/`; Service `gateway`, `LoadBalancer` on localhost:8080 locally (staging/production: an Ingress with TLS) |
 | | **web** (nginx, 2 pods): the Angular files | frontend | `deploy/apps/frontend/` |
 | | **api** (ASP.NET Core, 2–8 pods, HPA): its only Service, `api`, is headless, so the gateway balances per request and new pods get traffic at once. Each new pod first applies the database migrations as `pm_migrator` (a PostgreSQL advisory lock lets one pod at a time do it), then serves as `pm_app`. Its configuration is plain environment variables in the Deployment; the connection strings name `postgres.infra.svc.cluster.local:5432` and `redis.infra.svc.cluster.local:6379` | backend | `deploy/apps/backend/`; the connection strings in `deploy/environments/<environment>/api.yaml` (the same addresses in every environment) |
-| | **Secrets**: `api-secrets` (the token signing key, the registered consumers), `database-credentials` (the database users and passwords; the API reads `pm_app`'s for its requests and `pm_migrator`'s for its migrations), `redis-credentials` (a copy of the Redis password) | deploy | `api-secrets`: `deploy/scripts/local-secrets.sh` locally, `deploy/scripts/deploy.sh` from the deploy project's CI/CD variables elsewhere; `database-credentials`: `deploy/scripts/create-database.sh`; `redis-credentials`: `deploy/scripts/deploy.sh` |
-| Namespace `infra` | **postgres** (StatefulSet, 1 pod): PostgreSQL 18, one database per service, data on the volume `data-postgres-0` (20 GiB); users `pm_migrator` (owns the schema; the API's migration step at startup) and `pm_app` (the API: rows only, 30 s statement timeout) | deploy | `deploy/infra/postgres.yaml`, `deploy/scripts/create-database.sh` |
+| | **Secrets**: `api-secrets` (the token signing key, the registered consumers), `database-credentials` (the database users and passwords; the API reads `pm_app`'s for its requests and `pm_migrator`'s for its migrations), `redis-credentials` (a copy of the Redis password) | deploy | `api-secrets`: `deploy/scripts/lib/local-secrets.sh` locally, `deploy/scripts/deploy.sh` from the deploy project's CI/CD variables elsewhere; `database-credentials`: `deploy/scripts/lib/create-database.sh`; `redis-credentials`: `deploy/scripts/deploy.sh` |
+| Namespace `infra` | **postgres** (StatefulSet, 1 pod): PostgreSQL 18, one database per service, data on the volume `data-postgres-0` (20 GiB); users `pm_migrator` (owns the schema; the API's migration step at startup) and `pm_app` (the API: rows only, 30 s statement timeout) | deploy | `deploy/infra/postgres.yaml`, `deploy/scripts/lib/create-database.sh` |
 | | **postgres-backup** (CronJob): every night at 02:30 a `pg_dump` of every database into the volume `postgres-backups`, kept 7 days | deploy | `deploy/infra/postgres.yaml` |
 | | **redis** (Deployment, 1 pod): Redis 8 for cache, idempotency keys, rate limits, failed sign-ins; memory only, password | deploy | `deploy/infra/redis.yaml` |
 | | **loki** (StatefulSet; stores the logs, 14 days, volume `data-loki-0`) and **grafana** (Deployment; two dashboards, 12 alert rules, all provisioned from ConfigMaps). Optional | deploy | `deploy/infra/logs.yaml`, `deploy/infra/dashboards/` |
@@ -217,7 +222,7 @@ cd frontend && npm run test:ci                                   # 187 tests
 cd frontend && npm run e2e                                       # 22 Playwright tests against the running system
 python3 tools/check-requirements.py                              # the assessment PDF, checked against the running system
 tools/load-tests/run.sh smoke                                    # against the running cluster
-deploy/scripts/validate.sh                                       # every environment's manifests and the infra
+deploy/scripts/ci/validate.sh                                    # every environment's manifests and the infra
 ```
 
 | Suite                                 | Tests | What it proves |
@@ -240,7 +245,7 @@ The GitLab pipelines, one per repository:
 * `frontend/.gitlab-ci.yml`: test (ESLint and Prettier, unit, build) → build (web and gateway images) → scan, and on a
   version tag publish (`web:X.Y.Z`, `gateway:X.Y.Z`) → release, the same way;
 * `deploy/.gitlab-ci.yml`: validate on every change (`validate:manifests`: every environment, the infra and the
-  prepared Argo CD objects with `deploy/scripts/validate.sh`, kubeconform and the project's rules, no Secret where
+  prepared Argo CD objects with `deploy/scripts/ci/validate.sh`, kubeconform and the project's rules, no Secret where
   there must be none; `validate:scripts`: shellcheck; `validate:alloy`: `alloy validate` and `alloy fmt`) →
   `update:staging` on a pipeline schedule (the newest published versions, committed to main) → `deploy:staging`
   (apply; the new API pods migrate the database as they start) and `smoke:staging` when main changes staging, `apps/`,
@@ -352,7 +357,7 @@ full schema is in Swagger (`kubectl -n product-management port-forward deploymen
 http://localhost:5080/swagger, *Authorize* with a token). The local demo consumers are `viewer`/`viewer` (role
 `viewer`: browse and search), `clerk`/`clerk` (`stock-clerk`: + add and remove stock) and `manager`/`manager`
 (`manager`: + create, edit and delete products); their secret hashes and the signing key are generated on each machine
-by `deploy/scripts/local-secrets.sh`, never committed.
+by `deploy/scripts/lib/local-secrets.sh`, never committed.
 
 ```bash
 # Get a token and call the API from a terminal
@@ -442,7 +447,7 @@ decimals), `stockQuantity` (0–1,000,000), `categoryId` (must exist). `PUT` rep
 | Brute force    | Failed sign-ins are counted per IP in Redis across all replicas: 10 per minute, then `429` even with the right secret. |
 | Rate limiting  | The gateway limits per IP; the API per user (stricter for writes), with token buckets **shared by all replicas in Redis**, so the limit does not grow as the autoscaler adds pods. Both answer `429` + `Retry-After` ([ADR 0010](docs/adr/0010-rate-limiting.md)). |
 | Network        | NetworkPolicies: the API and the web app accept connections only from the gateway; Alloy's browser-error receiver only from the gateway pods. PostgreSQL and Redis run in the namespace `infra` behind cluster-internal Services, never published outside the cluster, and protected by random passwords that live only in Secrets (production's firewall opens only the k3s ports between the nodes). |
-| Database users | Least privilege: [`deploy/scripts/create-database.sh`](deploy/scripts/create-database.sh) creates the users with random passwords, and the API's migration [`GrantAppPermissions`](backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs) grants `pm_app` what it may do. The API connects as `pm_app` (read and write rows, use the id sequence; no `CREATE`, `ALTER` or `DROP`, 30 s statement timeout, 60 s idle-in-transaction timeout); only the migration step uses the schema owner `pm_migrator`. |
+| Database users | Least privilege: [`deploy/scripts/lib/create-database.sh`](deploy/scripts/lib/create-database.sh) creates the users with random passwords, and the API's migration [`GrantAppPermissions`](backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs) grants `pm_app` what it may do. The API connects as `pm_app` (read and write rows, use the id sequence; no `CREATE`, `ALTER` or `DROP`, 30 s statement timeout, 60 s idle-in-transaction timeout); only the migration step uses the schema owner `pm_migrator`. |
 | Cache server   | Redis with a password, no persistence, `volatile-lru`, and `FLUSHALL`, `FLUSHDB` and `DEBUG` disabled (the ConfigMap `redis-config` in [`deploy/infra/redis.yaml`](deploy/infra/redis.yaml)). |
 | Containers     | Non-root, read-only root filesystem where possible, no capabilities, no privilege escalation, `RuntimeDefault` seccomp, resource limits. |
 | Edge           | Strict **Content-Security-Policy** (`'self'` only, no inline scripts, no framing), `Permissions-Policy`, COOP/CORP, `nosniff`, `X-Frame-Options: DENY`, referrer policy, 1 MB body limit, `server_tokens off` ([ADR 0019](docs/adr/0019-content-security-policy.md)). |

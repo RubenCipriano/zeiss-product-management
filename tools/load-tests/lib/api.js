@@ -2,7 +2,7 @@ import http from 'k6/http';
 import { check, fail } from 'k6';
 import { BASE_URL, TOKEN_URL } from './config.js';
 
-// The virtual users sign in as the three local demo accounts (the deploy repository's scripts/local-secrets.sh), with tokens from the API's own
+// The virtual users sign in as the three local demo accounts (the deploy repository's scripts/lib/local-secrets.sh), with tokens from the API's own
 // token endpoint. Each account is shared by many virtual users, so run.sh lifts the per-user rate limits for every
 // scenario except rate-limit: the tests measure what the system handles, not how many distinct users it has.
 function requestToken(clientId, clientSecret) {

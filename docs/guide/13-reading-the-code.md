@@ -31,7 +31,10 @@ deploy/
   apps/                  how the API, the web app and the gateway run: their Kubernetes manifests
   environments/          local, staging, production: settings and image tags per environment
   infra/                 the shared infrastructure (namespace infra): PostgreSQL, Redis, Loki + Grafana, Alloy
-  scripts/               deploy.sh, infra.sh, create-database.sh, local-secrets.sh, validate.sh, smoke.sh
+  menu.sh                a numbered menu over the scripts, for people
+  scripts/               what people run: deploy.sh, infra.sh, versions.sh, set-version.sh, setup-ubuntu.sh,
+                         add-node.sh; ci/ what the pipeline runs (validate.sh, update-versions.sh, smoke.sh);
+                         lib/ what the others call (local-secrets.sh, create-database.sh)
 tools/                   local only: load-tests/ (k6 scenarios run inside the cluster), check-requirements.py
 ```
 

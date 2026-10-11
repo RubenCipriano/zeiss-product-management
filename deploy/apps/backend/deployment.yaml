@@ -4,13 +4,13 @@
 # What differs per environment is in environments/<environment>/api.yaml, always including the two
 # connection strings (where the database and Redis are). No password is in any YAML file: they come from Secrets in
 # this namespace, none of them committed:
-#   database-credentials   made by scripts/create-database.sh (the shared PostgreSQL's users)
+#   database-credentials   made by scripts/lib/create-database.sh (the shared PostgreSQL's users)
 #     app-password         → PGPASSWORD (Npgsql uses it when the connection string has no password): requests, as pm_app
 #     migrator-user        → Database__MigratorUsername   } the migrations at startup only, as the schema owner
 #     migrator-password    → Database__MigratorPassword   } (pm_migrator), on short-lived connections of their own
 #   redis-credentials      a copy of the shared Redis' password (infra/redis-auth), made by scripts/deploy.sh
 #     password             → Redis__Password (added to the Redis connection by the API)
-#   api-secrets            the API's own keys: locally generated from files made by scripts/local-secrets.sh; in
+#   api-secrets            the API's own keys: locally generated from files made by scripts/lib/local-secrets.sh; in
 #                          staging and production created by scripts/deploy.sh from CI/CD variables
 #     signing-key          → Authentication__SigningKey (the ES256 private key that signs access tokens, PEM)
 #     consumers.json       → the file /app/config/consumers.json (registered consumers: client ids, secret hashes, roles)

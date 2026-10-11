@@ -34,7 +34,7 @@ which it downloads the API's public signing keys (JWKS); the token issuer and au
 `gateway` label that the API's NetworkPolicy admits. Between the API and the shared infrastructure there are only the
 two connection strings in `deploy/environments/<env>/api.yaml` (`postgres.infra.svc.cluster.local:5432`,
 `redis.infra.svc.cluster.local:6379`) and two Secrets in the namespace `product-management`: `database-credentials`
-(made by `deploy/scripts/create-database.sh`) and `redis-credentials` (a copy of the Redis password, made by
+(made by `deploy/scripts/lib/create-database.sh`) and `redis-credentials` (a copy of the Redis password, made by
 `deploy/scripts/deploy.sh` on every deploy).
 
 ```mermaid
@@ -116,7 +116,7 @@ port-forward the Deployment (`kubectl -n product-management port-forward deploym
 | API environment                 | Every setting as a plain env entry in `deploy/apps/backend/deployment.yaml` (token lifetime, rate limits, sign-in throttle, idempotency lifetimes, `ApplyMigrationsOnStartup=true` with the migrator's user and password from `database-credentials`); each environment's `api.yaml` sets what differs and always `ConnectionStrings__ProductManagement` (user `pm_app`, pool of 10 per replica, no password), `ConnectionStrings__Redis` (no password) and `Database__SeedSampleData` (`true` locally and in staging, `false` in production). A change rolls the pods. |
 | Secret `api-secrets`            | The API's own keys: `signing-key` → `Authentication__SigningKey`, the ES256 (P-256) private key that signs access tokens (only the API holds it; verifiers get the public key from `/.well-known/jwks.json`); `consumers.json` → the file `/app/config/consumers.json` (client id, PBKDF2 hash of the secret, roles). Locally `api-secrets-<hash>`, generated from `deploy/environments/local/generated/`; in staging and production made by `deploy/scripts/deploy.sh` from the deploy project's CI/CD variables `API_SIGNING_KEY`, `API_CONSUMERS`. |
 | Secret `gitlab-registry`        | Staging and production only: the credential every pod pulls its image with (`imagePullSecrets`), from the `zeiss` group's deploy token `gitlab-deploy-token` (`read_registry`, reads both registries). Made by `deploy/scripts/deploy.sh` (the migration pod pulls with it too). |
-| Secret `database-credentials`   | Made by `deploy/scripts/create-database.sh` (random passwords, kept on re-runs unless `--rotate`): `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password`. The API takes `app-password` → `PGPASSWORD` (Npgsql uses it when the connection string has none, the readiness check's connection too), and `migrator-user` / `migrator-password` → `Database__MigratorUsername` / `Database__MigratorPassword` for its migration step at startup. |
+| Secret `database-credentials`   | Made by `deploy/scripts/lib/create-database.sh` (random passwords, kept on re-runs unless `--rotate`): `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password`. The API takes `app-password` → `PGPASSWORD` (Npgsql uses it when the connection string has none, the readiness check's connection too), and `migrator-user` / `migrator-password` → `Database__MigratorUsername` / `Database__MigratorPassword` for its migration step at startup. |
 | Secret `redis-credentials`      | `password` → `Redis__Password`: a copy of the shared Redis' password (`infra/redis-auth`), made by `deploy/scripts/deploy.sh` on every deploy, because a pod can only read the Secrets of its own namespace. |
 | Secrets in `infra`              | `postgres-admin` (PostgreSQL's superuser), `redis-auth` (Redis): random, created once by `deploy/scripts/infra.sh up`, kept by `down` unless `--delete-data`; `loki-external` only with `LOKI_URL`. |
 | Gateway environment             | Per-IP rate limit, `GATEWAY_TRUSTED_PROXIES` (the Ingress controller in staging and production), `JWT_ISSUER`, `JWT_AUDIENCE` (`deploy/apps/frontend/gateway.yaml`); per environment `API_UPSTREAM`, `JWKS_URL`, `COLLECTOR_UPSTREAM` (`deploy/environments/<env>/gateway.yaml`). |
@@ -124,10 +124,10 @@ port-forward the Deployment (`kubectl -n product-management port-forward deploym
 | PodDisruptionBudgets            | `api`, `web`, `gateway`: at least one pod stays up during node maintenance. |
 | NetworkPolicies                 | The API and web pods accept connections only from the gateway; so does Alloy's browser-error receiver. PostgreSQL and Redis have cluster-internal Services only, never published outside the cluster, and are protected by their passwords. |
 
-Secrets in the repositories: none. Locally `deploy/scripts/local-secrets.sh` generates the API's own keys on each
+Secrets in the repositories: none. Locally `deploy/scripts/lib/local-secrets.sh` generates the API's own keys on each
 machine (gitignored); staging and production get them from the deploy project's CI/CD variables, which
 `deploy/scripts/deploy.sh` turns into `api-secrets`, and the pull credential from the group deploy token. The database
-and Redis passwords are never variables: `deploy/scripts/infra.sh` and `deploy/scripts/create-database.sh` generate
+and Redis passwords are never variables: `deploy/scripts/infra.sh` and `deploy/scripts/lib/create-database.sh` generate
 them in each cluster.
 
 ## Caching

@@ -7,12 +7,14 @@
 # Installs only what is missing, at pinned versions (safe to run again):
 #   packages   git, curl, jq, openssl, python3 (apt)
 #   Docker     Docker Engine $DOCKER_VERSION from Docker's apt repository, held at that version; adds you to the group
-#              docker. scripts/deploy.sh local builds the images with it and copies them into k3s.
+#              docker. scripts/deploy.sh local builds the images with it when ../backend and ../frontend are here,
+#              and copies them into k3s (published images need no Docker: k3s pulls them itself).
 #   kubectl    the upstream kubectl at k3s' Kubernetes version (dl.k8s.io)
 #   k3s        $K3S_VERSION (the same as scripts/add-node.sh) as a single-node server; its kubeconfig copied to
 #              ~/.kube/config (yours, mode 600; context "default"). k3s brings what the system needs: ServiceLB (the
 #              gateway on http://<server>:8080), local-path volumes, metrics-server, NetworkPolicies.
-# Then prints the next commands. Run it as your own user (it uses sudo), with internet access.
+# Then prints the next commands (or use the menu: ./menu.sh). Run it as your own user (it uses sudo), with internet
+# access.
 set -euo pipefail
 
 DOCKER_VERSION="${DOCKER_VERSION:-29.9.0}"
@@ -133,8 +135,14 @@ echo
 echo "Ready in $((SECONDS - started)) s: Docker $DOCKER_VERSION, kubectl $kubectl_version, k3s $K3S_VERSION."
 echo "Next (the group docker applies to new sessions: log out and in, or start a shell in it with newgrp):"
 echo "  newgrp docker"
-echo "  cd $deploy_dir        # with ../backend and ../frontend next to it"
+echo "  cd $deploy_dir"
 echo "  scripts/infra.sh up"
-echo "  scripts/deploy.sh local"
-echo "  scripts/smoke.sh http://localhost:8080"
+if [[ -d "$deploy_dir/../backend" && -d "$deploy_dir/../frontend" ]]; then
+  echo "  scripts/deploy.sh local                  # builds the images from ../backend and ../frontend"
+else
+  echo "  REGISTRY_USER=<deploy token user> REGISTRY_PASSWORD=<deploy token> \\"
+  echo "    scripts/deploy.sh local --version latest   # the published images (no ../backend, ../frontend here)"
+fi
+echo "  scripts/ci/smoke.sh http://localhost:8080"
+echo "Or all of it from the menu: ./menu.sh"
 echo "Then open http://$address:8080 from another machine (port 8080 must be open: sudo ufw allow 8080/tcp if ufw is on)."

@@ -26,7 +26,7 @@ exactly-once writes and load tests. [Chapter 11](11-production-readiness.md) say
 
 Every caller is a **registered API consumer**: a client id, a secret (stored only as a PBKDF2 hash) and one or more
 roles. The local demo consumers' hashes are generated on each machine by
-[`deploy/scripts/local-secrets.sh`](../../deploy/scripts/local-secrets.sh) (into the Secret `api-secrets`; never committed); staging and
+[`deploy/scripts/lib/local-secrets.sh`](../../deploy/scripts/lib/local-secrets.sh) (into the Secret `api-secrets`; never committed); staging and
 production get theirs from the deploy repository's CI/CD variables.
 
 | Consumer | Role | What it may do | Who it represents |
@@ -93,7 +93,7 @@ repository; they sit next to the three.
 pipeline runs the same script ([chapter 9](09-deployment-and-operations.md)). The API knows its data stores only
 through two connection strings in its environment's `api.yaml` (`postgres.infra.svc.cluster.local:5432`,
 `redis.infra.svc.cluster.local:6379`), which hold no password; the passwords come from the Secrets
-`database-credentials` (made by `deploy/scripts/create-database.sh`) and `redis-credentials` (copied by
+`database-credentials` (made by `deploy/scripts/lib/create-database.sh`) and `redis-credentials` (copied by
 `deploy/scripts/deploy.sh` from the shared Redis' password). Moving to another database or cache, even outside the cluster, changes those
 two strings and the passwords, nothing else. The logs are optional: without them the application works the same.
 

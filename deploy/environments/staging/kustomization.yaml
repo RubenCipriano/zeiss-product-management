@@ -2,14 +2,14 @@
 #
 # Applied by this repository's pipeline (deploy:staging, scripts/deploy.sh staging) whenever main changes this folder
 # or apps/ (it migrates the database with the API version below first). The versions below are pulled in by this
-# repository: the scheduled job update:staging (scripts/update-versions.sh staging) sets each newTag to the newest
+# repository: the scheduled job update:staging (scripts/ci/update-versions.sh staging) sets each newTag to the newest
 # X.Y.Z in the registry and commits "staging: api 1.4.0, ..." to main. One commit per change of versions, so
 # `git log environments/staging` is the deployment history; a rollback is scripts/set-version.sh staging <image>
 # <older version> (or a `git revert`), with the schedule paused so it is not undone.
 #
 # No Secret is here: scripts/deploy.sh creates the registry credential (gitlab-registry) and api-secrets from CI/CD
 # variables and copies redis-credentials from the shared Redis; database-credentials is made once by
-# scripts/create-database.sh. Replace the example.* host in ingress.yaml with the real one.
+# scripts/lib/create-database.sh. Replace the example.* host in ingress.yaml with the real one.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # Also on what the environment adds (the Ingress); apps/ labels the rest.

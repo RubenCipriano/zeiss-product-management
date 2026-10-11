@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Smoke check of a deployed environment, from outside, through its public URL (the gateway). Run by the pipeline
-# after every deployment; works from a laptop too.
+# after every deployment (scripts/ci/); works from a laptop too, and the menu (menu.sh, item 8) offers it.
 #
-#   scripts/smoke.sh https://staging.products.example.com
-#   scripts/smoke.sh http://localhost:8080
+#   scripts/ci/smoke.sh https://staging.products.example.com
+#   scripts/ci/smoke.sh http://localhost:8080
 #
 # Checks, retrying each for up to a minute (the gateway may still be picking up new API pods):
 #   1. GET  /healthz           200: the gateway is up (behind the Ingress, with TLS);

@@ -1,5 +1,6 @@
 # The images are in the frontend project's private registry: the web app and the gateway pull them with the Secret
-# scripts/deploy.sh creates from the group deploy token. Local deployments use local images.
+# scripts/deploy.sh creates from the group deploy token. (Local deployments get it only for published images, from
+# the component scripts/deploy.sh generates.)
 apiVersion: apps/v1
 kind: Deployment
 metadata:

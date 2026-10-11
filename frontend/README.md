@@ -494,10 +494,23 @@ The dev server sends `/api` to `API_URL`:
 Sign in with an account of that API: locally `viewer`/`viewer`, `clerk`/`clerk` or `manager`/`manager`. The dev server
 has no gateway: no edge token check, microcache or CSP; the API checks tokens itself.
 
-**The whole system** (gateway, web app, API, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes (macOS,
-Windows) or k3s on an Ubuntu server: clone the three repositories side by side and follow the deploy repository's
-README (`scripts/infra.sh up`, then `scripts/deploy.sh local`, which builds this repository's two images) →
-http://localhost:8080 (on an Ubuntu server also http://&lt;server-ip&gt;:8080).
+**The whole system in a cluster** (gateway, web app, API, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes
+(macOS, Windows) or k3s on an Ubuntu server. To try your local changes there, clone this repository next to the deploy
+repository (and backend); its `scripts/deploy.sh local` then builds the web and gateway images from this checkout,
+`../frontend` as seen from `deploy`:
+
+```text
+zeiss/                 any folder of yours
+├── backend/           git clone https://gitlab.com/zeiss/backend.git
+├── frontend/          git clone https://gitlab.com/zeiss/frontend.git
+└── deploy/            git clone https://gitlab.com/zeiss/deploy.git   → cd deploy; scripts/deploy.sh local
+```
+
+`scripts/infra.sh up` first, once; then `scripts/deploy.sh local` after every change (or the deploy repository's menu,
+`./menu.sh`) → http://localhost:8080 (on an Ubuntu server also http://&lt;server-ip&gt;:8080). Servers and demos do
+not need this checkout: they run the published images (`deploy.sh local --version 1.0.0`), and staging and production
+never use it. The deploy repository's README explains the two sources:
+[Where the images come from](https://gitlab.com/zeiss/deploy#where-the-images-come-from-backend-frontend-or-the-registry).
 
 ## Scripts
 

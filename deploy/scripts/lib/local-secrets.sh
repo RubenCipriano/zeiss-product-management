@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Creates the API's local development secrets on this machine, once. Every clone generates its own, so no private
 # key, secret hash or password file is ever committed. scripts/deploy.sh local runs this before it applies
-# environments/local.
+# environments/local (scripts/lib/: called by the other scripts; by hand only to make new keys, FORCE=1 below).
 #
-#   scripts/local-secrets.sh             # creates what is missing, keeps what exists
-#   FORCE=1 scripts/local-secrets.sh     # new key and hashes (signs everyone out; then scripts/deploy.sh local)
+#   scripts/lib/local-secrets.sh             # creates what is missing, keeps what exists
+#   FORCE=1 scripts/lib/local-secrets.sh     # new key and hashes (signs everyone out; then scripts/deploy.sh local)
 #
 # Writes (gitignored, readable only by you), into environments/local/generated/ → the Secret api-secrets:
 #   signing-key.pem   a new ES256 private key (PKCS#8 PEM) that signs access tokens        → key signing-key
@@ -13,14 +13,14 @@
 # and, when the backend checkout is next to this repository (../backend, or BACKEND_DIR), the API's .NET
 # user-secrets: the same key and consumers, for `dotnet run` (Development).
 # The database and Redis passwords are not made here: they are random, in the cluster, and the API reads them from the
-# Secrets database-credentials (scripts/create-database.sh) and redis-credentials (scripts/deploy.sh).
+# Secrets database-credentials (scripts/lib/create-database.sh) and redis-credentials (scripts/deploy.sh).
 #
 # Needs openssl and python3. The user-secrets step needs the .NET SDK and is skipped without it (run the script again
 # once it is installed). Staging and production never use these: their secrets come from CI/CD variables
 # (API_SIGNING_KEY, API_CONSUMERS; scripts/deploy.sh).
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/environments/local/generated"
 API_PROJECT="${BACKEND_DIR:-$ROOT/../backend}/ProductManagement.Api"
 

@@ -2,8 +2,11 @@
 # Gives a service its own database on the shared PostgreSQL (one server for the platform, one database per service),
 # with two users, and puts their passwords in a Secret in the service's namespace.
 #
-#   scripts/create-database.sh <service-namespace> <database> [app-user] [migrator-user] [--rotate]
-#   scripts/create-database.sh product-management product_management pm_app pm_migrator
+# For this system, scripts/deploy.sh runs it on the first deploy to a cluster (scripts/lib/: called by the other
+# scripts). By hand: a database for another service, again after restoring a dump, or --rotate for new passwords.
+#
+#   scripts/lib/create-database.sh <service-namespace> <database> [app-user] [migrator-user] [--rotate]
+#   scripts/lib/create-database.sh product-management product_management pm_app pm_migrator
 #
 #   app-user        what the service runs as: reads and writes rows, nothing else; its sessions end a statement
 #                   after 30 s and an idle open transaction after 60 s. Default: <database>_app

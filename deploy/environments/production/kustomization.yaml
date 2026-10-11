@@ -8,7 +8,7 @@
 #
 # No Secret is here: scripts/deploy.sh creates the registry credential (gitlab-registry) and api-secrets from
 # protected CI/CD variables and copies redis-credentials from the shared Redis; database-credentials is made once by
-# scripts/create-database.sh. Replace the example.* host in ingress.yaml with the real one.
+# scripts/lib/create-database.sh. Replace the example.* host in ingress.yaml with the real one.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # Also on what the environment adds (the Ingress); apps/ labels the rest.

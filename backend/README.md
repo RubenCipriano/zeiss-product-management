@@ -521,7 +521,7 @@ in the frontend README.
   change the schema; its statements end after 30 s and idle transactions after 60 s. Only the migration step at
   startup connects as `pm_migrator`, the schema owner (`Database:MigratorUsername` / `MigratorPassword`), on
   connections that are closed when it ends. Both users are created by the deploy repository's
-  `scripts/create-database.sh`.
+  `scripts/lib/create-database.sh`.
 * **Hashed client secrets.** PBKDF2-HMAC-SHA256, 100,000 iterations, 16-byte random salt, 32-byte hash, stored as
   `pbkdf2-sha256$100000$<salt>$<hash>` (Base64). `hash-secret` makes one. Comparison is constant-time.
 * **Asymmetric tokens.** Only the API holds the private key; everyone else verifies with the public key (JWKS).
@@ -665,7 +665,7 @@ services:
 
 This minimal file uses one database user for brevity; in Kubernetes the API's requests connect as `pm_app` (rows
 only) and only its migrations as the schema owner (`Database__MigratorUsername` / `Database__MigratorPassword`; the
-deploy repository's `scripts/create-database.sh` creates both users). A Swarm stack takes the same
+deploy repository's `scripts/lib/create-database.sh` creates both users). A Swarm stack takes the same
 file (`docker stack deploy`), with the key and the accounts as Docker secrets instead of a variable and a bind mount.
 
 ## Run locally
@@ -716,7 +716,7 @@ for account in viewer:viewer clerk:stock-clerk manager:manager; do           # c
 done
 ```
 
-(With the deploy repository cloned next to this one, its `scripts/local-secrets.sh` does the same.)
+(With the deploy repository cloned next to this one, its `scripts/lib/local-secrets.sh` does the same.)
 
 **3. Run:**
 
@@ -744,9 +744,22 @@ Redis__Password="$(kubectl -n infra get secret redis-auth -o go-template='{{ .da
 dotnet run --project ProductManagement.Api
 ```
 
-**The whole system** (API, web app, gateway, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes (macOS, Windows)
-or k3s on an Ubuntu server: clone the three repositories side by side and follow the deploy repository's README
-(`scripts/infra.sh up`, then `scripts/deploy.sh local`, which builds this repository's image).
+**The whole system in a cluster** (API, web app, gateway, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes
+(macOS, Windows) or k3s on an Ubuntu server. To try your local changes there, clone this repository next to the deploy
+repository (and frontend); its `scripts/deploy.sh local` then builds the API image from this checkout, `../backend`
+as seen from `deploy`:
+
+```text
+zeiss/                 any folder of yours
+├── backend/           git clone https://gitlab.com/zeiss/backend.git
+├── frontend/          git clone https://gitlab.com/zeiss/frontend.git
+└── deploy/            git clone https://gitlab.com/zeiss/deploy.git   → cd deploy; scripts/deploy.sh local
+```
+
+`scripts/infra.sh up` first, once; then `scripts/deploy.sh local` after every change (or the deploy repository's menu,
+`./menu.sh`). Servers and demos do not need this checkout: they run the published images (`deploy.sh local --version
+1.0.0`), and staging and production never use it. The deploy repository's README explains the two sources:
+[Where the images come from](https://gitlab.com/zeiss/deploy#where-the-images-come-from-backend-frontend-or-the-registry).
 
 ## Tests
 

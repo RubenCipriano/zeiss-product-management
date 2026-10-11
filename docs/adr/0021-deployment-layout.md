@@ -324,7 +324,9 @@ the former `infra/` folder, renamed):
 * `scripts/`: `deploy.sh <local|staging|production> [infra|apps|all]` (replaces both apps' deploy scripts, their
   `ci/deploy-environment.sh` and `create-secrets.sh`), `infra.sh`, `create-database.sh`, `add-node.sh`,
   `local-secrets.sh`, `validate.sh` (every environment and `infra/`, replacing both `validate-manifests.sh`) and
-  `smoke.sh`.
+  `smoke.sh`. Since 2026-10-11 grouped by who runs them, with a menu (`menu.sh`) in front: `scripts/` what a person
+  runs, `scripts/ci/` what only the pipeline runs (`validate.sh`, `update-versions.sh`, `smoke.sh`), `scripts/lib/`
+  what the others call (`local-secrets.sh`, `create-database.sh`).
 
 **The app pipelines never apply.** backend and frontend test, build and scan; on `main` they *release*: their
 `ci/release.sh` commits the new tag to `environments/staging/kustomization.yaml` on the deploy repository's `main`
@@ -343,7 +345,10 @@ are still `newTag: unreleased`.
 
 **Locally** `scripts/deploy.sh local` builds the three images from the sibling checkouts `../backend` and
 `../frontend`, records their tags in `environments/local/generated/build` (not committed), migrates and applies, so
-`kubectl diff -k environments/local` shows no drift after a deploy. The load tests and the requirements check are
+`kubectl diff -k environments/local` shows no drift after a deploy. Since 2026-10-11, without those checkouts (a
+server or a demo with only the deploy repository) it runs a published version from the registry instead
+(`--version X.Y.Z`, with a read_registry deploy token and the pull Secret `gitlab-registry`, written into the same
+generated component), so the committed overlay serves both. The load tests and the requirements check are
 local tools (`tools/`), in no repository; the end-to-end tests and the requirements check are no longer pipeline
 jobs (they are run by hand against an environment); the smoke check replaces them after each deployment.
 
@@ -419,7 +424,7 @@ of any cluster. Each app README says which change raises MAJOR, MINOR or PATCH.
 the registry's v2 API (curl, with the group deploy token or a `docker login`); `scripts/set-version.sh <env>
 <image|frontend|all> <version|latest>` checks the version exists and edits `newTag` (upgrade and downgrade alike; `latest`
 excludes pre-releases unless `--pre` and never moves backwards; web and gateway move together). Staging is updated by
-the scheduled job `update:staging` (`scripts/update-versions.sh staging`: the newest `X.Y.Z`, committed to `main` as
+the scheduled job `update:staging` (`scripts/ci/update-versions.sh staging`: the newest `X.Y.Z`, committed to `main` as
 "staging: api 1.4.0, ..." with the job's own token (`CI_JOB_TOKEN`, allowed to push to its own project; GitLab Free has no project access tokens), the same
 thing Image Updater's git write-back does). Production changes only by merge request (`set-version.sh production ...`,
 or the manual `propose:production`, which proposes staging's versions).

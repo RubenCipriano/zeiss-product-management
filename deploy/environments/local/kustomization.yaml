@@ -1,15 +1,17 @@
 # Local environment: a cluster on this machine, Docker Desktop's Kubernetes (macOS, Windows) or a single-node k3s
 # (an Ubuntu server, scripts/setup-ubuntu.sh).
-#   scripts/deploy.sh local        # local secrets (first run), images from ../backend and ../frontend, migrations, apply
+#   scripts/deploy.sh local                    # images built from ../backend and ../frontend (when they are there)
+#   scripts/deploy.sh local --version 1.0.0    # a published version from the registry (only this repository needed)
 #
 # The database and Redis are the cluster's shared ones, in the namespace `infra` (scripts/infra.sh up and
-# scripts/create-database.sh; api.yaml names them). The gateway is a LoadBalancer Service: Docker Desktop publishes it
-# on http://localhost:8080, k3s (ServiceLB) on the server's addresses, http://<server-ip>:8080.
+# scripts/lib/create-database.sh; api.yaml names them). The gateway is a LoadBalancer Service: Docker Desktop publishes
+# it on http://localhost:8080, k3s (ServiceLB) on the server's addresses, http://<server-ip>:8080.
 #
 # generated/ is made on this machine and never committed:
-#   signing-key.pem, consumers.json   the API's own keys (scripts/local-secrets.sh)
-#   build/kustomization.yaml          the images scripts/deploy.sh built (their tags) and, with LOGS=off, the gateway
-#                                     without a log collector
+#   signing-key.pem, consumers.json   the API's own keys (scripts/lib/local-secrets.sh)
+#   build/kustomization.yaml          the images of the last deploy: the tags scripts/deploy.sh built, or a published
+#                                     version's registry names, tag and pull Secret (gitlab-registry); with LOGS=off,
+#                                     the gateway without a log collector
 # so `kubectl diff -k environments/local` compares the cluster with exactly what the last deploy applied.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

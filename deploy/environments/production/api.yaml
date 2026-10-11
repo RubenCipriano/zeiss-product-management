@@ -15,7 +15,7 @@ spec:
         - name: api
           env:
             # The shared PostgreSQL in the cluster's namespace `infra` (scripts/infra.sh up, then
-            # scripts/create-database.sh), as pm_app. The password is PGPASSWORD, from the Secret database-credentials. Any
+            # scripts/lib/create-database.sh), as pm_app. The password is PGPASSWORD, from the Secret database-credentials. Any
             # other server works the same way: its host here (e.g. a managed database, then with SSL Mode=VerifyFull).
             - name: ConnectionStrings__ProductManagement
               value: "Host=postgres.infra.svc.cluster.local;Port=5432;Database=product_management;Username=pm_app;Maximum Pool Size=10;GSS Encryption Mode=Disable"

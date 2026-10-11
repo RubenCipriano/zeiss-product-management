@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Commits a change of versions to this repository from the pipeline: the "pull" half of the release flow (the app
 # pipelines only publish versions; this repository decides which ones run). It is the same thing Argo CD Image
-# Updater's git write-back does, and it is what that tool replaces once Argo CD is in use (README.md).
+# Updater's git write-back does, and it is what that tool replaces once Argo CD is in use (README.md). Only the
+# pipeline runs it (scripts/ci/); a person changes a version with scripts/set-version.sh and commits.
 #
-#   scripts/update-versions.sh staging      # every image to its newest released version, committed to main
-#   scripts/update-versions.sh production   # production to the versions staging runs, as a merge request
+#   scripts/ci/update-versions.sh staging      # every image to its newest released version, committed to main
+#   scripts/ci/update-versions.sh production   # production to the versions staging runs, as a merge request
 #
 # staging (the scheduled job update:staging): clones main, runs `scripts/set-version.sh staging all latest` there and,
 # if anything changed, commits "staging: api 1.4.0, web 1.4.0, gateway 1.4.0" (the images that changed), pushes it to
@@ -83,7 +84,7 @@ summary() {
 commit() {
   local subject="$1"
   git -C "$repo" add "$FILE"
-  git -C "$repo" commit --quiet -m "$subject" -m "Updated by ${CI_PIPELINE_URL:-scripts/update-versions.sh $ENVIRONMENT}."
+  git -C "$repo" commit --quiet -m "$subject" -m "Updated by ${CI_PIPELINE_URL:-scripts/ci/update-versions.sh $ENVIRONMENT}."
   git -C "$repo" --no-pager show --stat --format='%h %s%n%b' HEAD
 }
 

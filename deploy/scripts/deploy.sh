@@ -1,30 +1,42 @@
 #!/usr/bin/env bash
 # Deploys one environment of the Product Management system to its Kubernetes cluster.
 #
-#   scripts/deploy.sh <local|staging|production> [infra|apps|all]        (default: apps)
+#   scripts/deploy.sh <local|staging|production> [infra|apps|all] [--build | --version <X.Y.Z|latest>]
 #
 #   infra   the shared infrastructure in the namespace infra (PostgreSQL, Redis, logs): scripts/infra.sh up
 #   apps    the API, the web app and the gateway in the namespace product-management: environments/<environment>
+#           (the default)
 #   all     infra, then apps
 #
-# local (a cluster on this machine: Docker Desktop's Kubernetes, context docker-desktop, on macOS or Windows; or a
-# single-node k3s on Linux, context default, set up by scripts/setup-ubuntu.sh):
-#   1. creates the API's local secrets if they are missing (scripts/local-secrets.sh);
-#   2. builds the api, web and gateway images with Docker from the sibling checkouts ../backend and ../frontend (the
-#      layout you get by cloning the three repositories side by side) and records their tags in
-#      environments/local/generated/build (not committed), so `kubectl diff -k environments/local` compares against
-#      exactly what was applied. Docker Desktop's Kubernetes runs the images of its Docker engine as they are; k3s has
-#      a containerd of its own, so they are copied into it (docker save | sudo k3s ctr images import);
-#   3. creates the service's database and users if they do not exist yet (scripts/create-database.sh);
-#   4. copies the shared Redis' password into the namespace (Secret redis-credentials);
-#   5. applies environments/local and waits for the rollouts: the new API pods apply the database migrations
+# local: a cluster for one machine (Docker Desktop's Kubernetes, context docker-desktop, on macOS or Windows; or a
+# single-node k3s on Ubuntu, context default, set up by scripts/setup-ubuntu.sh). Its images come from one of two
+# places (README.md, "Where the images come from"):
+#   built      from the sibling checkouts ../backend and ../frontend (BACKEND_DIR, FRONTEND_DIR): for a developer
+#              trying local changes. The default when both folders exist; --build insists on it.
+#   published  a released version from the registry (registry.gitlab.com/zeiss/...): for a server or a demo with
+#              only this repository. The default when the checkouts are missing; --version X.Y.Z (or latest, the
+#              newest X.Y.Z that api, web and gateway all have) insists on it. Needs a registry login (below).
+# Steps:
+#   1. creates the API's local secrets if they are missing (scripts/lib/local-secrets.sh);
+#   2. built: builds the api, web and gateway images with Docker and tags them with the checkouts' commits; on k3s
+#      copies them into its containerd (docker save | sudo k3s ctr images import; Docker Desktop's Kubernetes runs the
+#      images of its Docker engine as they are).
+#      published: checks the version exists for all three images, built for the nodes' platform (scripts/versions.sh),
+#      and creates the pull Secret gitlab-registry from the registry login; the cluster pulls the images itself;
+#   3. records the images in environments/local/generated/build (not committed): their tags, and for published
+#      images also their registry names and the pull Secret, so `kubectl diff -k environments/local` compares
+#      against exactly what was applied, and the committed environments/local stays the same for both;
+#   4. creates the service's database and users if they do not exist yet (scripts/lib/create-database.sh);
+#   5. copies the shared Redis' password into the namespace (Secret redis-credentials);
+#   6. applies environments/local and waits for the rollouts: the new API pods apply the database migrations
 #      themselves when they start, before they serve (apps/backend/deployment.yaml).
 #
-# staging, production (this repository's pipeline, or a laptop whose kubectl reaches that cluster):
+# staging, production (this repository's pipeline, or a laptop whose kubectl reaches that cluster): never built here
+# and never from ../backend or ../frontend; they run the versions committed in environments/<environment>.
 #   1. refuses an environment whose kustomization.yaml still names no version for an image (newTag: unreleased);
 #   2. creates the registry credential (Secret gitlab-registry) and the API's own Secret (api-secrets) from the CI/CD
 #      variables below, when they are set (otherwise the existing Secrets are kept);
-#   3. creates the service's database and users on the first deploy (scripts/create-database.sh);
+#   3. creates the service's database and users on the first deploy (scripts/lib/create-database.sh);
 #   4. copies the shared Redis' password into the namespace (Secret redis-credentials);
 #   5. applies environments/<environment> exactly as committed and waits for the rollouts: the new API pods apply
 #      the database migrations themselves when they start; if one fails, the rollout stops and the old pods keep
@@ -34,10 +46,12 @@
 # Variables:
 #   KUBE_CONTEXT                          the kubectl context to use (the GitLab agent: <project path>:<agent name>);
 #                                         default: the current context (e.g. of a KUBECONFIG file)
-#   BACKEND_DIR, FRONTEND_DIR             local: the checkouts to build (default: ../backend and ../frontend)
-#   LOCAL_CLUSTER=docker-desktop|k3s      local: how the images reach the cluster, when the detection gets it wrong
-#                                         (default: docker-desktop for that context, k3s for a k3s node on this machine)
+#   BACKEND_DIR, FRONTEND_DIR             local, built: the checkouts to build (default: ../backend and ../frontend)
+#   LOCAL_CLUSTER=docker-desktop|k3s      local, built: how the images reach the cluster, when the detection gets it
+#                                         wrong (default: docker-desktop for that context, k3s for a k3s node here)
 #   LOGS=off                              local: no log collector, the gateway answers /collect with 204
+#   REGISTRY_USER, REGISTRY_PASSWORD      local, published: a deploy token with read_registry (or CI_DEPLOY_USER and
+#                                         CI_DEPLOY_PASSWORD, or this machine's docker login registry.gitlab.com)
 #   CI_DEPLOY_USER, CI_DEPLOY_PASSWORD    staging/production: a deploy token with read_registry on both registries
 #                                         (GitLab passes the group deploy token named gitlab-deploy-token by itself)
 #   CI_REGISTRY                           the registry of that token (default: registry.gitlab.com)
@@ -47,17 +61,43 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 NAMESPACE=product-management
+SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$'
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
 
 usage() {
-  echo "usage: $0 <local|staging|production> [infra|apps|all]" >&2
+  echo "usage: $0 <local|staging|production> [infra|apps|all] [--build | --version <X.Y.Z|latest>]" >&2
   exit 1
 }
 
 ENVIRONMENT="${1:-}"
-TARGET="${2:-apps}"
+[[ $# -eq 0 ]] || shift
+TARGET=apps
+SOURCE=""        # local: built or published ("": built when the checkouts exist, else published)
+VERSION=latest   # local, published
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    infra | apps | all) TARGET="$1" ;;
+    --build) SOURCE=built ;;
+    --version) [[ $# -ge 2 ]] || usage; SOURCE=published; VERSION="${2#v}"; shift ;;
+    *) usage ;;
+  esac
+  shift
+done
 case "$ENVIRONMENT" in local | staging | production) ;; *) usage ;; esac
-case "$TARGET" in infra | apps | all) ;; *) usage ;; esac
+if [[ "$ENVIRONMENT" != local && -n "$SOURCE" ]]; then
+  echo "--build and --version are for local. $ENVIRONMENT runs the versions committed in" >&2
+  echo "environments/$ENVIRONMENT/kustomization.yaml: change them with scripts/set-version.sh and commit." >&2
+  exit 1
+fi
 ENV_DIR="$ROOT/environments/$ENVIRONMENT"
+BACKEND="${BACKEND_DIR:-$ROOT/../backend}"
+FRONTEND="${FRONTEND_DIR:-$ROOT/../frontend}"
+if [[ "$ENVIRONMENT" == local && -z "$SOURCE" ]]; then
+  if [[ -d "$BACKEND" && -d "$FRONTEND" ]]; then SOURCE=built; else SOURCE=published; fi
+fi
+deploy_apps=false
+if [[ "$TARGET" == apps || "$TARGET" == all ]]; then deploy_apps=true; fi
 
 # ─── the cluster ──────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -74,9 +114,10 @@ if [[ "$ENVIRONMENT" != local && "$CONTEXT" == docker-desktop ]]; then
   exit 1
 fi
 
-# local: the images are built on this machine, so the cluster must be able to run them without a registry.
+# What kind of cluster this is, for images built on this machine, which it must run without a registry:
 #   docker-desktop   Docker Desktop's Kubernetes runs the images of its own Docker engine (macOS, Windows)
 #   k3s              a k3s node on this machine (Linux): the images are copied into k3s' containerd
+#   other            anything else: it can run published images only
 local_cluster() {
   local versions nodes
   if [[ -n "${LOCAL_CLUSTER:-}" ]]; then
@@ -96,18 +137,15 @@ local_cluster() {
   fi
 }
 
-if [[ "$ENVIRONMENT" == local && ( "$TARGET" == apps || "$TARGET" == all ) ]]; then
+if [[ "$ENVIRONMENT" == local ]] && $deploy_apps; then
   CLUSTER="$(local_cluster)"
-  case "$CLUSTER" in
-    docker-desktop | k3s) ;;
-    *)
-      echo "local builds the images on this machine, and the context $CONTEXT cannot run them without a registry." >&2
-      echo "Use Docker Desktop's Kubernetes (context docker-desktop) or a k3s server on this machine" >&2
-      echo "(scripts/setup-ubuntu.sh), or set LOCAL_CLUSTER=docker-desktop|k3s if the detection is wrong." >&2
-      echo "Any other cluster runs registry images: release them (the app pipelines) and deploy staging or production." >&2
-      exit 1
-      ;;
-  esac
+  if [[ "$SOURCE" == built && "$CLUSTER" != docker-desktop && "$CLUSTER" != k3s ]]; then
+    echo "Images built on this machine cannot reach the context $CONTEXT without a registry." >&2
+    echo "Use Docker Desktop's Kubernetes (context docker-desktop) or a k3s server on this machine" >&2
+    echo "(scripts/setup-ubuntu.sh), set LOCAL_CLUSTER=docker-desktop|k3s if the detection is wrong, or run" >&2
+    echo "published images: scripts/deploy.sh local --version <X.Y.Z|latest>." >&2
+    exit 1
+  fi
   echo "Deploying $ENVIRONMENT ($TARGET) to Kubernetes context: $CONTEXT ($CLUSTER)"
 else
   echo "Deploying $ENVIRONMENT ($TARGET) to Kubernetes context: $CONTEXT"
@@ -126,6 +164,17 @@ apply_secret() {
   if [[ "$output" == *" configured"* ]]; then
     echo changed
   fi
+}
+
+# The image pull Secret gitlab-registry: a docker config made with jq from its environment and read by kubectl from
+# stdin, so the token is on no command line.
+registry_secret() {
+  local server="$1" username="$2" password="$3"
+  SERVER="$server" USERNAME="$username" PASSWORD="$password" jq -n '{auths: {(env.SERVER): {
+      username: env.USERNAME, password: env.PASSWORD, auth: ((env.USERNAME + ":" + env.PASSWORD) | @base64)}}}' \
+    | kubectl -n "$NAMESPACE" create secret generic gitlab-registry --type=kubernetes.io/dockerconfigjson \
+        --from-file=.dockerconfigjson=/dev/stdin --dry-run=client -o yaml \
+    | apply_secret >/dev/null
 }
 
 # The commit of a checkout, plus a timestamp when it has uncommitted changes: a unique, immutable tag per build
@@ -185,54 +234,207 @@ wait_for_rollouts() {
   kubectl -n "$NAMESPACE" rollout status deployment/gateway --timeout=300s
 }
 
-# ─── local: build, apply ──────────────────────────────────────────────────────────────────────────────────────────
+# The service's database and its two users, on the first deploy to a cluster. They must exist before the API starts:
+# its migrations then create everything inside the database (tables, indexes, the app user's permissions) as the
+# schema owner (pm_migrator); they cannot create the database or the users themselves: that needs the server's
+# administrator, and the passwords must never be in the code.
+# create-database.sh is idempotent and keeps existing passwords, so this only acts when the Secret is missing.
+ensure_database() {
+  if ! kubectl -n "$NAMESPACE" get secret database-credentials >/dev/null 2>&1; then
+    echo "==> The service's database and users (first deploy to this cluster)"
+    "$HERE/lib/create-database.sh" "$NAMESPACE" product_management pm_app pm_migrator
+  fi
+}
 
-deploy_local_apps() {
-  local backend frontend api_tag web_tag build="$ENV_DIR/generated/build"
-  backend="$(cd "${BACKEND_DIR:-$ROOT/../backend}" 2>/dev/null && pwd)" \
-    || { echo "No backend checkout at ${BACKEND_DIR:-$ROOT/../backend} (clone it next to this repository, or set BACKEND_DIR)" >&2; exit 1; }
-  frontend="$(cd "${FRONTEND_DIR:-$ROOT/../frontend}" 2>/dev/null && pwd)" \
-    || { echo "No frontend checkout at ${FRONTEND_DIR:-$ROOT/../frontend} (clone it next to this repository, or set FRONTEND_DIR)" >&2; exit 1; }
+# ─── local, published images: the registry login and the version ─────────────────────────────────────────────────
 
-  "$HERE/local-secrets.sh"
+# The registry image of api, web or gateway: its newName in environments/staging/kustomization.yaml (the line after
+# its "- name:"), the images staging and production run, e.g. registry.gitlab.com/zeiss/backend/api.
+registry_image() {
+  awk -v image="product-management/$1" '
+    $1 == "-" && $2 == "name:" { found = ($3 == image) }
+    found && $1 == "newName:" { gsub(/"/, "", $2); print $2; exit }' "$ROOT/environments/staging/kustomization.yaml"
+}
 
+# The registry login, the first that is set (the same order as scripts/versions.sh): REGISTRY_USER and
+# REGISTRY_PASSWORD, CI_DEPLOY_USER and CI_DEPLOY_PASSWORD, or this machine's `docker login <host>` (also through a
+# credential helper such as the macOS keychain). Exported as REGISTRY_USER and REGISTRY_PASSWORD for versions.sh;
+# the cluster gets it as the pull Secret gitlab-registry.
+registry_login() {
+  local host="$1" config="${DOCKER_CONFIG:-$HOME/.docker}/config.json" helper login=""
+  if [[ -n "${REGISTRY_USER:-}" && -n "${REGISTRY_PASSWORD:-}" ]]; then
+    export REGISTRY_USER REGISTRY_PASSWORD
+    return
+  fi
+  if [[ -n "${CI_DEPLOY_USER:-}" && -n "${CI_DEPLOY_PASSWORD:-}" ]]; then
+    login="$CI_DEPLOY_USER:$CI_DEPLOY_PASSWORD"
+  elif [[ -f "$config" ]]; then
+    helper="$(HOST="$host" jq -r '.credHelpers[env.HOST] // .credsStore // empty' "$config")"
+    if [[ -n "$helper" ]] && command -v "docker-credential-$helper" >/dev/null; then
+      login="$("docker-credential-$helper" get <<<"$host" 2>/dev/null \
+        | jq -r 'select(.Secret != null) | .Username + ":" + .Secret' 2>/dev/null || true)"
+    else
+      login="$(HOST="$host" jq -r '.auths[env.HOST].auth // empty' "$config" | base64 -d 2>/dev/null || true)"
+    fi
+  fi
+  if [[ "$login" != *:* ]]; then
+    echo "Published images need a login to $host: set REGISTRY_USER and REGISTRY_PASSWORD (a deploy token with" >&2
+    echo "the scope read_registry, e.g. a group deploy token named server-pull), or run: docker login $host" >&2
+    echo "Or build the images from ../backend and ../frontend: clone them next to this repository (--build)." >&2
+    exit 1
+  fi
+  REGISTRY_USER="${login%%:*}"
+  REGISTRY_PASSWORD="${login#*:}"
+  export REGISTRY_USER REGISTRY_PASSWORD
+}
+
+# The version to run: an explicit one must be published for api, web and gateway; latest is the newest X.Y.Z (no
+# pre-release) that all three have (web and gateway are one frontend release, api is versioned on its own).
+choose_version() {
+  local image missing="" published
+  if [[ "$VERSION" != latest ]] && ! grep -Eq "$SEMVER" <<<"$VERSION"; then
+    echo "\"$VERSION\" is not a version: X.Y.Z or X.Y.Z-rc.N (e.g. 1.0.0), or latest" >&2
+    exit 1
+  fi
+  for image in api web gateway; do
+    # versions.sh explains a registry error itself (no access, no token).
+    "$HERE/versions.sh" "$image" > "$work/$image"
+  done
+  if [[ "$VERSION" == latest ]]; then
+    VERSION="$(grep -v -- '-rc\.' "$work/api" | grep -Fx -f "$work/web" | grep -Fx -f "$work/gateway" | head -1 || true)"
+    if [[ -z "$VERSION" ]]; then
+      echo "No released version X.Y.Z is published for all of api, web and gateway yet (scripts/versions.sh all)." >&2
+      echo "Release one (a vX.Y.Z tag in backend and frontend), or build the images from ../backend and ../frontend." >&2
+      exit 1
+    fi
+    return
+  fi
+  for image in api web gateway; do
+    grep -Fxq "$VERSION" "$work/$image" || missing="$missing $image"
+  done
+  if [[ -n "$missing" ]]; then
+    echo "Version $VERSION is not published for:$missing. Published (newest first; scripts/versions.sh all):" >&2
+    for image in api web gateway; do
+      published="$(head -5 "$work/$image" | paste -sd ' ' -)"
+      echo "  $image: ${published:-(none yet)}" >&2
+    done
+    exit 1
+  fi
+}
+
+# A node pulls only an image built for its own platform (linux/amd64, linux/arm64): a version built for others would
+# never start there (ImagePullBackOff, "no match for platform in manifest"), so this is checked before anything changes.
+check_platforms() {
+  local nodes image built platform missing=""
+  nodes="$(kubectl get nodes \
+    -o jsonpath='{range .items[*]}{.status.nodeInfo.operatingSystem}/{.status.nodeInfo.architecture}{"\n"}{end}' | sort -u)"
+  for image in api web gateway; do
+    built="$("$HERE/versions.sh" "$image" --platforms "$VERSION")"
+    while read -r platform; do
+      grep -Fxq "$platform" <<<"$built" || missing="$missing $image"
+    done <<<"$nodes"
+  done
+  if [[ -n "$missing" ]]; then
+    echo "Version $VERSION cannot run on this cluster: its images are built for $(paste -sd ' ' - <<<"$built")," >&2
+    echo "the nodes are $(paste -sd ' ' - <<<"$nodes") (not built for them:$missing). Build the images here instead" >&2
+    echo "(clone backend and frontend next to this repository: scripts/deploy.sh local --build), or publish the" >&2
+    echo "version for that platform too." >&2
+    exit 1
+  fi
+}
+
+if [[ "$ENVIRONMENT" == local ]] && $deploy_apps; then
+  if [[ "$SOURCE" == published ]]; then
+    for image in api web gateway; do
+      [[ -n "$(registry_image "$image")" ]] \
+        || { echo "No newName for product-management/$image in environments/staging/kustomization.yaml" >&2; exit 1; }
+    done
+    REGISTRY_HOST="$(registry_image api)"
+    REGISTRY_HOST="${REGISTRY_HOST%%/*}"
+    registry_login "$REGISTRY_HOST"
+    choose_version
+    check_platforms
+    echo "Images: published $VERSION from $REGISTRY_HOST"
+  else
+    for dir in "$BACKEND" "$FRONTEND"; do
+      if [[ ! -d "$dir" ]]; then
+        echo "No checkout at $dir to build (--build): clone it next to this repository (or set BACKEND_DIR /" >&2
+        echo "FRONTEND_DIR), or run published images: scripts/deploy.sh local --version <X.Y.Z|latest>" >&2
+        exit 1
+      fi
+    done
+    BACKEND="$(cd "$BACKEND" && pwd)"
+    FRONTEND="$(cd "$FRONTEND" && pwd)"
+    echo "Images: built from ${BACKEND_DIR:-../backend} and ${FRONTEND_DIR:-../frontend}"
+  fi
+fi
+
+# ─── local: images, apply ─────────────────────────────────────────────────────────────────────────────────────────
+
+# Builds the three images from the checkouts (and copies them into k3s); sets api_tag and web_tag.
+build_images() {
   if ! docker info >/dev/null 2>&1; then
     echo "Docker is not reachable (docker info): start Docker Desktop, or the Docker Engine on Linux; there, your user" >&2
     echo "must be in the group docker (scripts/setup-ubuntu.sh adds it; log in again or run: newgrp docker)" >&2
     exit 1
   fi
-
-  api_tag="$(image_tag "$backend")"
-  web_tag="$(image_tag "$frontend")"
-  echo "==> Building product-management/api:$api_tag ($backend)"
-  docker build --quiet --tag "product-management/api:$api_tag" "$backend" >/dev/null
-  echo "==> Building product-management/web:$web_tag and product-management/gateway:$web_tag ($frontend)"
+  api_tag="$(image_tag "$BACKEND")"
+  web_tag="$(image_tag "$FRONTEND")"
+  echo "==> Building product-management/api:$api_tag ($BACKEND)"
+  docker build --quiet --tag "product-management/api:$api_tag" "$BACKEND" >/dev/null
+  echo "==> Building product-management/web:$web_tag and product-management/gateway:$web_tag ($FRONTEND)"
   # APP_VERSION: the release the web app reports with its browser errors.
-  docker build --quiet --tag "product-management/web:$web_tag" --build-arg APP_VERSION="$web_tag" "$frontend" >/dev/null
-  docker build --quiet --tag "product-management/gateway:$web_tag" "$frontend/gateway" >/dev/null
+  docker build --quiet --tag "product-management/web:$web_tag" --build-arg APP_VERSION="$web_tag" "$FRONTEND" >/dev/null
+  docker build --quiet --tag "product-management/gateway:$web_tag" "$FRONTEND/gateway" >/dev/null
   if [[ "$CLUSTER" == k3s ]]; then
     import_into_k3s "product-management/api:$api_tag" "product-management/web:$web_tag" \
       "product-management/gateway:$web_tag"
   fi
+}
 
-  mkdir -p "$build"
-  # The tags are quoted: a commit like 1186184 would otherwise be a YAML number, which Kustomize rejects.
-  cat > "$build/kustomization.yaml" <<EOF
-# Generated by scripts/deploy.sh local: the images it built on this machine. Not committed.
-apiVersion: kustomize.config.k8s.io/v1alpha1
-kind: Component
-images:
-  - name: product-management/api
-    newTag: "$api_tag"
-  - name: product-management/web
-    newTag: "$web_tag"
-  - name: product-management/gateway
-    newTag: "$web_tag"
+# environments/local/generated/build/kustomization.yaml: the Kustomize Component environments/local includes, with
+# the images of this deploy. Built: their local names and tags. Published: the registry names, the version and the
+# pull Secret on every Deployment (only here, so the committed environments/local serves both kinds).
+# The tags are quoted: a commit like 1186184 would otherwise be a YAML number, which Kustomize rejects.
+write_images_component() {
+  local file="$ENV_DIR/generated/build/kustomization.yaml" image
+  mkdir -p "$(dirname "$file")"
+  {
+    if [[ "$SOURCE" == published ]]; then
+      echo "# Generated by scripts/deploy.sh local: the published images it runs ($VERSION). Not committed."
+    else
+      echo "# Generated by scripts/deploy.sh local: the images it built on this machine. Not committed."
+    fi
+    echo "apiVersion: kustomize.config.k8s.io/v1alpha1"
+    echo "kind: Component"
+    echo "images:"
+    for image in api web gateway; do
+      echo "  - name: product-management/$image"
+      if [[ "$SOURCE" == published ]]; then
+        echo "    newName: $(registry_image "$image")"
+        echo "    newTag: \"$VERSION\""
+      elif [[ "$image" == api ]]; then
+        echo "    newTag: \"$api_tag\""
+      else
+        echo "    newTag: \"$web_tag\""
+      fi
+    done
+    if [[ "$SOURCE" == published || "${LOGS:-on}" == off ]]; then
+      echo "patches:"
+    fi
+    if [[ "$SOURCE" == published ]]; then
+      cat <<'EOF'
+  # The registry is private: every Deployment pulls with the Secret gitlab-registry (made by deploy.sh).
+  - target: { kind: Deployment }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/imagePullSecrets
+        value: [{ name: gitlab-registry }]
 EOF
-  if [[ "${LOGS:-on}" == off ]]; then
-    cat >> "$build/kustomization.yaml" <<EOF
-# LOGS=off: no log collector, the gateway drops the browser's error reports (answers /collect with 204).
-patches:
+    fi
+    if [[ "${LOGS:-on}" == off ]]; then
+      cat <<EOF
+  # LOGS=off: no log collector, the gateway drops the browser's error reports (answers /collect with 204).
   - patch: |-
       apiVersion: apps/v1
       kind: Deployment
@@ -245,9 +447,22 @@ patches:
                 env:
                   - { name: COLLECTOR_UPSTREAM, value: "" }
 EOF
+    fi
+  } > "$file"
+}
+
+deploy_local_apps() {
+  "$HERE/lib/local-secrets.sh"
+  if [[ "$SOURCE" == built ]]; then
+    build_images
   fi
+  write_images_component
 
   kubectl apply -f "$ROOT/apps/backend/namespace.yaml" >/dev/null
+  if [[ "$SOURCE" == published ]]; then
+    echo "==> Secret gitlab-registry: the registry login, to pull the images"
+    registry_secret "$REGISTRY_HOST" "$REGISTRY_USER" "$REGISTRY_PASSWORD"
+  fi
   ensure_database
   copy_redis_password
 
@@ -255,24 +470,10 @@ EOF
   kubectl apply -k "$ENV_DIR"
 }
 
-# The service's database and its two users, on the first deploy to a cluster. They must exist before the API starts:
-# its migrations then create everything inside the database (tables, indexes, the app user's permissions) as the
-# schema owner (pm_migrator); they cannot create the database or the users themselves: that needs the server's
-# administrator, and the passwords must never be in the code.
-# create-database.sh is idempotent and keeps existing passwords, so this only acts when the Secret is missing.
-ensure_database() {
-  if ! kubectl -n "$NAMESPACE" get secret database-credentials >/dev/null 2>&1; then
-    echo "==> The service's database and users (first deploy to this cluster)"
-    "$HERE/create-database.sh" "$NAMESPACE" product_management pm_app pm_migrator
-  fi
-}
-
 # ─── staging, production: apply what is committed ─────────────────────────────────────────────────────────────────
 
 deploy_remote_apps() {
-  local changed=""
-  rendered="$(mktemp)"
-  trap 'rm -f "$rendered"' EXIT
+  local changed="" rendered="$work/rendered.yaml"
   kubectl kustomize "$ENV_DIR" > "$rendered"
   if grep -q ':unreleased$' "$rendered"; then
     echo "environments/$ENVIRONMENT names no version yet for some images (newTag: unreleased):" >&2
@@ -289,10 +490,7 @@ deploy_remote_apps() {
   # node, a restart), so it is a deploy token, not the job's own short-lived token.
   if [[ -n "${CI_DEPLOY_USER:-}" && -n "${CI_DEPLOY_PASSWORD:-}" ]]; then
     echo "==> Secret gitlab-registry: the deploy token, to pull the images"
-    kubectl -n "$NAMESPACE" create secret docker-registry gitlab-registry \
-        --docker-server="${CI_REGISTRY:-registry.gitlab.com}" \
-        --docker-username="$CI_DEPLOY_USER" --docker-password="$CI_DEPLOY_PASSWORD" \
-        --dry-run=client -o yaml | apply_secret >/dev/null
+    registry_secret "${CI_REGISTRY:-registry.gitlab.com}" "$CI_DEPLOY_USER" "$CI_DEPLOY_PASSWORD"
   fi
   require_secret gitlab-registry \
     "set CI_DEPLOY_USER and CI_DEPLOY_PASSWORD (a group deploy token named gitlab-deploy-token, scope read_registry)"
@@ -325,7 +523,7 @@ if [[ "$TARGET" == infra || "$TARGET" == all ]]; then
   "$HERE/infra.sh" up
 fi
 
-if [[ "$TARGET" == apps || "$TARGET" == all ]]; then
+if $deploy_apps; then
   restart_api=false
   if [[ "$ENVIRONMENT" == local ]]; then
     deploy_local_apps
