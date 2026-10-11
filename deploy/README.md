@@ -1092,13 +1092,13 @@ The difference never reaches the committed files: `environments/local` names the
 `environments/local/generated/build` either sets the tags built here, or swaps in the registry names, the version and
 the pull Secret. Switching is one command (`--build`, or `--version 1.0.0`); the pods roll and the data stays.
 
-**Platforms.** The app pipelines publish what their builds produce: version `1.0.0` is built for `linux/amd64` only
-(`scripts/versions.sh all --platforms 1.0.0` shows it). It runs on an ordinary x86-64 server, but not on an ARM
-machine: a VM on a Mac with Apple silicon (Docker Desktop's Kubernetes there too), a Raspberry Pi, an AWS Graviton
-instance. There `deploy.sh` stops before it changes anything, with "Version 1.0.0 cannot run on this cluster: its
-images are built for linux/amd64, the nodes are linux/arm64"; build from the checkouts instead (`--build`), or publish
-the versions for both platforms (`docker buildx build --platform linux/amd64,linux/arm64` in the backend and frontend
-pipelines).
+**Platforms.** A node pulls only images built for its own processor: `linux/amd64` (an ordinary x86-64 server) or
+`linux/arm64` (a VM on a Mac with Apple silicon, Docker Desktop's Kubernetes there too, a Raspberry Pi, an AWS Graviton
+instance). The app pipelines build every image for both (`PLATFORMS` in their `.gitlab-ci.yml`) since the release
+after `1.0.0`; `1.0.0` itself is `linux/amd64` only, and published versions are never rebuilt.
+`scripts/versions.sh all --platforms <version>` shows what a version is built for. On a node of another platform
+`deploy.sh` stops before it changes anything, with "Version 1.0.0 cannot run on this cluster: its images are built for
+linux/amd64, the nodes are linux/arm64": deploy a newer version, or build from the checkouts (`--build`).
 
 ## Where it runs
 
@@ -1666,7 +1666,7 @@ a credential of this repository or of a cluster.
 | `No checkout at ../backend to build (--build)` | `--build` without the checkouts next to this repository | clone backend and frontend next to it ([Where the images come from](#where-the-images-come-from-backend-frontend-or-the-registry)), set `BACKEND_DIR` / `FRONTEND_DIR`, or leave out `--build` to run a published version |
 | `Published images need a login to registry.gitlab.com` | no `../backend` and `../frontend` (or `--version`), so the published images are used, and no registry login is set | `REGISTRY_USER` / `REGISTRY_PASSWORD` (a deploy token with `read_registry`, e.g. `server-pull`), or `docker login registry.gitlab.com`, or the menu (it asks); or clone the two repositories to build |
 | `Version 1.2.3 is not published for: web gateway` (with the published versions listed) | that version does not exist for every image: a typo, or api and the frontend were released with different numbers | one of the listed versions (`scripts/versions.sh all`); `--version latest` takes the newest one all three have |
-| `Version 1.0.0 cannot run on this cluster: its images are built for linux/amd64, the nodes are linux/arm64` | the published images are for another processor architecture than the cluster's nodes (an ARM machine: a VM on Apple silicon, a Raspberry Pi, Graviton) | build from the checkouts on that machine (`--build`), or publish multi-platform images (`docker buildx build --platform linux/amd64,linux/arm64` in the app pipelines) |
+| `Version 1.0.0 cannot run on this cluster: its images are built for linux/amd64, the nodes are linux/arm64` | the published images are for another processor architecture than the cluster's nodes (an ARM machine: a VM on Apple silicon, a Raspberry Pi, Graviton) | deploy a version built for both platforms (every release after `1.0.0`), or build from the checkouts on that machine (`--build`) |
 | pod `ImagePullBackOff`: `no match for platform in manifest` | the same, deployed without that check (or a node of another architecture joined later) | as above; `scripts/versions.sh all --platforms <version>` shows what a version is built for |
 | `No released version X.Y.Z is published for all of api, web and gateway yet` | nothing released yet, or no version number in common | release one (a `vX.Y.Z` tag in backend and in frontend), or build from the checkouts |
 | `environments/staging names no version yet for some images (newTag: unreleased)` | no version chosen for an image: backend or frontend has not published one, or nobody set it | tag a version in that repository (`v1.0.0`), then `update:staging` (or `scripts/set-version.sh staging all latest` and commit) |

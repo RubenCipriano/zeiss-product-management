@@ -336,7 +336,7 @@ shared PostgreSQL and Redis running.
 | --- | --- |
 | `KUBE_CONTEXT` | the kubectl context (the GitLab agent's `<project>:<agent>`); default: the current context |
 | `BACKEND_DIR`, `FRONTEND_DIR` | local: the checkouts to build (default `../backend`, `../frontend`); when both exist, `local` builds |
-| `REGISTRY_USER`, `REGISTRY_PASSWORD` | local, published: a deploy token with `read_registry` (a server: a group deploy token of its own, e.g. `server-pull`) → Secret `gitlab-registry`. The images must be built for the nodes' platform (`versions.sh all --platforms <version>`; 1.0.0 is `linux/amd64` only, so an ARM machine builds from source) |
+| `REGISTRY_USER`, `REGISTRY_PASSWORD` | local, published: a deploy token with `read_registry` (a server: a group deploy token of its own, e.g. `server-pull`) → Secret `gitlab-registry`. The images must be built for the nodes' platform (`versions.sh all --platforms <version>`; 1.0.0 is `linux/amd64` only; every later release is built for `linux/amd64` and `linux/arm64`) |
 | `LOCAL_CLUSTER` | local: `docker-desktop` or `k3s`, when the detection is wrong |
 | `LOGS=off` | local: a patch that sets the gateway's `COLLECTOR_UPSTREAM` to `""`: its `collector.sh` then makes `/collect` answer 204 and drop the reports instead of proxying to a collector that is not there |
 | `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD`, `CI_REGISTRY` | staging, production: the registry credential (GitLab passes the group deploy token by itself) |

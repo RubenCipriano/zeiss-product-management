@@ -1,7 +1,9 @@
 # Web image: the compiled Angular app served by unprivileged nginx.
 # Build from this folder:  docker build -t product-management/web:local .
 
-FROM node:24-alpine AS build
+# The build runs on the builder's own platform even when the image is for another one (the pipeline publishes
+# linux/amd64 and linux/arm64): its output is static files, so only the nginx stage below differs per platform.
+FROM --platform=$BUILDPLATFORM node:24-alpine AS build
 WORKDIR /app
 
 # Dependencies in their own layer, cached until the lockfile changes.

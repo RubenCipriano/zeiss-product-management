@@ -53,6 +53,9 @@ variables:
   # move an existing version to another image.
   WEB_IMAGE: $CI_REGISTRY_IMAGE/web:$CI_COMMIT_SHORT_SHA
   GATEWAY_IMAGE: $CI_REGISTRY_IMAGE/gateway:$CI_COMMIT_SHORT_SHA
+  # Every image is built for both processor families: ordinary x86-64 servers and ARM ones (Apple silicon VMs,
+  # Graviton, Raspberry Pi). A node pulls only its own platform from the image index.
+  PLATFORMS: linux/amd64,linux/arm64
   # Tool images, pinned (bump them with Renovate or by hand).
   NODE_IMAGE: node:24.20.0-bookworm-slim                          # = .nvmrc (24)
   DOCKER_IMAGE: docker:29.8.2-cli
@@ -132,7 +135,7 @@ test:frontend:
         echo "$IMAGE exists (built by the pipeline on main): reusing it"
       else
         repository="${IMAGE%:*}"
-        docker buildx build --pull --push \
+        docker buildx build --pull --push --platform "$PLATFORMS" \
           --cache-from "type=registry,ref=$repository:buildcache" \
           --cache-to "type=registry,ref=$repository:buildcache,mode=max,image-manifest=true,oci-mediatypes=true" \
           --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" \

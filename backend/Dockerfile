@@ -2,7 +2,10 @@
 # The API applies its own database migrations when it starts, before it serves (Database:ApplyMigrationsOnStartup):
 # the image needs no separate migration command or job.
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+# The build runs on the builder's own platform even when the image is for another one (the pipeline publishes
+# linux/amd64 and linux/arm64): the output is portable .NET code (no native app host), so only the runtime stage
+# below differs per platform, and nothing is emulated.
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
 # Restore first, in its own layer, so it is cached until a project file or package version changes.

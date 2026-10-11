@@ -589,7 +589,8 @@ production), `OpenApi__Enabled` (`true` locally and in staging), the five
 
 `docker build -t product-management/api .` builds the image every environment runs (SDK 10.0 to build,
 `mcr.microsoft.com/dotnet/aspnet:10.0` to run, as the non-root `app` user, port 8080). When it starts it applies the
-database migrations, then serves HTTP. It also has two commands for setting an environment up; each runs and exits:
+database migrations, then serves HTTP. The pipeline builds it for `linux/amd64` and `linux/arm64` (`PLATFORMS`): the
+SDK stage runs once on the builder's own platform (its output is portable .NET code), so nothing is emulated. It also has two commands for setting an environment up; each runs and exits:
 
 | Command | Does | Used by |
 | --- | --- | --- |

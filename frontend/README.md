@@ -575,6 +575,10 @@ docker build --build-arg APP_VERSION=dev -t product-management/web .
 docker build -t product-management/gateway gateway
 ```
 
+The pipeline builds both images for `linux/amd64` and `linux/arm64` (`PLATFORMS` in `.gitlab-ci.yml`), so they run on
+x86-64 and ARM nodes alike. The Angular build runs once, on the builder's own platform (its output is static files);
+only the nginx stage is per platform, and it has no `RUN` step, so nothing is emulated.
+
 ### Outside Kubernetes: docker run, Docker Compose
 
 The published images (`registry.gitlab.com/zeiss/frontend/web:<version>` and `.../gateway:<version>`) are plain OCI
