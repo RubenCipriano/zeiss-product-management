@@ -5,7 +5,9 @@
 # connection strings (where the database and Redis are). No password is in any YAML file: they come from Secrets in
 # this namespace, none of them committed:
 #   database-credentials   made by scripts/create-database.sh (the shared PostgreSQL's users)
-#     app-password         → PGPASSWORD (Npgsql uses it when the connection string has no password)
+#     app-password         → PGPASSWORD (Npgsql uses it when the connection string has no password): requests, as pm_app
+#     migrator-user        → Database__MigratorUsername   } the migrations at startup only, as the schema owner
+#     migrator-password    → Database__MigratorPassword   } (pm_migrator), on short-lived connections of their own
 #   redis-credentials      a copy of the shared Redis' password (infra/redis-auth), made by scripts/deploy.sh
 #     password             → Redis__Password (added to the Redis connection by the API)
 #   api-secrets            the API's own keys: locally generated from files made by scripts/local-secrets.sh; in
@@ -23,6 +25,12 @@ spec:
   # No `replicas`: the HorizontalPodAutoscaler owns the replica count. Setting it here would reset the count on every
   # `kubectl apply`.
   revisionHistoryLimit: 5
+  # A rollout that makes no progress for 15 minutes is reported as failed: longer than the startup probe's 10 minutes
+  # below, so a long migration is not reported as a stuck rollout.
+  progressDeadlineSeconds: 900
+  # One new pod at a time, and no old pod stops before a new one is ready. The new version's first pod applies its
+  # migrations before it serves (see the startup probe); if a migration fails, that pod never becomes ready
+  # (CrashLoopBackOff) and the rollout stops there, with every old pod still serving.
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -64,9 +72,13 @@ spec:
               value: Production
             - name: Authentication__AccessTokenLifetime
               value: "01:00:00"
-            # Migrations run from the CI/CD pipeline before the rollout, never at startup (several replicas would race).
+            # The API applies its own EF Core migrations when it starts, before it serves (one path for every
+            # environment, no separate migration job). Replicas starting at once take turns on a PostgreSQL advisory
+            # lock: the first migrates, the others wait, then find the schema up to date. A migration must work with
+            # the version still running (expand/contract): old pods serve next to the new ones during the rollout.
+            # Database__SeedSampleData (the sample catalogue on an empty database) is set per environment.
             - name: Database__ApplyMigrationsOnStartup
-              value: "false"
+              value: "true"
             - name: OpenApi__Enabled
               value: "false"
             # Per user (shared by every replica through Redis).
@@ -95,14 +107,22 @@ spec:
             # The secrets (see the top of this file).
             - name: PGPASSWORD
               valueFrom: { secretKeyRef: { name: database-credentials, key: app-password } }
+            - name: Database__MigratorUsername
+              valueFrom: { secretKeyRef: { name: database-credentials, key: migrator-user } }
+            - name: Database__MigratorPassword
+              valueFrom: { secretKeyRef: { name: database-credentials, key: migrator-password } }
             - name: Redis__Password
               valueFrom: { secretKeyRef: { name: redis-credentials, key: password } }
             - name: Authentication__SigningKey
               valueFrom: { secretKeyRef: { name: api-secrets, key: signing-key } }
+          # The HTTP server starts only after the migrations (Program.cs), so this probe fails until they are done:
+          # up to 10 minutes (5 s x 120) for a long migration, or for waiting on another replica's. Liveness and
+          # readiness start only after it succeeds. A pod that has not started by then is restarted and carries on
+          # from the last migration that committed (each one commits on its own and is recorded in the history).
           startupProbe:
             httpGet: { path: /health/live, port: http }
-            periodSeconds: 2
-            failureThreshold: 30
+            periodSeconds: 5
+            failureThreshold: 120
           # Readiness includes the database: a pod that cannot reach it should get no traffic. But the database is
           # shared, so a *slow* database must not take every replica out of the load balancer at once (a cascading
           # outage). The probe waits up to 3 s and needs 6 failures in a row (30 s) before the pod leaves rotation.

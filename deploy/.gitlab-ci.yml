@@ -13,17 +13,17 @@
 #                propose:production, which proposes the versions staging runs). Merging it is the release decision.
 #
 #   validate (every MR and commit) ──► staging (main) ─────────────────────► production (main, manual)
-#   manifests (scripts/validate.sh),     deploy:staging: migrate + apply        deploy:production: migrate + apply
+#   manifests (scripts/validate.sh),     deploy:staging: apply                  deploy:production: apply
 #   scripts (shellcheck),                smoke:staging                          smoke:production
 #   Alloy configuration                  infra:staging (manual)                 infra:production (manual)
 #                                        update:staging (schedule, or manual)   propose:production (manual)
 #
 # deploy:staging runs on the default branch when a commit changes environments/staging, apps/, infra/ or the deploy
 # scripts; deploy:production when it changes environments/production (a merged merge request) or apps/, and waits for
-# a person to start it. Both first apply the database migrations with the API image the environment names
-# (scripts/migrate.sh), then the manifests. Rollback: scripts/set-version.sh <env> <image> <older version> (or
-# `git revert` the version commit) and commit; the pipeline applies it. infra/ is applied only by the manual infra
-# jobs: it holds the data of every service. A scheduled pipeline runs only update:staging.
+# a person to start it. Both apply the manifests and wait for the rollouts; the database migrations need no job: the
+# new API pods apply them when they start, before they serve. Rollback: scripts/set-version.sh <env> <image> <older
+# version> (or `git revert` the version commit) and commit; the pipeline applies it. infra/ is applied only by the
+# manual infra jobs: it holds the data of every service. A scheduled pipeline runs only update:staging.
 #
 # Project- or group-level CI/CD variables (not scoped to an environment: rules cannot see environment-scoped ones):
 #   STAGING_ENABLED, PRODUCTION_ENABLED   "true" creates that environment's jobs on the default branch; without them
@@ -53,9 +53,9 @@
 # must be allowed to push to main (update:staging pushes as that user).
 #
 # Argo CD instead of these jobs (prepared in argocd/, README.md "Moving to Argo CD"): Argo CD applies main (automated
-# for staging, manual sync for production), the migration runs as its PreSync hook (argocd/hooks), and Argo CD Image
-# Updater replaces update:staging. Then the deploy, smoke and update jobs below are switched off and this pipeline
-# keeps validate (and propose:production).
+# for staging, manual sync for production; no migration hook is needed, the API migrates itself when its new pods
+# start), and Argo CD Image Updater replaces update:staging. Then the deploy, smoke and update jobs below are switched
+# off and this pipeline keeps validate (and propose:production).
 
 workflow:
   name: "$CI_COMMIT_REF_NAME: $CI_COMMIT_TITLE"
@@ -137,8 +137,9 @@ validate:alloy:
 
 # Applies environments/$ENVIRONMENT exactly as committed (scripts/deploy.sh <environment> apps): selects the cluster
 # (KUBE_CONTEXT or KUBECONFIG), creates the Secrets gitlab-registry and api-secrets from the CI/CD variables, copies
-# the shared Redis' password, applies the database migrations with the environment's API image (scripts/migrate.sh, a
-# one-off pod; a failed migration fails the job before anything is applied), applies, waits for the rollouts.
+# the shared Redis' password, applies, waits for the rollouts. The new API pods apply the database migrations when they
+# start (as the schema owner, before they serve); a failed migration keeps them from becoming ready, so the rollout
+# stops with the old pods still serving and the job fails at the wait (kubectl logs deployment/api shows why).
 .deploy:
   image: $KUBE_TOOLS_IMAGE
   interruptible: false
@@ -170,7 +171,7 @@ deploy:staging:
   rules:
     - !reference [.not-scheduled, rules]
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
-      changes: [environments/staging/**/*, apps/**/*, infra/**/*, scripts/deploy.sh, scripts/migrate.sh]
+      changes: [environments/staging/**/*, apps/**/*, infra/**/*, scripts/deploy.sh]
   environment:
     name: staging
     url: $STAGING_URL
@@ -186,7 +187,7 @@ smoke:staging:
   rules:
     - !reference [.not-scheduled, rules]
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $STAGING_ENABLED == "true"
-      changes: [environments/staging/**/*, apps/**/*, infra/**/*, scripts/deploy.sh, scripts/migrate.sh]
+      changes: [environments/staging/**/*, apps/**/*, infra/**/*, scripts/deploy.sh]
   environment:
     name: staging
     action: verify
@@ -251,7 +252,7 @@ deploy:production:
   rules:
     - !reference [.not-scheduled, rules]
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $PRODUCTION_ENABLED == "true"
-      changes: [environments/production/**/*, apps/**/*, scripts/deploy.sh, scripts/migrate.sh]
+      changes: [environments/production/**/*, apps/**/*, scripts/deploy.sh]
       when: manual
   allow_failure: false
   environment:
@@ -269,7 +270,7 @@ smoke:production:
   rules:
     - !reference [.not-scheduled, rules]
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $PRODUCTION_ENABLED == "true"
-      changes: [environments/production/**/*, apps/**/*, scripts/deploy.sh, scripts/migrate.sh]
+      changes: [environments/production/**/*, apps/**/*, scripts/deploy.sh]
   environment:
     name: production
     action: verify

@@ -25,8 +25,8 @@ patches:
   - path: gateway.yaml
   - path: registry.yaml
 # The deployed versions (SemVer X.Y.Z, published by a vX.Y.Z tag in backend or frontend): changed with
-# scripts/set-version.sh, by update:staging or by a person. "unreleased": no version chosen yet; scripts/deploy.sh and
-# scripts/migrate.sh refuse to apply until every image has one.
+# scripts/set-version.sh, by update:staging or by a person. "unreleased": no version chosen yet; scripts/deploy.sh
+# refuses to apply until every image has one.
 images:
   - name: product-management/api
     newName: registry.gitlab.com/zeiss/backend/api

@@ -1,7 +1,8 @@
 # CI pipeline of the backend repository (the API) for GitLab. It only builds and publishes: it tests, builds and scans
 # the API image, and when someone tags a commit with a version it publishes that version and creates a GitLab Release.
 # It never touches an environment or the deploy repository (gitlab.com/zeiss/deploy): that repository chooses which
-# published version each environment runs, migrates its database and applies it (the "pull" model).
+# published version each environment runs and applies it (the "pull" model); the new API pods then migrate their
+# database themselves when they start.
 #
 #   test ─────► build ─────────► scan ──────► publish (tag vX.Y.Z only) ──► release (tag vX.Y.Z only)
 #   format,     api image        Trivy        publish:api: the image         release: a GitLab Release "vX.Y.Z" with
@@ -147,9 +148,9 @@ build:api:
       fi
 
 # The exact SQL the migrations will run, for review in the merge request before it reaches production. Idempotent:
-# each migration is guarded by the history table. Review artifact only: the deploy repository applies migrations with
-# the API image's `migrate` command (its scripts/migrate.sh), which also runs the CREATE INDEX CONCURRENTLY statements
-# outside a transaction (in this script they sit in DO blocks, where PostgreSQL does not allow them).
+# each migration is guarded by the history table. Review artifact only: the API applies the migrations itself when it
+# starts (EF Core's MigrateAsync, as the schema owner), which also runs the CREATE INDEX CONCURRENTLY statements outside
+# a transaction (in this script they sit in DO blocks, where PostgreSQL does not allow them).
 migrations:sql:
   stage: build
   extends: .nuget-cache

@@ -15,10 +15,10 @@
 #      environments/local/generated/build (not committed), so `kubectl diff -k environments/local` compares against
 #      exactly what was applied. Docker Desktop's Kubernetes runs the images of its Docker engine as they are; k3s has
 #      a containerd of its own, so they are copied into it (docker save | sudo k3s ctr images import);
-#   3. creates the service's database if it does not exist yet (scripts/create-database.sh);
+#   3. creates the service's database and users if they do not exist yet (scripts/create-database.sh);
 #   4. copies the shared Redis' password into the namespace (Secret redis-credentials);
-#   5. applies the database migrations with the new API image (scripts/migrate.sh local);
-#   6. applies environments/local and waits for the rollouts.
+#   5. applies environments/local and waits for the rollouts: the new API pods apply the database migrations
+#      themselves when they start, before they serve (apps/backend/deployment.yaml).
 #
 # staging, production (this repository's pipeline, or a laptop whose kubectl reaches that cluster):
 #   1. refuses an environment whose kustomization.yaml still names no version for an image (newTag: unreleased);
@@ -26,8 +26,9 @@
 #      variables below, when they are set (otherwise the existing Secrets are kept);
 #   3. creates the service's database and users on the first deploy (scripts/create-database.sh);
 #   4. copies the shared Redis' password into the namespace (Secret redis-credentials);
-#   5. applies the database migrations with the API image the environment names (scripts/migrate.sh <environment>);
-#   6. applies environments/<environment> exactly as committed and waits for the rollouts.
+#   5. applies environments/<environment> exactly as committed and waits for the rollouts: the new API pods apply
+#      the database migrations themselves when they start; if one fails, the rollout stops and the old pods keep
+#      serving (the job fails at the wait).
 #   Which versions run is chosen in environments/<environment>/kustomization.yaml (scripts/set-version.sh).
 #
 # Variables:
@@ -37,8 +38,6 @@
 #   LOCAL_CLUSTER=docker-desktop|k3s      local: how the images reach the cluster, when the detection gets it wrong
 #                                         (default: docker-desktop for that context, k3s for a k3s node on this machine)
 #   LOGS=off                              local: no log collector, the gateway answers /collect with 204
-#   SEED_SAMPLE_DATA                      sample catalogue on an empty database (default: true for local and staging,
-#                                         false for production; scripts/migrate.sh)
 #   CI_DEPLOY_USER, CI_DEPLOY_PASSWORD    staging/production: a deploy token with read_registry on both registries
 #                                         (GitLab passes the group deploy token named gitlab-deploy-token by itself)
 #   CI_REGISTRY                           the registry of that token (default: registry.gitlab.com)
@@ -178,14 +177,15 @@ require_secret() {
   fi
 }
 
+# The API's first new pod applies the migrations before it becomes ready, which can take up to its startup probe's 10
+# minutes (apps/backend/deployment.yaml): its rollout gets 15.
 wait_for_rollouts() {
-  local deployment
-  for deployment in api web gateway; do
-    kubectl -n "$NAMESPACE" rollout status "deployment/$deployment" --timeout=300s
-  done
+  kubectl -n "$NAMESPACE" rollout status deployment/api --timeout=900s
+  kubectl -n "$NAMESPACE" rollout status deployment/web --timeout=300s
+  kubectl -n "$NAMESPACE" rollout status deployment/gateway --timeout=300s
 }
 
-# ─── local: build, migrate, apply ─────────────────────────────────────────────────────────────────────────────────
+# ─── local: build, apply ──────────────────────────────────────────────────────────────────────────────────────────
 
 deploy_local_apps() {
   local backend frontend api_tag web_tag build="$ENV_DIR/generated/build"
@@ -250,15 +250,15 @@ EOF
   kubectl apply -f "$ROOT/apps/backend/namespace.yaml" >/dev/null
   ensure_database
   copy_redis_password
-  "$HERE/migrate.sh" local
 
   echo "==> Applying environments/local"
   kubectl apply -k "$ENV_DIR"
 }
 
-# The service's database and its two users, on the first deploy to a cluster. The migrations then create everything
-# inside it (tables, indexes, the app user's permissions) as the schema owner; they cannot create the database or the
-# users themselves: that needs the server's administrator, and the passwords must never be in the code.
+# The service's database and its two users, on the first deploy to a cluster. They must exist before the API starts:
+# its migrations then create everything inside the database (tables, indexes, the app user's permissions) as the
+# schema owner (pm_migrator); they cannot create the database or the users themselves: that needs the server's
+# administrator, and the passwords must never be in the code.
 # create-database.sh is idempotent and keeps existing passwords, so this only acts when the Secret is missing.
 ensure_database() {
   if ! kubectl -n "$NAMESPACE" get secret database-credentials >/dev/null 2>&1; then
@@ -315,9 +315,6 @@ deploy_remote_apps() {
 
   copy_redis_password
 
-  # The schema first, with exactly the API image about to be rolled out; a failed migration stops here.
-  "$HERE/migrate.sh" "$ENVIRONMENT"
-
   echo "==> Applying environments/$ENVIRONMENT"
   kubectl apply -f "$rendered"
 }
@@ -340,7 +337,7 @@ if [[ "$TARGET" == apps || "$TARGET" == all ]]; then
   if $restart_api; then
     echo "==> A Secret of the API changed: restarting it so it reads it"
     kubectl -n "$NAMESPACE" rollout restart deployment/api
-    kubectl -n "$NAMESPACE" rollout status deployment/api --timeout=300s
+    kubectl -n "$NAMESPACE" rollout status deployment/api --timeout=900s
   fi
   echo
   kubectl -n "$NAMESPACE" get pods -l 'app.kubernetes.io/name in (api, web, gateway)'

@@ -12,8 +12,8 @@ using ProductManagement.Infrastructure.Persistence;
 // dependency-injection container, builds the HTTP pipeline (middleware: each request passes through the app.Use...
 // steps below, in order), brings the database up to date and starts serving requests.
 
-// Command-line tools (hash-secret, generate-signing-key, migrate) run and exit without starting the web host.
-if (await ApiCommandLine.TryRunAsync(args) is { } exitCode)
+// Command-line tools (hash-secret, generate-signing-key) run and exit without starting the web host.
+if (ApiCommandLine.TryRun(args) is { } exitCode)
 {
     return exitCode;
 }
@@ -69,6 +69,9 @@ app.MapHealthChecks("/health/ready", new HealthCheckOptions
     Predicate = check => check.Tags.Contains(InfrastructureServiceCollectionExtensions.ReadinessHealthCheckTag),
 }).AllowAnonymous();
 
+// The schema first: the migrations (as the migrator user, one replica at a time) run before the server starts, so
+// /health/ready cannot answer, and the pod gets no traffic, until the database is up to date. If they fail, the
+// process exits and Kubernetes keeps the previous version's pods serving.
 await app.Services.InitializeDatabaseAsync();
 await app.RunAsync();
 return 0;

@@ -14,6 +14,8 @@ environments and the scripts that deploy everything are in [deploy](https://gitl
 
 ## Contents
 
+- [What the assessment asked for](#what-the-assessment-asked-for)
+- [What we added beyond the assessment](#what-we-added-beyond-the-assessment)
 - [The gateway](#the-gateway)
   - [What a gateway is](#what-a-gateway-is)
   - [Why this project has one](#why-this-project-has-one)
@@ -36,6 +38,80 @@ environments and the scripts that deploy everything are in [deploy](https://gitl
 - [CI](#ci)
 - [How to release a version](#how-to-release-a-version)
 - [Troubleshooting](#troubleshooting)
+
+## What the assessment asked for
+
+The assessment's "Frontend Extension": an Angular application that consumes the products API and presents the data in
+a meaningful and user-friendly way. The tables follow its own headings; the API's part is in the backend README.
+Paths are under `src/app/`.
+
+**Requirements**
+
+| Requirement | How it is met | Where |
+| --- | --- | --- |
+| integrate with the API developed in this assignment | every call goes to the same origin, `/api`, through the gateway (locally the dev server's proxy) | `core/config/api-config.ts`, `features/products/data-access/products-api.ts` |
+| consume the available endpoints and display the data appropriately | the list, search, stock-level filter, product details, create, update, delete and both stock endpoints; a paged table with each product's stock and its status | `features/products/ui/product-table/`, `features/products/ui/product-filters/` |
+| a user interface that allows interaction with the product data | `+` / `−` stock buttons, a stock dialog, create / edit / delete dialogs, search, filters and paging | `features/products/feature/` |
+| reflect changes made through the API | the page reloads after every change, refreshes every 15 s while visible (changes made by others appear), and a `412` offers the latest version instead of overwriting it | `features/products/data-access/products-store.ts`, `shared/util/auto-refresh.ts` |
+
+**Technical Expectations**
+
+| Expectation | How it is met | Where |
+| --- | --- | --- |
+| Angular, latest stable version | Angular 22: standalone components, signals, no zone.js | `package.json`, `app.config.ts` |
+| a clean, maintainable structure | `core/`, `shared/`, and per feature `data-access/` → `feature/` → `ui/` with one dependency rule | [How it is organised](#how-it-is-organised) |
+| common best practices for Angular development | lazy-loaded routes, `input()` / `output()`, typed reactive forms, functional interceptors and guards, ESLint (angular-eslint) | `app.routes.ts`, `eslint.config.js` |
+| asynchronous data and API communication | `rxResource` cancels a request that a newer query replaced; one `ApiError` type for every failure; idempotency keys on stock changes | [State and data flow](#state-and-data-flow), [Errors](#errors) |
+
+**Optional**
+
+| Item | How it is met | Where |
+| --- | --- | --- |
+| improve usability and user experience | instant pages from a browser cache, the next page prefetched, a loading bar instead of an empty table, toasts, summary cards | [What it does for a user](#what-it-does-for-a-user) |
+| validation, filtering, interaction patterns | form validation with the API's limits and the API's field errors next to each field; search, stock-range filter and presets; confirmations | `shared/forms/`, `features/products/ui/product-filters/` |
+| styling or UI frameworks of choice | Tailwind CSS and the Angular CDK (dialogs, focus handling) | `src/tailwind.css`, `shared/ui/` |
+
+## What we added beyond the assessment
+
+**Gateway**
+
+| Addition | What it gives | Where |
+| --- | --- | --- |
+| one entry point (nginx) for the app and the API | one origin (no CORS), the token checked before the API, a rate limit per client IP | [The gateway](#the-gateway) |
+| a 1-second microcache of API reads | identical read bursts answered once | [Other API requests](#other-api-requests) |
+
+**Speed in the browser**
+
+| Addition | What it gives | Where |
+| --- | --- | --- |
+| a browser cache (stale-while-revalidate) | pages already seen appear at once | `core/http/client-cache-interceptor.ts` |
+| prefetch of the next page | "next page" is usually instant | `features/products/data-access/products-store.ts` |
+
+**Roles in the UI**
+
+| Addition | What it gives | Where |
+| --- | --- | --- |
+| sign-in and three roles | a viewer reads, a stock clerk changes stock, a manager does everything; buttons a role may not use are hidden | `core/auth/`, `features/products/feature/product-actions.ts` |
+
+**Accessibility and security**
+
+| Addition | What it gives | Where |
+| --- | --- | --- |
+| keyboard and screen-reader support | focus kept in dialogs, live regions, labelled controls | [Accessibility](#accessibility) |
+| a strict Content-Security-Policy and security headers | no inline scripts, no third-party origins | [Security headers and CSP](#security-headers-and-csp) |
+
+**Browser error reporting**
+
+| Addition | What it gives | Where |
+| --- | --- | --- |
+| errors from users' browsers in the same logs as the server's | debugging with the route, release and user, without personal data | [Browser error reporting](#browser-error-reporting) |
+
+**Tests**
+
+| Suite | Tests | Where |
+| --- | --- | --- |
+| unit and component (Vitest) | 187 | `*.spec.ts` next to the code |
+| end-to-end (Playwright, desktop and phone) | 22 | `e2e/` |
 
 ## The gateway
 

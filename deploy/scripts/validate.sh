@@ -10,7 +10,9 @@
 #   1. it renders (kubectl kustomize);
 #   2. every object is valid against the Kubernetes API schemas (kubeconform -strict: unknown fields are errors);
 #   3. every object is labelled app.kubernetes.io/part-of=product-management;
-#   4. the API has both connection strings; the gateway knows where the API, its keys and the log collector are;
+#   4. the API has both connection strings and applies its migrations at startup as the migrator (user and password
+#      from the Secret database-credentials), with a sample-data setting (never on in production); the gateway knows
+#      where the API, its keys and the log collector are;
 #   5. staging and production: no Secret (scripts/deploy.sh creates them from CI/CD variables, the repository never
 #      holds their values), every Deployment pulls with the Secret gitlab-registry, and every image is a registry
 #      image with a tag; local: the only Secret is api-secrets, generated from files that are never committed.
@@ -20,9 +22,7 @@
 #   7. every object is labelled app.kubernetes.io/part-of=infra and, but the Namespace, app.kubernetes.io/component
 #      postgres, redis or logs (scripts/infra.sh down selects by it); no Secret (infra.sh makes them in the cluster).
 # argocd/ (prepared for Argo CD, not used by the pipeline yet):
-#   8. staging and production still render and are valid with the migration hook component (argocd/hooks) added, and
-#      the hook Job runs the same API image as the environment's Deployment;
-#   9. the Applications and the ImageUpdater are valid against the custom resource definitions of the Argo CD and
+#   8. the Applications and the ImageUpdater are valid against the custom resource definitions of the Argo CD and
 #      Argo CD Image Updater versions the README installs (downloaded from their release tags, -strict), and each
 #      Application points at an environment folder that exists.
 #
@@ -51,7 +51,12 @@ query() {
   yq ea "[$1] | .[]" "$rendered"
 }
 
-cp -R "$ROOT/apps" "$ROOT/environments" "$ROOT/argocd" "$work/"
+# A yq expression over one environment variable of the API's container (e.g. .value).
+api_env() {
+  query "select(.kind == \"Deployment\" and .metadata.name == \"api\") | .spec.template.spec.containers[].env[] | select(.name == \"$1\") | $2"
+}
+
+cp -R "$ROOT/apps" "$ROOT/environments" "$work/"
 generated="$work/environments/local/generated"
 mkdir -p "$generated/build"
 [[ -f "$generated/signing-key.pem" ]] || echo placeholder > "$generated/signing-key.pem"
@@ -85,6 +90,16 @@ for environment in local staging production; do
     value="$(query "select(.kind == \"Deployment\" and .metadata.name == \"api\") | .spec.template.spec.containers[].env[] | select(.name == \"$key\") | .value")"
     [[ -n "$value" ]] || fail "$key is not set (environments/$environment/api.yaml)"
   done
+  [[ "$(api_env Database__ApplyMigrationsOnStartup .value)" == true ]] \
+    || fail "Database__ApplyMigrationsOnStartup is not \"true\" (apps/backend/deployment.yaml)"
+  for key in Database__MigratorUsername:migrator-user Database__MigratorPassword:migrator-password; do
+    [[ "$(api_env "${key%%:*}" '.valueFrom.secretKeyRef.name + "/" + .valueFrom.secretKeyRef.key')" == "database-credentials/${key#*:}" ]] \
+      || fail "${key%%:*} does not come from the Secret database-credentials, key ${key#*:} (apps/backend/deployment.yaml)"
+  done
+  seed="$(api_env Database__SeedSampleData .value)"
+  [[ "$seed" == true || "$seed" == false ]] \
+    || fail "Database__SeedSampleData is not \"true\" or \"false\" (environments/$environment/api.yaml)"
+  [[ "$environment" != production || "$seed" == false ]] || fail "production seeds sample data"
   for key in API_UPSTREAM JWKS_URL COLLECTOR_UPSTREAM; do
     found="$(query "select(.kind == \"Deployment\" and .metadata.name == \"gateway\") | .spec.template.spec.containers[].env[] | select(.name == \"$key\") | .name")"
     [[ -n "$found" ]] || fail "$key is not set (environments/$environment/gateway.yaml)"
@@ -129,20 +144,6 @@ unlabelled="$(query 'select(.kind != "Namespace" and .metadata.name != "grafana-
 [[ -z "$unlabelled" ]] || fail "no app.kubernetes.io/component postgres, redis or logs (infra.sh down needs it): $unlabelled"
 secrets="$(query 'select(.kind == "Secret") | .metadata.name')"
 [[ -z "$secrets" ]] || fail "Secrets in infra/ (infra.sh creates them in the cluster): $secrets"
-
-echo "==> argocd/hooks (the migration as a PreSync hook, in staging and production)"
-for environment in staging production; do
-  yq -i '.components += ["../../argocd/hooks"]' "$work/environments/$environment/kustomization.yaml"
-  if ! kubectl kustomize "$work/environments/$environment" > "$rendered"; then
-    fail "environments/$environment does not render with argocd/hooks"
-    continue
-  fi
-  kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" - < "$rendered" || failed=1
-  hook="$(query 'select(.kind == "Job" and .metadata.annotations["argocd.argoproj.io/hook"] == "PreSync") | .spec.template.spec.containers[0].image')"
-  api="$(query 'select(.kind == "Deployment" and .metadata.name == "api") | .spec.template.spec.containers[] | select(.name == "api") | .image')"
-  [[ -n "$hook" && "$hook" == "$api" ]] \
-    || fail "environments/$environment: the PreSync Job's image ($hook) is not the API's ($api)"
-done
 
 echo "==> argocd/applications (Argo CD $ARGOCD_VERSION, Image Updater $IMAGE_UPDATER_VERSION)"
 # A JSON schema per custom resource, from its CRD; -strict needs "additionalProperties: false" where the CRD lists

@@ -3,6 +3,7 @@
 #   staging.yaml         Application product-management-staging: environments/staging, synced automatically
 #   production.yaml      Application product-management-production: environments/production, synced by a person
 #   image-updater.yaml   ImageUpdater: lets Argo CD Image Updater act on the Applications that carry its annotations
+# No migration hook: the API's new pods apply the database migrations themselves when Argo CD rolls them out.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

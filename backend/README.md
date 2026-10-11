@@ -12,7 +12,8 @@ image `registry.gitlab.com/zeiss/backend/api:1.4.0`, and the deploy repository d
 
 ## Contents
 
-- [What it does](#what-it-does)
+- [What the assessment asked for](#what-the-assessment-asked-for)
+- [What we added beyond the assessment](#what-we-added-beyond-the-assessment)
 - [API specification](#api-specification)
   - [Endpoints](#endpoints)
   - [Authentication and roles](#authentication-and-roles)
@@ -36,26 +37,105 @@ image `registry.gitlab.com/zeiss/backend/api:1.4.0`, and the deploy repository d
 - [Design decisions](#design-decisions)
 - [Troubleshooting](#troubleshooting)
 
-## What it does
+## What the assessment asked for
 
-The assessment asked for a product API. Every requirement is met and tested over real HTTP against a real PostgreSQL:
+The assessment (".NET & Angular Development Hands-On Assessment", Carl Zeiss Vision) asked for an API that manages
+products. Every requirement is met and tested over real HTTP against a real PostgreSQL. The tables follow the
+assessment's own headings; the web app's part ("Frontend Extension") is in the frontend README. Paths are relative to
+the projects (`Api/` = `ProductManagement.Api/`, and so on); the tests are classes of the test projects.
 
-| Requirement | How |
-| --- | --- |
-| CRUD: `GET/POST /api/products`, `GET/PUT/DELETE /api/products/{id}` | lists are paged (`page`, `pageSize` ≤ 100) and every item carries its stock |
-| `POST /api/products/{id}/decrement-stock/{quantity}` and `…/add-to-stock/{quantity}` | `200 OK` with the updated product; never below 0 (`409`), quantity validated (`400`) |
-| `GET /api/products/search?name=` | partial, case-insensitive match (trigram index; `%` and `_` are literal) |
-| `GET /api/products/stock-level?min=&max=` | inclusive range, either bound optional |
-| Unique 6-digit ids, also with several instances | a PostgreSQL sequence 100000–999999: every instance draws from the same counter; `503 product.ids_exhausted` when used up |
-| Validation on create and update | FluentValidation, every invalid field named in one RFC 9457 problem-details response |
-| EF Core code-first migrations and seeding | migrations in `ProductManagement.Infrastructure/Persistence/Migrations`; categories seeded by migration, a sample catalogue (24 products) on an empty database |
-| Unit tests (BDD optional) | 385 tests: 216 unit, 153 integration (Testcontainers), 16 BDD scenarios (Reqnroll) |
+**CRUD Endpoints**
 
-Added because a real deployment needs them: sign-in with ES256 JWTs issued by the API to registered clients, and
-three roles (viewer, stock clerk, manager); optimistic concurrency with `ETag` / `If-Match` (`412` instead of a lost
-update); `Idempotency-Key`, so a retried request is applied once (Redis first, a unique key in the stock ledger as the
-backstop); a stock ledger with each product's history; a Redis read cache; per-user rate limits shared by every
-replica; health checks; JSON logs that carry the request's trace id.
+| Endpoint | How it is met | Where |
+| --- | --- | --- |
+| `GET /api/products` | a page of products (`page`, `pageSize` ≤ 100) ordered by name, each with its stock | `Api/Controllers/ProductsController.cs`; `ProductCrudTests` |
+| `POST /api/products` | `201 Created` with `Location` and `ETag`; the server assigns the id | the same |
+| `GET /api/products/{id}` | `200` with `ETag`, `404 product.not_found` | the same |
+| `PUT /api/products/{id}` | replaces every field; `200` with the new `ETag` | the same |
+| `DELETE /api/products/{id}` | `204 No Content` | the same |
+
+**Additional Endpoints**
+
+| Endpoint | How it is met | Where |
+| --- | --- | --- |
+| `POST /api/products/{id}/decrement-stock/{quantity}` | `200 OK` with the updated product; never below 0 (`409 product.insufficient_stock`); quantity validated (`400`) | `Core/Products/StockCommandService.cs`; `StockEndpointTests`, `StockManagement.feature` |
+| `POST /api/products/{id}/add-to-stock/{quantity}` | `200 OK` with the updated product; never above 1,000,000 (`409`) | the same |
+| `GET /api/products/search?name={name}` | partial, case-insensitive match (a trigram index; `%` and `_` match literally) | `Infrastructure/Products/ProductQueries.cs`; `ProductQueryEndpointTests` |
+| `GET /api/products/stock-level?min={min}&max={max}` | the inclusive range, either bound optional | the same |
+
+**Requirements**
+
+| Requirement | How it is met | Where |
+| --- | --- | --- |
+| a unique 6-digit id, no duplicates with multiple instances | a PostgreSQL sequence 100000–999999: every instance draws from the same atomic counter; `503 product.ids_exhausted` when used up | `Infrastructure/Products/PostgresProductIdGenerator.cs`; `ConcurrencyTests.IdGeneration_AcrossMultipleApiInstances_NeverProducesDuplicates` |
+| validation for product creation and updates | FluentValidation: every missing or invalid field named in one RFC 9457 problem-details response | `Core/Products/Validation/ProductWriteRequestValidator.cs`; `ProductWriteRequestValidatorTests`, `ProductCatalogue.feature` |
+| a unique identifier, and the stock in every list | the id is the primary key; `stockQuantity` is in every item of the list, search and stock-level pages | `Core/Products/Contracts/ProductResponse.cs`; `ProductQueryEndpointTests` |
+
+**Database Requirements**
+
+| Requirement | How it is met | Where |
+| --- | --- | --- |
+| EF Core migrations, code-first | the model is C# configuration; `dotnet ef migrations add` generated the migrations; the API applies them itself at startup ([How the database is migrated](#how-the-database-is-migrated)) | `Infrastructure/Persistence/Configurations/`, `…/Migrations/`, `…/DatabaseMigrator.cs`; `MigrationsAtStartupTests` |
+| seeding with initial data | the six categories by migration (`HasData`); 24 sample products on an empty database (`Database:SeedSampleData`) | `Infrastructure/Persistence/Configurations/CategoryConfiguration.cs`, `Infrastructure/Persistence/Seeding/SampleDataSeeder.cs`; `SampleDataSeederTests` |
+
+**Self-Check List**
+
+| Item | How it is met | Where |
+| --- | --- | --- |
+| clean, well-formatted, executable, testable code | three projects with a compile-time dependency rule; `dotnet format` and warnings-as-errors in CI | [Architecture](#architecture), [CI](#ci) |
+| best practices and design patterns | result values instead of exceptions, decorators (cache), repository and unit of work, options, problem details | [Design decisions](#design-decisions) |
+| all 9 required endpoints | the two tables above | `ProductManagement.Api/ProductManagement.Api.http` |
+| id generation for a distributed environment | the sequence above | [Consistency](#consistency) |
+| EF migrations, code-first | the table above | [Data model](#data-model) |
+| unit tests for various scenarios | 219 unit tests, plus 155 integration tests against real PostgreSQL and Redis | [Tests](#tests) |
+| documentation for running locally | `dotnet run` against a PostgreSQL in Docker, or the whole system on a local Kubernetes | [Run locally](#run-locally) |
+| optional: BDD tests | 16 Reqnroll scenarios in plain language | `ProductManagement.Api.AcceptanceTests/Features/` |
+
+## What we added beyond the assessment
+
+Added because a real deployment needs them.
+
+**Security**
+
+| Addition | What it gives | Where |
+| --- | --- | --- |
+| ES256 access tokens issued by the API | registered clients sign in; the gateway verifies tokens with the public key (JWKS) and cannot issue them | [Authentication and roles](#authentication-and-roles) |
+| three roles (viewer, stock clerk, manager) | endpoints require a permission; the role mapping is in one place | `Api/Security/Policies.cs` |
+| least-privilege database users | requests as `pm_app` (rows only); migrations as the schema owner `pm_migrator` | [Security](#security) |
+| rate limits and a sign-in throttle | per user, shared by every replica through Redis | [Rate limits](#rate-limits) |
+
+**Consistency**
+
+| Addition | What it gives | Where |
+| --- | --- | --- |
+| atomic stock update | one conditional SQL statement: no overselling under any concurrency | [Consistency](#consistency) |
+| `ETag` / `If-Match` | `412` instead of a lost update when two people edit at once | [Headers](#headers-etag-if-match-if-none-match-idempotency-key) |
+| `Idempotency-Key` | a retried request is applied once (Redis first, a unique key in the ledger as the backstop) | the same |
+| stock ledger | every product's stock history (`GET /api/products/{id}/stock-movements`) | [Data model](#data-model) |
+
+**Performance**
+
+| Addition | What it gives | Where |
+| --- | --- | --- |
+| Redis read cache | fewer database reads, never a stale read after a write (generations) | [Caching](#caching) |
+| gateway microcache | 1-second cache of reads in front of the API | the frontend README |
+| indexes for scale | fast search, filters and deep pages with 850,000 products and a 20-million-row ledger | [Data model](#data-model) |
+
+**Operations**
+
+| Addition | What it gives | Where |
+| --- | --- | --- |
+| health checks | liveness and readiness for Kubernetes (`/health/live`, `/health/ready`) | [Health and documentation endpoints](#health-and-documentation-endpoints) |
+| JSON logs with the trace id | one id follows a request through the gateway and the API | [Configuration](#configuration) |
+| migrations at startup | each new version brings its own schema up to date, as the schema owner, one replica at a time | [How the database is migrated](#how-the-database-is-migrated) |
+
+**Quality**
+
+| Suite | Tests | Where |
+| --- | --- | --- |
+| unit | 219 | `ProductManagement.UnitTests` |
+| integration (PostgreSQL 18 and Redis 8 in containers) | 155 | `ProductManagement.Api.IntegrationTests` |
+| BDD acceptance (Reqnroll) | 16 | `ProductManagement.Api.AcceptanceTests` |
 
 ## API specification
 
@@ -291,8 +371,8 @@ ProductManagement.Core           what the system does: entities, rules, validati
 | Project | Folders |
 | --- | --- |
 | `ProductManagement.Core` | `Products/` (the `Product` and `StockMovement` entities, `ProductRules`, use cases `ProductQueryService`, `ProductCommandService`, `StockCommandService`, `StockAdjustment`, `ProductErrors`, `Contracts/`, `Validation/`, `Abstractions/` = interfaces Infrastructure implements), `Categories/`, `Common/` (`Result`, `Error`, paging, persistence and request abstractions) |
-| `ProductManagement.Infrastructure` | `Persistence/` (DbContext, configurations, migrations, unit of work, seeding, database health check), `Products/` (repository, queries, id generator), `Categories/`, `Caching/` (decorators, Redis cache, single-flight), `Idempotency/`, `Security/` (Redis rate limiter, failed-sign-in throttle), `Redis/`, `Edge/` (interfaces the Api project uses) |
-| `ProductManagement.Api` | `Controllers/` (`AuthController`, `ProductsController`, `CategoriesController`), `Http/` (result → HTTP mapping, problem details, ETag), `Security/` (token issuing and checking, policies, secret hashing), `RateLimiting/`, `Idempotency/`, `ErrorHandling/`, `Observability/`, `Configuration/`, `Hosting/` (the `migrate`, `hash-secret`, `generate-signing-key` commands), `Program.cs` |
+| `ProductManagement.Infrastructure` | `Persistence/` (DbContext, configurations, migrations and the migrator that applies them at startup, unit of work, seeding, database health check), `Products/` (repository, queries, id generator), `Categories/`, `Caching/` (decorators, Redis cache, single-flight), `Idempotency/`, `Security/` (Redis rate limiter, failed-sign-in throttle), `Redis/`, `Edge/` (interfaces the Api project uses) |
+| `ProductManagement.Api` | `Controllers/` (`AuthController`, `ProductsController`, `CategoriesController`), `Http/` (result → HTTP mapping, problem details, ETag), `Security/` (token issuing and checking, policies, secret hashing), `RateLimiting/`, `Idempotency/`, `ErrorHandling/`, `Observability/`, `Configuration/`, `Hosting/` (the `hash-secret` and `generate-signing-key` commands), `Program.cs` |
 
 **A request's path through the code** (`POST /api/products/100042/decrement-stock/5`):
 
@@ -354,6 +434,43 @@ Migrations (`ProductManagement.Infrastructure/Persistence/Migrations`): `Initial
 opening entry for existing products), `StockLevelIndex`, `StockMovementRequestKey`, `AutovacuumAtScale`,
 `GrantAppPermissions` (grants the app user `pm_app` row access, if that role exists).
 
+### How the database is migrated
+
+The API brings its own schema up to date when it starts, before it serves its first request (`Program.cs` →
+`DatabaseInitializer` → `Persistence/DatabaseMigrator.cs`), when `Database:ApplyMigrationsOnStartup` is `true` (the
+default, in every environment). There is no separate migration command, job or pod: wherever the image runs, the
+schema comes from exactly the code that starts.
+
+1. **Connect as the schema owner.** A short-lived context of its own, on unpooled connections, with the API's
+   connection string but the user and password of `Database:MigratorUsername` / `Database:MigratorPassword`
+   (`pm_migrator` in Kubernetes). Requests keep using the connection string's user (`pm_app`, no right to change the
+   schema). Without a migrator configured (local development, tests) it uses the connection string as it is.
+2. **Wait for the database** (up to 30 attempts, 2 s apart), so a pod that starts before PostgreSQL does not fail.
+3. **Take the migration lock**: a PostgreSQL advisory lock (`pg_try_advisory_lock`, a session lock on a connection of
+   its own). Replicas that start together (a rollout, a scale-up) take turns: the first migrates; the others log
+   "Another instance is migrating the database; waiting for it to finish", ask again every 2 s, and then find nothing
+   left to do. If the pod dies, its session ends and PostgreSQL releases the lock.
+4. **Apply the pending migrations** (`MigrateAsync`: each one commits on its own and is recorded in
+   `__ef_migrations_history`), then the seeding hook (the 24 sample products when `Database:SeedSampleData` is `true`
+   and the table is empty), then invalidate the read cache if anything could have changed.
+5. **Log and start.** "Database is up to date (N migrations applied as pm_migrator, 0.4 s)", then the HTTP server
+   starts. `/health/ready` cannot answer before, so Kubernetes sends the pod no traffic until the schema is ready.
+
+If a migration fails, the exception stops the process: in Kubernetes the new pod restarts and never becomes ready,
+the rollout stops, and the old pods keep serving (`maxUnavailable: 0`). The migration and the wait are bounded by
+10 minutes (`DatabaseMigrator.Timeout`, the same as the deployment's startup probe).
+
+Why our own lock: EF Core 9+ takes a migration lock, but Npgsql implements it as `LOCK TABLE __ef_migrations_history`
+inside each migration's transaction, so it is released between two migrations (and around the `CONCURRENTLY` index
+steps, which run outside a transaction); a second replica can slip in and apply a migration again (measured: a
+duplicate key in the history). The advisory lock is held for the whole run. Waiting replicas poll instead of blocking
+in `pg_advisory_lock`: a blocked statement keeps a snapshot open, and `CREATE INDEX CONCURRENTLY` in the migrating
+replica waits for every older snapshot, so both would wait forever (measured too).
+
+Every migration must work with the version still running (expand/contract): during a rollout the old pods serve next
+to the new ones. A rollback (an older version) never undoes a migration; a bad one is fixed forward. The SQL each
+version runs is the `migrations:sql` artifact of its pipeline, reviewed in the merge request.
+
 ## Consistency
 
 * **Stock changes are one SQL statement.** `UPDATE products SET stock_quantity = stock_quantity + Δ WHERE id = … AND
@@ -400,16 +517,18 @@ in the frontend README.
 
 ## Security
 
-* **Least privilege in the database.** The API connects as `pm_app`, which may read and write rows but not change the
-  schema; its statements end after 30 s and idle transactions after 60 s. Migrations run as `pm_migrator`, the schema
-  owner, from the deploy repository (`scripts/migrate.sh`), before each rollout. Both users are created by the deploy
-  repository's `scripts/create-database.sh`.
+* **Least privilege in the database.** The API's requests connect as `pm_app`, which may read and write rows but not
+  change the schema; its statements end after 30 s and idle transactions after 60 s. Only the migration step at
+  startup connects as `pm_migrator`, the schema owner (`Database:MigratorUsername` / `MigratorPassword`), on
+  connections that are closed when it ends. Both users are created by the deploy repository's
+  `scripts/create-database.sh`.
 * **Hashed client secrets.** PBKDF2-HMAC-SHA256, 100,000 iterations, 16-byte random salt, 32-byte hash, stored as
   `pbkdf2-sha256$100000$<salt>$<hash>` (Base64). `hash-secret` makes one. Comparison is constant-time.
 * **Asymmetric tokens.** Only the API holds the private key; everyone else verifies with the public key (JWKS).
 * **No secrets in git or in configuration files.** Locally they are in .NET user-secrets; in Kubernetes the signing
-  key and the clients come from the Secret `api-secrets`, the database password from `PGPASSWORD` and the Redis
-  password from `Redis__Password` (both from Secrets), never inside a connection string. The API refuses to start
+  key and the clients come from the Secret `api-secrets`, the database passwords from `PGPASSWORD` (`pm_app`) and
+  `Database__MigratorPassword` (`pm_migrator`), the Redis password from `Redis__Password` (all from Secrets), never
+  inside a connection string. The API refuses to start
   without a valid signing key or with a client that has no well-formed hash.
 * **Strict input.** Unknown JSON types are refused (`"12"` is not a number), errors never echo internal type names, and
   request bodies are limited (1 MB at the gateway).
@@ -435,7 +554,9 @@ only), `config/consumers.json` (optional) and environment variables, later sourc
 | `Cache:ListingTtl` | `00:10:00` | cached ids and counts of lists and searches |
 | `Cache:ProductGenerationTtl` | `01:00:00` | a product's change counter |
 | `Cache:ConnectTimeout`, `Cache:OperationTimeout` | `00:00:02`, `00:00:00.5` | Redis connect and per-command budget |
-| `Database:ApplyMigrationsOnStartup` | `false` (Development: `true`) | migrate when the API starts; deployments migrate before the rollout instead |
+| `Database:ApplyMigrationsOnStartup` | `true` | apply pending migrations when the API starts, before it serves ([How the database is migrated](#how-the-database-is-migrated)) |
+| `Database:MigratorUsername` | none | the user the migrations connect as (the schema owner, `pm_migrator`); none: the connection string's user |
+| `Database:MigratorPassword` | none | its password (`Database__MigratorPassword` from a Secret) |
 | `Database:SeedSampleData` | `false` (Development: `true`) | 24 sample products when the database has none (runs after migrations) |
 | `Authentication:Issuer`, `Authentication:Audience` | `product-management-api` | `iss` and `aud` written into and required from every token |
 | `Authentication:SigningKey` | `""` (required) | the ES256 private key, PEM (`generate-signing-key`) |
@@ -456,21 +577,22 @@ only), `config/consumers.json` (optional) and environment variables, later sourc
 
 What the Kubernetes deployment sets (the deploy repository's `apps/backend/deployment.yaml` and
 `environments/<env>/api.yaml`): `ASPNETCORE_ENVIRONMENT=Production`, `Authentication__AccessTokenLifetime=01:00:00`,
-`Database__ApplyMigrationsOnStartup=false`, `OpenApi__Enabled` (`true` locally and in staging), the five
+`Database__ApplyMigrationsOnStartup=true`, `Database__SeedSampleData` (`true` locally and in staging, `false` in
+production), `OpenApi__Enabled` (`true` locally and in staging), the five
 `RateLimiting__*` values above, `SignInThrottle__MaxFailures=10`, `SignInThrottle__Window=00:01:00`,
 `Idempotency__KeyLifetime=01:00:00`, `Idempotency__InProgressTimeout=00:01:00`, the two connection strings
-(`Username=pm_app;Maximum Pool Size=10`), and from Secrets `PGPASSWORD`, `Redis__Password`,
-`Authentication__SigningKey` and the file `/app/config/consumers.json`.
+(`Username=pm_app;Maximum Pool Size=10`), and from Secrets `PGPASSWORD`, `Database__MigratorUsername`,
+`Database__MigratorPassword`, `Redis__Password`, `Authentication__SigningKey` and the file
+`/app/config/consumers.json`.
 
 ## The image and its commands
 
 `docker build -t product-management/api .` builds the image every environment runs (SDK 10.0 to build,
-`mcr.microsoft.com/dotnet/aspnet:10.0` to run, as the non-root `app` user, port 8080). Besides serving HTTP, the
-image has three commands; each runs and exits:
+`mcr.microsoft.com/dotnet/aspnet:10.0` to run, as the non-root `app` user, port 8080). When it starts it applies the
+database migrations, then serves HTTP. It also has two commands for setting an environment up; each runs and exits:
 
 | Command | Does | Used by |
 | --- | --- | --- |
-| `migrate` | applies pending migrations (and the sample data when `Database:SeedSampleData` is true), exit code 1 on failure; needs only the database (and Redis to invalidate the cache) | the deploy repository's `scripts/migrate.sh`, which its `scripts/deploy.sh` runs for every environment before applying it: a one-off pod with the migrator's credentials and the API version the environment names (with Argo CD: the PreSync hook in its `argocd/hooks/`) |
 | `generate-signing-key` | prints a new ES256 (P-256) private key, PKCS#8 PEM | setting up an environment (`API_SIGNING_KEY`) |
 | `hash-secret <secret>` | prints the `SecretHash` for a client secret | adding a client to `consumers.json` |
 
@@ -489,15 +611,16 @@ Redis. Everything it needs is environment variables (and one optional file):
 | --- | --- | --- |
 | `ConnectionStrings__ProductManagement` | yes | PostgreSQL, without the password: `Host=...;Port=5432;Database=...;Username=...` |
 | `PGPASSWORD` | yes | the database password (read by the driver; never inside the connection string) |
+| `Database__MigratorUsername`, `Database__MigratorPassword` | recommended | the schema owner, for the migrations at startup only; without them the migrations use the connection string's user, which must then own the schema |
 | `ConnectionStrings__Redis` | yes (outside `Development`) | Redis, `host:6379` |
 | `Redis__Password` | when Redis has one | the Redis password |
 | `Authentication__SigningKey` | yes | the ES256 private key, PEM (`generate-signing-key`) |
 | `/app/config/consumers.json` | yes (or `Authentication__Consumers__<n>__*` variables) | the accounts: `{"Authentication":{"Consumers":[{"ClientId":"...","SecretHash":"...","Roles":["viewer"]}]}}` (`hash-secret`) |
-| `Database__SeedSampleData` | no | `true`: the 24 sample products on an empty database (`migrate` only) |
+| `Database__SeedSampleData` | no | `true`: the 24 sample products on an empty database (right after the migrations) |
 | `OpenApi__Enabled` | no | `true`: Swagger UI on `/swagger` |
 
-It listens on port 8080 as the non-root user `app` (uid 1654). Apply the migrations first, with the same image and the
-schema owner's credentials (`migrate` exits when it is done), then start the API. Every other setting is in
+It listens on port 8080 as the non-root user `app` (uid 1654). When it starts it applies the migrations as the schema
+owner, then serves; several containers started at once take turns. Every other setting is in
 [Configuration](#configuration).
 
 ```bash
@@ -506,12 +629,10 @@ docker run --rm "$image" generate-signing-key > signing-key.pem
 printf '{"Authentication":{"Consumers":[{"ClientId":"viewer","SecretHash":"%s","Roles":["viewer"]}]}}\n' \
   "$(docker run --rm "$image" hash-secret viewer)" > consumers.json             # one account: viewer / viewer
 
-docker run --rm -e ConnectionStrings__ProductManagement="Host=db.example.internal;Port=5432;Database=product_management;Username=pm_migrator" \
-  -e PGPASSWORD="$MIGRATOR_PASSWORD" -e ConnectionStrings__Redis=redis.example.internal:6379 -e Redis__Password="$REDIS_PASSWORD" \
-  "$image" migrate
 docker run -d --name api -p 5080:8080 \
   -e ConnectionStrings__ProductManagement="Host=db.example.internal;Port=5432;Database=product_management;Username=pm_app" \
-  -e PGPASSWORD="$APP_PASSWORD" -e ConnectionStrings__Redis=redis.example.internal:6379 -e Redis__Password="$REDIS_PASSWORD" \
+  -e PGPASSWORD="$APP_PASSWORD" -e Database__MigratorUsername=pm_migrator -e Database__MigratorPassword="$MIGRATOR_PASSWORD" \
+  -e ConnectionStrings__Redis=redis.example.internal:6379 -e Redis__Password="$REDIS_PASSWORD" \
   -e Authentication__SigningKey="$(cat signing-key.pem)" -v "$PWD/consumers.json:/app/config/consumers.json:ro" \
   "$image"
 curl http://localhost:5080/health/ready
@@ -529,27 +650,22 @@ services:
   redis:
     image: redis:8-alpine
     command: ["redis-server", "--requirepass", "change-me-too"]
-  migrate:                        # runs once, before the API: the schema of exactly this version
+  api:                            # applies its migrations when it starts, then serves
     image: registry.gitlab.com/zeiss/backend/api:1.4.0
-    command: ["migrate"]
-    environment: &api-env
+    environment:
       ConnectionStrings__ProductManagement: "Host=postgres;Port=5432;Database=product_management;Username=product_management"
       PGPASSWORD: change-me
       ConnectionStrings__Redis: "redis:6379"
       Redis__Password: change-me-too
       Database__SeedSampleData: "true"
-    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started } }
-  api:
-    image: registry.gitlab.com/zeiss/backend/api:1.4.0
-    environment:
-      <<: *api-env
       Authentication__SigningKey: ${API_SIGNING_KEY:?the PEM of generate-signing-key}
     volumes: ["./consumers.json:/app/config/consumers.json:ro"]
-    depends_on: { migrate: { condition: service_completed_successfully } }
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started } }
 ```
 
-This minimal file uses one database user for brevity; in Kubernetes the API connects as `pm_app` (rows only) and only
-the migrations as the schema owner (deploy repository, `scripts/create-database.sh`). A Swarm stack takes the same
+This minimal file uses one database user for brevity; in Kubernetes the API's requests connect as `pm_app` (rows
+only) and only its migrations as the schema owner (`Database__MigratorUsername` / `Database__MigratorPassword`; the
+deploy repository's `scripts/create-database.sh` creates both users). A Swarm stack takes the same
 file (`docker stack deploy`), with the key and the accounts as Docker secrets instead of a variable and a bind mount.
 
 ## Run locally
@@ -613,14 +729,16 @@ Optionally a Redis as in the cluster: `docker run -d --name dev-redis -p 6379:63
 `ConnectionStrings__Redis=localhost:6379`. The web app's dev server (`npm start` in frontend) proxies `/api` to
 http://localhost:5080.
 
-**Against the local cluster's PostgreSQL and Redis** (after the deploy repository's `scripts/deploy.sh local`), as the
-schema owner, since Development applies the migrations; stop `dev-postgres` first, it uses the same port:
+**Against the local cluster's PostgreSQL and Redis** (after the deploy repository's `scripts/deploy.sh local`), as in
+the cluster: requests as `pm_app`, the migrations at startup as `pm_migrator`; stop `dev-postgres` first, it uses the
+same port:
 
 ```bash
 kubectl -n infra port-forward svc/postgres 5432:5432 &
 kubectl -n infra port-forward svc/redis 6379:6379 &
-PGPASSWORD="$(kubectl -n product-management get secret database-credentials -o go-template='{{ index .data "migrator-password" | base64decode }}')" \
-ConnectionStrings__ProductManagement="Host=localhost;Port=5432;Database=product_management;Username=pm_migrator" \
+secret() { kubectl -n product-management get secret database-credentials -o go-template="{{ index .data \"$1\" | base64decode }}"; }
+PGPASSWORD="$(secret app-password)" Database__MigratorUsername=pm_migrator Database__MigratorPassword="$(secret migrator-password)" \
+ConnectionStrings__ProductManagement="Host=localhost;Port=5432;Database=product_management;Username=pm_app" \
 ConnectionStrings__Redis=localhost:6379 \
 Redis__Password="$(kubectl -n infra get secret redis-auth -o go-template='{{ .data.password | base64decode }}')" \
 dotnet run --project ProductManagement.Api
@@ -637,8 +755,8 @@ Platform (`global.json` selects it).
 
 | Project | Tests | What it proves |
 | --- | --- | --- |
-| `ProductManagement.UnitTests` | 216 | **Core:** product rules and entity invariants, stock adjustment planning, every validator, the use cases with fakes (results, error codes), `Result`. **Infrastructure:** cache decorators and invalidation, generations, single flight, Redis failure handling and in-memory fallbacks, service registration (Redis required outside Development). **Api:** ETag parsing, idempotency key and request fingerprint, the shared token bucket, secret hashing, token service and signing-key validation |
-| `ProductManagement.Api.IntegrationTests` | 153 | real HTTP against the real API with **PostgreSQL 18 and Redis 8 in containers** (Testcontainers): CRUD, queries and paging, stock endpoints and the ledger, concurrency (no overselling, ETag/If-Match), idempotency (replay, 409/422/503, the database backstop), the cache, the token endpoint and sign-in throttle, authorization per role, rate limits, problem-details shapes, sample-data seeding, query plans at scale |
+| `ProductManagement.UnitTests` | 219 | **Core:** product rules and entity invariants, stock adjustment planning, every validator, the use cases with fakes (results, error codes), `Result`. **Infrastructure:** cache decorators and invalidation, generations, single flight, Redis failure handling and in-memory fallbacks, service registration (Redis required outside Development), the migrations' connection (the migrator's user, unpooled). **Api:** ETag parsing, idempotency key and request fingerprint, the shared token bucket, secret hashing, token service and signing-key validation |
+| `ProductManagement.Api.IntegrationTests` | 155 | real HTTP against the real API with **PostgreSQL 18 and Redis 8 in containers** (Testcontainers): CRUD, queries and paging, stock endpoints and the ledger, concurrency (no overselling, ETag/If-Match), idempotency (replay, 409/422/503, the database backstop), the cache, the token endpoint and sign-in throttle, authorization per role, rate limits, problem-details shapes, sample-data seeding, query plans at scale, migrations at startup (two instances starting together on an empty database both start and migrate it once; the schema is owned by the migrator, the API connected as the app user) |
 | `ProductManagement.Api.AcceptanceTests` | 16 | BDD scenarios in plain language (Reqnroll, `Features/*.feature`): product catalogue (unique ids, validation naming each problem, browsing, search, low stock, conflicting edits, update, delete) and stock management (removing, rejecting overselling, receiving, positive quantities, 30 simultaneous orders on 10 units, unknown products) |
 | `ProductManagement.Testing` | | shared test infrastructure: the containers, the API factory, test tokens, a typed API client |
 
@@ -657,15 +775,15 @@ The integration and acceptance tests start PostgreSQL and Redis containers thems
 [`.gitlab-ci.yml`](.gitlab-ci.yml). The pipeline only builds and publishes: it tests, builds and scans the image, and
 for a version tag publishes that version and creates a GitLab Release. It never touches an environment or the deploy
 repository: the deploy repository chooses which published version each environment runs (its
-`environments/<env>/kustomization.yaml`), applies the database migrations with that image and rolls it out (the
-"pull" model, see its README).
+`environments/<env>/kustomization.yaml`) and rolls it out (the "pull" model, see its README); the new API pods then
+apply the version's migrations themselves when they start.
 
 | Job | Stage | When | Does |
 | --- | --- | --- | --- |
 | `test:backend` | test | every pipeline | restore, format check, Release build (warnings are errors), every test suite (Testcontainers on Docker-in-Docker), JUnit report |
 | GitLab SAST, Secret Detection | test | every pipeline | GitLab's own analysers (included templates) |
 | `build:api` | build | every pipeline | builds and pushes `registry.gitlab.com/zeiss/backend/api:<short sha>` (BuildKit, layer cache in the registry); in a tag pipeline it reuses that image when the pipeline on `main` already built it |
-| `migrations:sql` | build | every pipeline | the idempotent SQL script of all migrations (`dotnet ef migrations script --idempotent`), as an artifact to review in the merge request |
+| `migrations:sql` | build | every pipeline | the idempotent SQL script of all migrations (`dotnet ef migrations script --idempotent`), as an artifact to review in the merge request (review only: the API applies the migrations itself when it starts) |
 | `scan:api` | scan | every pipeline | Trivy: full report to GitLab; fails on fixable critical vulnerabilities |
 | `publish:api` | publish | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | after test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `v`) to the same image, so the version has the commit build's digest; the digest goes to `release`. If `X.Y.Z` already exists it must be this same image (a re-run: nothing to do); another image fails the job, so a version is never overwritten |
 | `release` | release | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | GitLab's `release:` keyword (image `release-cli`): the Release `vX.Y.Z`, with the image reference and digest and the commits since the previous version ([`ci/release-notes.sh`](ci/release-notes.sh)) |
@@ -681,9 +799,9 @@ digests, then `git log --no-merges` since the previous version tag (for a releas
 skipping release candidates; for a release candidate the previous tag of any kind) and a compare link. To see what
 it would write: `ci/release-notes.sh v1.4.0 registry.gitlab.com/zeiss/backend/api:1.4.0` in a clone with the tags.
 
-**Migrations must be backward compatible** (expand/contract): the deploy repository runs them while the previous
-version is still serving, and next to the new one during the rollout. A rollback (choosing an older version there)
-never touches the schema; a bad migration is fixed forward.
+**Migrations must be backward compatible** (expand/contract): the first new pod applies them while the previous
+version is still serving, and the two versions run side by side during the rollout. A rollback (choosing an older
+version in the deploy repository) never touches the schema; a bad migration is fixed forward.
 
 **No CI/CD variable is needed in this project:** the jobs use only what GitLab provides (`CI_REGISTRY_USER` /
 `CI_REGISTRY_PASSWORD` for the registry, the job token for the release). One project setting matters:
@@ -744,7 +862,7 @@ published it.
 | Fail open on Redis | a cache outage costs speed, not availability |
 | The API issues its own ES256 tokens with a public JWKS | no external identity provider needed for registered clients; the gateway verifies without a secret |
 | Permissions, not roles, on endpoints | the role mapping lives in one place |
-| Migrations as a command of the same image, run before each rollout by the deploy repository | the schema and the code that needs it come from the same build; replicas never race to migrate; the app user never needs schema rights |
+| The API applies its own migrations at startup, as the schema owner, under an advisory lock | one path for every environment (no job or pod to forget); the schema and the code that needs it come from the same build; replicas take turns instead of racing; the app user never needs schema rights; a failed migration keeps the new pods unready while the old ones serve |
 | Versions as SemVer tags; the pipeline only publishes, the deploy repository pulls | this repository needs no access to any environment or to the deploy repository; a version is published only after its tests and scan; the same image digest from `main` to production; Argo CD Image Updater can follow the same tags |
 | Problem details (RFC 9457) with `errorCode` | one standard error shape that clients can branch on |
 
@@ -762,7 +880,9 @@ published it.
 | sign-in `429 too_many_failed_attempts` | 10 failed sign-ins from your IP within a minute | wait for `Retry-After` |
 | `503 idempotency_unavailable` | Redis unreachable and the request has an `Idempotency-Key` | fix Redis; retry with the same key |
 | integration tests fail at startup | Docker is not running (Testcontainers) | start Docker |
-| `migrate` fails with `permission denied for schema public` | it ran as `pm_app` | run it as the schema owner (`pm_migrator`), as the deploy repository's `scripts/migrate.sh` does |
+| startup fails with `permission denied for schema public` | the migrations ran as `pm_app` (no `Database:MigratorUsername` / `MigratorPassword`) | set them to the schema owner (`pm_migrator`), as the deploy repository's `apps/backend/deployment.yaml` does |
+| a new instance waits at startup with "Another instance is migrating the database; waiting for it to finish" | another instance holds the migration lock (a long migration) | nothing: it starts when the other one is done (at most 10 minutes) |
+| startup fails with `The database is still unreachable after 30 attempts (or the migrator's user or password is wrong)` | PostgreSQL is down, or the migrator's credentials are wrong | check the database and `Database:MigratorUsername` / `MigratorPassword` |
 | a tag starts no pipeline | the tag is not `vX.Y.Z` / `vX.Y.Z-rc.N` (e.g. `1.4.0` without `v`, or `v1.4`) | delete it and create `v1.4.0` |
 | `publish:api` fails: `... already exists as another image ...: versions are never overwritten` | the version was published before from another build (its git tag deleted and created again on another commit) | versions are never reused: release `v1.4.1`. Re-running the pipeline of the same tag is fine (same image, nothing to do) |
 | `release` fails with `already exists` | a Release with that tag exists (a re-run) | nothing to do, or delete the Release in Deploy → Releases and retry the job |

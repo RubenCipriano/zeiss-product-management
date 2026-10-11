@@ -8,7 +8,7 @@ spec:
   template:
     spec:
       # The image is in the backend project's private registry: scripts/deploy.sh creates this Secret from the group
-      # deploy token (scripts/migrate.sh pulls the same image with it).
+      # deploy token.
       imagePullSecrets:
         - name: gitlab-registry
       containers:
@@ -23,3 +23,6 @@ spec:
             # infra/redis-auth made by scripts/deploy.sh). Another Redis: its host here (with TLS append ",ssl=true").
             - name: ConnectionStrings__Redis
               value: "redis.infra.svc.cluster.local:6379"
+            # No sample products: production starts empty.
+            - name: Database__SeedSampleData
+              value: "false"

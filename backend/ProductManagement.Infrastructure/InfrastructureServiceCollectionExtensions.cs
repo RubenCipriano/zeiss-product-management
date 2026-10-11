@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ProductManagement.Core.Categories.Abstractions;
 using ProductManagement.Core.Common.Persistence;
@@ -69,7 +70,9 @@ public static class InfrastructureServiceCollectionExtensions
         return services;
     }
 
-    /// <summary>The EF Core database context for PostgreSQL, and the optional sample data.</summary>
+    /// <summary>
+    /// The EF Core database context for PostgreSQL, and the migrations at startup (<see cref="DatabaseMigrator"/>).
+    /// </summary>
     private static void AddDatabase(IServiceCollection services, string connectionString)
     {
         services.AddOptions<DatabaseOptions>()
@@ -78,24 +81,46 @@ public static class InfrastructureServiceCollectionExtensions
             .ValidateOnStart();
 
         // Pooling reuses DbContext instances across requests, which lowers allocation cost under load.
-        services.AddDbContextPool<ProductManagementDbContext>((provider, options) =>
-        {
-            // No EnableRetryOnFailure: the stock endpoints are not idempotent. If a connection dropped after the
-            // UPDATE committed, an automatic retry would apply it twice. See ADR 0003.
-            options
-                .UseNpgsql(
-                    connectionString,
-                    npgsql => npgsql.MigrationsHistoryTable("__ef_migrations_history"))
-                .UseSnakeCaseNamingConvention();
+        services.AddDbContextPool<ProductManagementDbContext>((provider, options) => ConfigureDbContext(
+            options,
+            connectionString,
+            provider.GetRequiredService<IOptions<DatabaseOptions>>().Value.SeedSampleData,
+            provider.GetRequiredService<TimeProvider>()));
 
-            if (provider.GetRequiredService<IOptions<DatabaseOptions>>().Value.SeedSampleData)
-            {
-                var seeder = new SampleDataSeeder(provider.GetRequiredService<TimeProvider>());
-                options
-                    .UseSeeding((context, _) => seeder.Seed(context))
-                    .UseAsyncSeeding((context, _, cancellationToken) => seeder.SeedAsync(context, cancellationToken));
-            }
-        });
+        services.AddSingleton(provider => new DatabaseMigrator(
+            connectionString,
+            provider.GetRequiredService<IOptions<DatabaseOptions>>(),
+            provider.GetRequiredService<TimeProvider>(),
+            provider.GetRequiredService<ICatalogCache>(),
+            provider.GetRequiredService<ILogger<DatabaseMigrator>>()));
+    }
+
+    /// <summary>
+    /// How a <see cref="ProductManagementDbContext"/> talks to PostgreSQL: the pooled one that serves requests and the
+    /// short-lived one that applies the migrations at startup (<see cref="DatabaseMigrator"/>, as the migrator user).
+    /// </summary>
+    internal static void ConfigureDbContext(
+        DbContextOptionsBuilder options,
+        string connectionString,
+        bool seedSampleData,
+        TimeProvider timeProvider)
+    {
+        // No EnableRetryOnFailure: the stock endpoints are not idempotent. If a connection dropped after the UPDATE
+        // committed, an automatic retry would apply it twice. See ADR 0003.
+        options
+            .UseNpgsql(
+                connectionString,
+                npgsql => npgsql.MigrationsHistoryTable("__ef_migrations_history"))
+            .UseSnakeCaseNamingConvention();
+
+        // The sample catalogue, inserted by EF Core right after it applies the migrations.
+        if (seedSampleData)
+        {
+            var seeder = new SampleDataSeeder(timeProvider);
+            options
+                .UseSeeding((context, _) => seeder.Seed(context))
+                .UseAsyncSeeding((context, _, cancellationToken) => seeder.SeedAsync(context, cancellationToken));
+        }
     }
 
     /// <summary>The shared connection, when Redis is configured. Returns whether it is.</summary>

@@ -2,9 +2,13 @@
 
 This repository describes everything that runs on the Kubernetes clusters of the Product Management system, and it is
 the only place that changes them. It holds the Kubernetes manifests (YAML files that describe what should run), one
-folder per environment with the versions it runs, the shared infrastructure (PostgreSQL, Redis, logs), the twelve
-scripts that a person or the pipeline runs, and the Argo CD objects that can take over the applying later. The application code lives in two other repositories: the API in
-[backend](https://gitlab.com/zeiss/backend), the web app and the gateway in [frontend](https://gitlab.com/zeiss/frontend).
+folder per environment with the versions it runs, the shared infrastructure (PostgreSQL, Redis, logs), the eleven
+scripts that a person or the pipeline runs, and the Argo CD objects that can take over the applying later. The
+application code lives in two other repositories: the API in [backend](https://gitlab.com/zeiss/backend), the web app
+and the gateway in [frontend](https://gitlab.com/zeiss/frontend).
+
+The assessment asked for the API and the web app only, not for a deployment: everything in this repository goes beyond
+it. It is how the system would run in production.
 
 This README is the complete specification of the deployment: what runs, why it is built this way, how to configure,
 deploy, use and operate it, and what every file and script is for. It assumes you know what a web server and a
@@ -44,7 +48,8 @@ version of each image. Releases follow a **pull model**: the backend and fronten
 *publish* their images; a git tag `v1.4.0` there publishes `<image>:1.4.0` in their registry. They never touch this
 repository or a cluster. This repository *pulls* versions in: a scheduled job moves staging to the newest published
 versions, and production changes through a merge request. This repository's pipeline (or, locally,
-`scripts/deploy.sh`) migrates the database and applies what is committed.
+`scripts/deploy.sh`) applies what is committed; the API's new pods then bring the database schema up to date
+themselves when they start (EF Core migrations, as the schema owner), before they serve.
 
 Why this split:
 
@@ -58,9 +63,13 @@ Why this split:
 * **Promotion and rollback are the same command.** `scripts/set-version.sh <env> <image> <version>` moves an
   environment up or down. Staging gets every release automatically; production changes through a merge request that a
   person approves.
-* **Ready for Argo CD.** The pipeline's jobs do exactly what Argo CD (applying), its PreSync hook (migrating) and Argo
-  CD Image Updater (pulling versions into staging) would do; `argocd/` holds those objects, validated and ready (see
-  [Moving to Argo CD](#moving-to-argo-cd)).
+* **Ready for Argo CD.** The pipeline's jobs do exactly what Argo CD (applying) and Argo CD Image Updater (pulling
+  versions into staging) would do; `argocd/` holds those objects, validated and ready (see
+  [Moving to Argo CD](#moving-to-argo-cd)). No migration step has to move: the API migrates itself.
+* **One migration path everywhere.** The API applies its own EF Core migrations at startup, as the schema owner
+  (`pm_migrator`, from the Secret `database-credentials`), while its requests use `pm_app`. Local, staging and
+  production, `kubectl apply`, Argo CD or a plain `docker run`: the schema always comes from exactly the code that
+  starts, and there is no separate job or pod to forget. Replicas starting together take turns on a database lock.
 * **Shared infrastructure with plain names.** PostgreSQL, Redis and the logs run once per cluster (`postgres`,
   `redis`, `loki`, `grafana` in `infra`) and serve every service. A new service gets its own database with
   `scripts/create-database.sh` and its logs without doing anything.
@@ -125,8 +134,7 @@ Every component that runs:
 | --- | --- | --- | --- | --- | --- | --- |
 | `gateway` | product-management | Deployment + Service | 2 to 6 (autoscaled) | 8080 | single entry point: routing, token check, rate limits, microcache, security headers | `apps/frontend/gateway.yaml` |
 | `web` | product-management | Deployment + Service | 2 | 8080 | serves the built Angular app | `apps/frontend/web.yaml` |
-| `api` | product-management | Deployment + headless Service | 2 to 8 (autoscaled) | 8080 | the REST API | `apps/backend/` |
-| `migrate-<version>` | product-management | one-off Pod | 0 (exists only while it runs) | none | applies the database migrations before a rollout | `scripts/migrate.sh` (with Argo CD: the Job `migrate`, `argocd/hooks/`) |
+| `api` | product-management | Deployment + headless Service | 2 to 8 (autoscaled) | 8080 | the REST API; each new pod first brings the database schema up to date (migrations) | `apps/backend/` |
 | `gateway` | product-management | Ingress (staging, production) | none | 443 | HTTPS host routing to the gateway | `environments/<env>/ingress.yaml` |
 | `postgres` | infra | StatefulSet + Service | 1 | 5432 | PostgreSQL 18, one database per service | `infra/postgres.yaml` |
 | `postgres-backup` | infra | CronJob | 1 job per night | none | `pg_dump` of every database at 02:30, kept 7 days | `infra/postgres.yaml` |
@@ -305,7 +313,7 @@ is killed and restarted). The values are listed under [Configuration](#configura
 
 | Probe | Question | On failure | API here |
 | --- | --- | --- | --- |
-| startup | has it finished starting? | the other probes wait; after the limit, restart | `/health/live`, every 2 s, up to 60 s |
+| startup | has it finished starting? | the other probes wait; after the limit, restart | `/health/live`, every 5 s, up to 10 minutes: the API applies its database migrations before its HTTP server starts, so a long migration (or the wait for another pod's) is still "starting" |
 | readiness | may it receive traffic now? | removed from its Service (and from the gateway's DNS list) until it passes | `/health/ready` (includes a `SELECT 1` on the database), every 5 s, timeout 3 s, 6 failures in a row |
 | liveness | is it stuck? | container restarted | `/health/live`, every 15 s, 3 failures |
 
@@ -333,7 +341,7 @@ manifests without templates:
 | **base**: plain manifests, the same everywhere | `apps/backend`, `apps/frontend` |
 | **overlay**: a folder that includes the base and changes it with **patches** | `environments/local`, `staging`, `production`: `api.yaml` and `gateway.yaml` patch environment variables (and, in staging and production, `api.yaml` and `registry.yaml` add the image pull Secret); `ingress.yaml` adds a resource |
 | **images transformer** | the `images:` list in each environment's `kustomization.yaml` replaces `product-management/api` by `registry.gitlab.com/zeiss/backend/api` with the chosen version; `scripts/set-version.sh` edits exactly that `newTag` |
-| **component** | `environments/local` includes `generated/build`, a Kustomize Component that `scripts/deploy.sh local` writes with the tags of the images it just built; `argocd/hooks` is a Component that adds the migration as an Argo CD PreSync hook |
+| **component** | `environments/local` includes `generated/build`, a Kustomize Component that `scripts/deploy.sh local` writes with the tags of the images it just built |
 | **secretGenerator** | `environments/local` builds `api-secrets` from two local files and adds a hash of their content to its name (`api-secrets-<hash>`), updating every reference; a new key therefore changes the pod template and rolls the API pods |
 | **labels** | every object gets `app.kubernetes.io/part-of: product-management` |
 
@@ -351,9 +359,10 @@ the version to a registry, and the environments' side (this repository's schedul
 at the registry and pulls new versions in. The app repositories then need no access to any environment.
 
 **Argo CD.** A GitOps controller that runs inside the cluster, watches a git repository and applies it continuously,
-showing any drift. An **Application** is one folder of one repository applied to one namespace. **Sync hooks** are
-Jobs it runs around a sync: a **PreSync** hook runs before anything is applied, and a failing one stops the sync. It
-is the prepared successor of the pipeline's apply step ([Moving to Argo CD](#moving-to-argo-cd)).
+showing any drift. An **Application** is one folder of one repository applied to one namespace. (It can also run
+**sync hooks**, Jobs around a sync, such as a database migration before it; none is needed here, because the API
+migrates its own database when its new pods start.) It is the prepared successor of the pipeline's apply step
+([Moving to Argo CD](#moving-to-argo-cd)).
 
 **Argo CD Image Updater.** A companion controller that watches a registry for new image tags of an Application (here:
 the newest SemVer `X.Y.Z`) and writes the new version back into git (a commit to the `kustomization.yaml`), which Argo
@@ -417,7 +426,7 @@ Every file, and what it is for:
 ```
 deploy/
 ├── README.md                          this specification
-├── .gitlab-ci.yml                     the pipeline: validate every change; update staging's versions (schedule); migrate and apply staging (automatic) and production (manual); smoke checks; infra (manual)
+├── .gitlab-ci.yml                     the pipeline: validate every change; update staging's versions (schedule); apply staging (automatic) and production (manual); smoke checks; infra (manual)
 ├── .gitattributes                     shell scripts keep LF line endings in every checkout (bash cannot run CRLF scripts, e.g. on Windows)
 ├── .gitignore                         never commit: environments/local/generated/, .env, editor and OS files, local AI-tool files
 │
@@ -425,7 +434,7 @@ deploy/
 │   ├── backend/
 │   │   ├── kustomization.yaml         lists the files below; labels everything part-of=product-management
 │   │   ├── namespace.yaml             the namespace product-management (defined once, here)
-│   │   ├── deployment.yaml            the API Deployment: image, every setting as an env variable, probes, resources, security context
+│   │   ├── deployment.yaml            the API Deployment: image, every setting as an env variable (migrations at startup as pm_migrator), probes, resources, security context
 │   │   ├── service.yaml               the headless Service api (one DNS record per ready pod)
 │   │   ├── hpa.yaml                   autoscaler: 2 to 8 replicas at 60 % CPU
 │   │   ├── pdb.yaml                   PodDisruptionBudget: at least 1 API pod during node maintenance
@@ -438,7 +447,7 @@ deploy/
 ├── environments/                      WHAT DIFFERS per environment (Kustomize overlays)
 │   ├── local/                         a cluster on this machine (Docker Desktop or single-node k3s)
 │   │   ├── kustomization.yaml         apps + patches + the generated component + secretGenerator api-secrets
-│   │   ├── api.yaml                   connection strings to postgres.infra and redis.infra; OpenAPI (Swagger) on
+│   │   ├── api.yaml                   connection strings to postgres.infra and redis.infra; sample data; OpenAPI (Swagger) on
 │   │   ├── gateway.yaml               Service type LoadBalancer (port 8080 on the machine); API, JWKS and collector addresses
 │   │   └── generated/                 NOT COMMITTED (gitignored), made on each machine:
 │   │       ├── signing-key.pem        the API's local ES256 private key (scripts/local-secrets.sh)
@@ -446,11 +455,11 @@ deploy/
 │   │       └── build/kustomization.yaml   the tags of the images scripts/deploy.sh local built (and, with LOGS=off, the collector switched off)
 │   ├── staging/
 │   │   ├── kustomization.yaml         apps + Ingress + patches + images: THE VERSIONS (newTag X.Y.Z; written by set-version.sh / update:staging)
-│   │   ├── api.yaml                   connection strings, image pull Secret, OpenAPI on
+│   │   ├── api.yaml                   connection strings, image pull Secret, sample data, OpenAPI on
 │   │   ├── gateway.yaml               API, JWKS and collector addresses; trusted proxies = the Ingress controller's pod network
 │   │   ├── ingress.yaml               HTTPS host staging.products.example.com → gateway, certificate from cert-manager
 │   │   └── registry.yaml              web and gateway pull with the Secret gitlab-registry
-│   └── production/                    the same files for production (host products.example.com; OpenAPI stays off); its versions change only by merge requests
+│   └── production/                    the same files for production (host products.example.com; no sample data; OpenAPI stays off); its versions change only by merge requests
 │
 ├── infra/                             SHARED by every service on the cluster, namespace infra (applied only by scripts/infra.sh)
 │   ├── postgres.yaml                  Namespace infra, ConfigMap postgresql.conf, Service, StatefulSet (PostgreSQL 18), backups PVC, CronJob postgres-backup
@@ -461,22 +470,18 @@ deploy/
 │       └── logs.json                  Grafana dashboard "Logs — where everything goes": one log panel per source (browser, web, gateway, API, PostgreSQL, Redis, Loki, Grafana)
 │
 ├── argocd/                            PREPARED FOR ARGO CD, not used by the pipeline (validated by validate.sh; README "Moving to Argo CD")
-│   ├── applications/
-│   │   ├── kustomization.yaml         lists the three files below (kubectl apply -k argocd/applications)
-│   │   ├── staging.yaml               Application product-management-staging: automated sync, prune, selfHeal; Image Updater annotations (semver, X.Y.Z, git write-back to main)
-│   │   ├── production.yaml            Application product-management-production: manual sync, never updated automatically
-│   │   └── image-updater.yaml         ImageUpdater (Image Updater 1.x): applies the annotations of the labelled Applications
-│   └── hooks/
-│       ├── kustomization.yaml         a Kustomize Component an environment includes once Argo CD applies it
-│       └── migrate.yaml               Job migrate: the API's `migrate` command as a PreSync hook, with the environment's API image
+│   └── applications/
+│       ├── kustomization.yaml         lists the three files below (kubectl apply -k argocd/applications)
+│       ├── staging.yaml               Application product-management-staging: automated sync, prune, selfHeal; Image Updater annotations (semver, X.Y.Z, git write-back to main)
+│       ├── production.yaml            Application product-management-production: manual sync, never updated automatically
+│       └── image-updater.yaml         ImageUpdater (Image Updater 1.x): applies the annotations of the labelled Applications
 │
 └── scripts/                           THE ONLY THINGS A PERSON RUNS (bash; GNU or BSD tools)
     ├── setup-ubuntu.sh                prepares a fresh Ubuntu server: Docker Engine, kubectl, single-node k3s
     ├── infra.sh                       starts, stops and shows the shared infrastructure
     ├── create-database.sh             gives a service its database, two users and a Secret with their passwords
     ├── local-secrets.sh               the API's local signing key and demo accounts (and .NET user-secrets for dotnet run)
-    ├── deploy.sh                      deploys an environment (local: builds the images; every environment: migrates, then applies what is committed)
-    ├── migrate.sh                     applies the database migrations with the API version an environment names (one-off pod)
+    ├── deploy.sh                      deploys an environment (local: builds the images; every environment: applies what is committed and waits for the rollouts)
     ├── versions.sh                    lists the versions published in the registry, newest first
     ├── set-version.sh                 sets an environment's version of an image (upgrade or downgrade); edits kustomization.yaml only
     ├── update-versions.sh             the pipeline's commit of new versions: staging to main, production as a merge request
@@ -500,7 +505,7 @@ Why the folders are separate:
 
 ## Scripts
 
-All twelve scripts run on macOS, Linux and WSL 2 (bash 3.2 or later), on the current `kubectl` context. None of them
+All eleven scripts run on macOS, Linux and WSL 2 (bash 3.2 or later), on the current `kubectl` context. None of them
 stores a password in a file of this repository or puts one on a command line. The three that deal with versions
 (`versions.sh`, `set-version.sh`, `update-versions.sh`) also need `curl`, `jq` and `yq` (macOS: `brew install yq`;
 all three are in the pipeline's `alpine/k8s` image, which also runs them anywhere:
@@ -625,11 +630,11 @@ hand.
    `create-database.sh product-management product_management pm_app pm_migrator`;
 7. copies the shared Redis' password from `infra/redis-auth` into `product-management/redis-credentials` (a pod can
    read only its own namespace's Secrets);
-8. runs the migrations with the new API image (`scripts/migrate.sh local`: a one-off pod, as the migrator user from
-   `database-credentials`), seeding the sample catalogue (24 products) into an empty database unless
-   `SEED_SAMPLE_DATA=false`;
-9. `kubectl apply -k environments/local`, waits for the api, web and gateway rollouts (5 minutes each), restarts the
-   API if one of its Secrets changed, prints the pods and the application's address.
+8. `kubectl apply -k environments/local`, waits for the rollouts (api 15 minutes, web and gateway 5 minutes each),
+   restarts the API if one of its Secrets changed, prints the pods and the application's address. The new API pods
+   apply the database migrations themselves when they start (as `pm_migrator`, from `database-credentials`), and on
+   an empty database insert the sample catalogue (24 products; `Database__SeedSampleData` in
+   `environments/local/api.yaml`).
 
 **`staging`, `production`**:
 
@@ -641,14 +646,15 @@ hand.
 4. with `API_SIGNING_KEY` and `API_CONSUMERS` (paths of files): checks the key is a PKCS#8 PEM and the JSON has
    `Authentication.Consumers`, then creates or updates `api-secrets`; requires it to exist;
 5. copies the Redis password (as for local);
-6. applies the database migrations with the API version the environment names (`scripts/migrate.sh <env>`); a failed
-   migration stops the deploy before anything is applied;
-7. applies the rendered environment exactly as committed, waits for the rollouts, restarts the API if a Secret
-   changed.
+6. applies the rendered environment exactly as committed, waits for the rollouts (api up to 15 minutes), restarts the
+   API if a Secret changed. The first new API pod applies the migrations of its version before it serves; if one
+   fails, that pod never becomes ready, the rollout stops with every old pod still serving, and the deploy fails at
+   the wait.
 
-Every environment therefore migrates the same way, through `scripts/migrate.sh`, right before its manifests are
-applied. It never applies a local image to a remote cluster, and refuses `staging`/`production` on the
-`docker-desktop` context.
+Every environment therefore migrates the same way: the API does it when its new pods start (no separate step, so the
+schema always comes from exactly the image that runs). The database and its users must exist first, which is why
+`create-database.sh` runs before the apply. It never applies a local image to a remote cluster, and refuses
+`staging`/`production` on the `docker-desktop` context.
 
 | Variable | For | Effect |
 | --- | --- | --- |
@@ -656,36 +662,11 @@ applied. It never applies a local image to a remote cluster, and refuses `stagin
 | `BACKEND_DIR`, `FRONTEND_DIR` | local | other checkouts to build (default `../backend`, `../frontend`) |
 | `LOCAL_CLUSTER` | local | `docker-desktop` or `k3s`: how the images reach the cluster, when the detection is wrong |
 | `LOGS=off` | local | no log collector: the gateway answers the browser's error reports with 204 |
-| `SEED_SAMPLE_DATA` | all | the sample catalogue on an empty database (default `true` for local and staging, `false` for production) |
 | `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD`, `CI_REGISTRY` | staging, production | the group deploy token `gitlab-deploy-token` (`read_registry`, on the zeiss group) → Secret `gitlab-registry` |
 | `API_SIGNING_KEY`, `API_CONSUMERS` | staging, production | files: the ES256 private key (PEM) and `consumers.json` → Secret `api-secrets` |
 
-Why: a local deploy is nine steps in a fixed order (keys before apply, database before migrations, migrations before
-the new pods); a remote deploy needs Secrets that must not be committed. The script makes both one command.
-
-### migrate.sh: the database migrations
-
-| | |
-| --- | --- |
-| Purpose | apply the database migrations of the API version an environment is about to run, before its pods change |
-| When | by `deploy.sh` for every environment, right before `kubectl apply`; by hand to migrate without deploying |
-| Usage | `scripts/migrate.sh <local\|staging\|production>`. Variables: `KUBE_CONTEXT`; `API_IMAGE` (another image, e.g. to try one first); `SEED_SAMPLE_DATA` (default `true` for local and staging, `false` for production) |
-| Needs | `kubectl`; the Secrets `database-credentials` and `redis-credentials` in `product-management` (and `gitlab-registry` for a registry image) |
-| Idempotent | yes: a migrated database answers "Database is up to date" and nothing changes |
-
-Steps: renders `environments/<env>` and reads the image of the container `api` of the Deployment `api` (for staging
-and production the `newTag` of `kustomization.yaml`, e.g. `registry.gitlab.com/zeiss/backend/api:1.4.0`; for local
-the tag `deploy.sh` just built) and the Redis address the API uses (`ConnectionStrings__Redis`); refuses
-`unreleased`; runs that image as the one-off pod `migrate-<version>` with the argument `migrate`
-(`kubectl run --rm --attach`: it streams the output, waits up to 5 minutes for the image, returns the exit code and
-deletes the pod), as the migrator (host, database, user and password from `database-credentials`), with the Redis
-password from `redis-credentials` (the migration invalidates cached lists). A failed migration makes the script, and
-the deploy job, fail.
-
-Why a pod in the cluster: the database is reachable only from inside it, and the pipeline needs no database
-credentials. Why with the environment's image: the schema always comes from exactly the code about to run. Why here
-and not in the app pipeline: the environment, not the application, knows which version it is about to run (with Argo
-CD the same pod becomes a PreSync hook, `argocd/hooks/`).
+Why: a local deploy is eight steps in a fixed order (keys before apply, the database and its users before the API
+starts); a remote deploy needs Secrets that must not be committed. The script makes both one command.
 
 ### versions.sh: the published versions
 
@@ -744,8 +725,8 @@ otherwise become an `ImagePullBackOff` in the cluster), and it is the same comma
   `staging: api 1.4.0, web 1.4.0, gateway 1.4.0` (only the images that changed), pushes it to `main` and writes the file
   `.updated` (the commit's subject). If `main` moved meanwhile it starts again from the new `main` (up to 5 times). A
   push made with the job token starts no pipeline, so the job `update:staging` deploys that commit itself when
-  `.updated` exists: it checks out the new `main`, runs `deploy.sh staging apps` (migrations, then the manifests) and
-  `smoke.sh`. No new version: no commit, no `.updated`, nothing deployed.
+  `.updated` exists: it checks out the new `main`, runs `deploy.sh staging apps` (the manifests; the new API pods
+  migrate) and `smoke.sh`. No new version: no commit, no `.updated`, nothing deployed.
 * **production**: sets production's images to the versions staging runs (each checked by `set-version.sh`), pushes the
   branch `production/api-1.4.0-web-1.4.0-gateway-1.4.0` and opens the merge request
   `production: api 1.4.0, web 1.4.0, gateway 1.4.0` with git push options. Merging it is the release decision.
@@ -763,13 +744,14 @@ It is what Argo CD Image Updater's git write-back does for staging, and is switc
 
 Checks, per environment: it renders (`kubectl kustomize`); every object is valid against the Kubernetes schemas
 (`kubeconform -strict`: unknown fields are errors); every object is labelled `app.kubernetes.io/part-of=product-management`;
-the API has both connection strings; the gateway has `API_UPSTREAM`, `JWKS_URL` and `COLLECTOR_UPSTREAM`. Staging and
+the API has both connection strings, `Database__ApplyMigrationsOnStartup=true`, the migrator's user and password from
+`database-credentials` (keys `migrator-user`, `migrator-password`) and a `Database__SeedSampleData` of `true` or
+`false` (never `true` in production); the gateway has `API_UPSTREAM`, `JWKS_URL` and `COLLECTOR_UPSTREAM`. Staging and
 production: no Secret in the output, every Deployment pulls with `gitlab-registry`, every image is a registry image
 with a tag. Local: the only Secret is the generated `api-secrets`. For `infra/`: the three files and the dashboards'
 ConfigMap are valid, every dashboard is valid JSON, every object is labelled `part-of=infra` and has a
 `component` of `postgres`, `redis` or `logs` (what `infra.sh down` selects by), and there is no Secret. For
-`argocd/`: staging and production still render and are valid with the `argocd/hooks` component added, and the hook
-Job runs the same API image as the Deployment; the Applications and the ImageUpdater are valid (`-strict`) against
+`argocd/`: the Applications and the ImageUpdater are valid (`-strict`) against
 the custom resource definitions of the pinned Argo CD and Image Updater versions (downloaded from their release tags
 and turned into JSON schemas), and each Application points at an existing environment.
 
@@ -825,6 +807,7 @@ template, which rolls the pods.
 | --- | --- | --- |
 | an API setting (rate limits, token lifetime, idempotency, sign-in throttle) | the `env:` list in `apps/backend/deployment.yaml` | `deploy.sh <env>` |
 | an API setting in one environment only | `environments/<env>/api.yaml` (a patch of the same `env:` list) | `deploy.sh <env>` |
+| the sample catalogue (24 products on an empty database) | `Database__SeedSampleData` in `environments/<env>/api.yaml` (`true` in local and staging, `false` in production) | `deploy.sh <env>` (inserted when the new API pods migrate) |
 | where the API's database or Redis is | `ConnectionStrings__ProductManagement` / `ConnectionStrings__Redis` in `environments/<env>/api.yaml` (host, port, database, user, pool size; never a password) | `deploy.sh <env>` |
 | Swagger (OpenAPI) on or off | `OpenApi__Enabled` (off in `apps/`, on in local and staging) | `deploy.sh <env>` |
 | the gateway's API address, its JWKS URL, the browser-error collector | `API_UPSTREAM`, `JWKS_URL`, `COLLECTOR_UPSTREAM` in `environments/<env>/gateway.yaml` (`""` = no collector, `/collect` answers 204) | `deploy.sh <env>` |
@@ -849,9 +832,11 @@ The API settings the Deployment sets (the API's own defaults and every other key
 
 | Variable | Value | Meaning |
 | --- | --- | --- |
-| `ASPNETCORE_ENVIRONMENT` | `Production` | requires Redis; no automatic migrations |
+| `ASPNETCORE_ENVIRONMENT` | `Production` | requires Redis |
 | `Authentication__AccessTokenLifetime` | `01:00:00` | an access token is valid for 1 hour |
-| `Database__ApplyMigrationsOnStartup` | `false` | migrations run before the rollout, never at startup (replicas would race) |
+| `Database__ApplyMigrationsOnStartup` | `true` | the API applies its EF Core migrations when it starts, before it serves; replicas starting together take turns (a PostgreSQL advisory lock), the others find the schema up to date |
+| `Database__MigratorUsername` / `Database__MigratorPassword` | Secret `database-credentials`, keys `migrator-user` / `migrator-password` | the schema owner (`pm_migrator`): only the migration step connects as it, on short-lived connections of its own; requests use `pm_app` |
+| `Database__SeedSampleData` | per environment: `true` (local, staging), `false` (production) | the 24 sample products, inserted right after the migrations when the database has no product |
 | `OpenApi__Enabled` | `false` (local, staging: `true`) | Swagger UI and `/openapi/v1.json` |
 | `RateLimiting__RequestsPerSecond` / `__RequestBurst` | `50` / `100` | per user, all endpoints, shared by every replica through Redis |
 | `RateLimiting__WritesPerSecond` / `__WriteBurst` | `10` / `20` | per user, create/update/delete/stock changes |
@@ -861,7 +846,7 @@ The API settings the Deployment sets (the API's own defaults and every other key
 | `Idempotency__InProgressTimeout` | `00:01:00` | how long an unfinished request holds its key |
 | `ConnectionStrings__ProductManagement` | `Host=postgres.infra.svc.cluster.local;Port=5432;Database=product_management;Username=pm_app;Maximum Pool Size=10;GSS Encryption Mode=Disable` | per environment; the password comes from `PGPASSWORD` |
 | `ConnectionStrings__Redis` | `redis.infra.svc.cluster.local:6379` | per environment; the password comes from `Redis__Password` |
-| `PGPASSWORD` | Secret `database-credentials`, key `app-password` | read by the PostgreSQL driver when the connection string has no password |
+| `PGPASSWORD` | Secret `database-credentials`, key `app-password` | read by the PostgreSQL driver when the connection string has no password (the requests, as `pm_app`) |
 | `Redis__Password` | Secret `redis-credentials`, key `password` | added to the Redis connection by the API |
 | `Authentication__SigningKey` | Secret `api-secrets`, key `signing-key` | the ES256 private key that signs tokens |
 | (file) `/app/config/consumers.json` | Secret `api-secrets`, key `consumers.json` | the registered accounts, mounted read-only |
@@ -878,7 +863,7 @@ Requests and limits:
 | loki | 100m, 256Mi | 1, 512Mi |
 | grafana | 50m, 128Mi | 1, 512Mi |
 | alloy | 50m, 128Mi | 1, 512Mi |
-| postgres-backup, migrate | 100m, 128Mi / 100m, 192Mi | 1, 512Mi |
+| postgres-backup | 100m, 128Mi | 1, 512Mi |
 
 **Another PostgreSQL** (for example a managed database):
 
@@ -888,14 +873,12 @@ Requests and limits:
    `kubectl -n product-management create secret generic database-credentials --from-literal=host=<host> --from-literal=port=5432 --from-literal=database=product_management --from-literal=app-user=pm_app --from-literal=app-password=<...> --from-literal=migrator-user=pm_migrator --from-literal=migrator-password=<...>`
 3. Put the host in `ConnectionStrings__ProductManagement` in `environments/<env>/api.yaml`, adding
    `SSL Mode=VerifyFull` for a server outside the cluster.
-4. The migrations (`scripts/migrate.sh`, run by `deploy.sh`) read host, port, database and user from that Secret, so
-   they follow automatically. Do not run `scripts/infra.sh up postgres` in that cluster.
+4. The migrations follow automatically: the API runs them on the host of its connection string, as the migrator user
+   and password of that Secret. Do not run `scripts/infra.sh up postgres` in that cluster.
 
 **Another Redis:** create `product-management/redis-credentials` (key `password`) yourself, put the host in
 `ConnectionStrings__Redis` (append `,ssl=true` for TLS) and leave Redis out of `infra.sh up`. `deploy.sh` keeps an
-existing `redis-credentials` when there is no `infra/redis-auth`, and `scripts/migrate.sh` reads the address from the
-environment's `ConnectionStrings__Redis`, so the migrations follow too (with Argo CD, also change it in
-`argocd/hooks/migrate.yaml`).
+existing `redis-credentials` when there is no `infra/redis-auth`.
 
 ## Secrets
 
@@ -906,7 +889,7 @@ No Secret value is in git. Each one is created in the cluster by a script or a p
 | `postgres-admin` | infra | `password` | `infra.sh up` (once) | random, 48 hex characters | change it inside PostgreSQL and in the Secret together (see [Rotate passwords and keys](#rotate-passwords-and-keys)) |
 | `redis-auth` | infra | `password` | `infra.sh up` (once) | random | delete the Secret, `infra.sh up redis` (new password, Redis restarts), then `deploy.sh <env> apps` |
 | `loki-external` | infra | `url`, `username`, `password` | `infra.sh up logs` with `LOKI_URL` | `LOKI_URL`, `LOKI_USERNAME`, `LOKI_PASSWORD` | run `infra.sh up logs` with the new values (Alloy restarts) |
-| `database-credentials` | product-management | `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password` | `create-database.sh` | random | `create-database.sh product-management product_management pm_app pm_migrator --rotate`, then `kubectl -n product-management rollout restart deployment/api` |
+| `database-credentials` | product-management | `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password` | `create-database.sh` | random | `create-database.sh product-management product_management pm_app pm_migrator --rotate`, then `kubectl -n product-management rollout restart deployment/api`. The API reads `app-password` (`PGPASSWORD`, its requests) and `migrator-user` / `migrator-password` (its migrations at startup) |
 | `redis-credentials` | product-management | `password` | `deploy.sh` on every run | a copy of `infra/redis-auth` | follows `redis-auth` automatically; the API restarts when it changes |
 | `api-secrets` (locally `api-secrets-<hash>`) | product-management | `signing-key`, `consumers.json` | local: Kustomize `secretGenerator` from `environments/local/generated/`; staging, production: `deploy.sh` | local: `local-secrets.sh`; remote: the File variables `API_SIGNING_KEY`, `API_CONSUMERS` | local: `FORCE=1 scripts/local-secrets.sh && scripts/deploy.sh local`; remote: change the CI/CD variable and re-run the deploy job. A new signing key signs every user out |
 | `gitlab-registry` | product-management | `.dockerconfigjson` | `deploy.sh` (staging, production) | `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD` (the group deploy token) | create a new deploy token named `gitlab-deploy-token` in the zeiss group, revoke the old one, re-run the deploy job |
@@ -933,8 +916,8 @@ trusts the local socket), so `kubectl exec` rights on `infra` are database admin
 | Gateway trusted proxies | `127.0.0.1/32` (nobody) | `10.42.0.0/16` (Traefik's pod network) | the same |
 | API secrets | `generated/` from `local-secrets.sh` | CI/CD File variables `API_SIGNING_KEY`, `API_CONSUMERS` | the same, protected |
 | Database, Redis | `postgres.infra`, `redis.infra`; passwords in the cluster | the same | the same |
-| Migrations | `scripts/migrate.sh local`, run by `deploy.sh local` before applying | `scripts/migrate.sh staging`, run by `deploy:staging` before applying | `scripts/migrate.sh production`, run by `deploy:production` before applying |
-| Sample data | 24 sample products on an empty database (`SEED_SAMPLE_DATA`, default `true`) | the same | none (`SEED_SAMPLE_DATA` defaults to `false`) |
+| Migrations | applied by the new API pods when they start (as `pm_migrator`), after `deploy.sh local` applies | the same, after `deploy:staging` (or `update:staging`) applies | the same, after `deploy:production` applies |
+| Sample data | 24 sample products on an empty database (`Database__SeedSampleData: "true"` in `api.yaml`) | the same | none (`"false"`) |
 | Swagger (OpenAPI) | on (port-forward) | on (port-forward) | off |
 | Smoke check | `scripts/smoke.sh http://localhost:8080` by hand | `smoke:staging` after each deploy | `smoke:production` after each deploy |
 
@@ -1030,13 +1013,15 @@ Sign in with `viewer`/`viewer`, `clerk`/`clerk` or `manager`/`manager`. The firs
 creates the service's database (`create-database.sh`) and the API's local keys (`local-secrets.sh`). The images are
 built in Docker, so neither .NET nor Node is needed to deploy.
 
-After a code change in backend or frontend, run `scripts/deploy.sh local` again: it rebuilds, migrates and rolls the
-pods. `kubectl diff -k environments/local` shows what differs from the last deploy (nothing, normally).
+After a code change in backend or frontend, run `scripts/deploy.sh local` again: it rebuilds and rolls the pods (the
+new API pods apply any new migration first). `kubectl diff -k environments/local` shows what differs from the last
+deploy (nothing, normally).
 
 ### Start over
 
 Removes everything a previous deploy left, **including every row in the database and every log line**, and deploys
-from nothing. An empty database gets the sample catalogue (24 products) from the migrations.
+from nothing. The API creates the tables in the empty database when it starts (its migrations) and inserts the sample
+catalogue (24 products).
 
 ```bash
 kubectl config use-context docker-desktop                         # on the Ubuntu server: default
@@ -1045,7 +1030,7 @@ scripts/infra.sh down --delete-data                               # PostgreSQL, 
 rm -rf environments/local/generated                               # the local signing key, demo accounts and image tags
 
 scripts/infra.sh up                                               # fresh infrastructure and random passwords
-scripts/deploy.sh local                                           # database + users, keys, images, migrations, apply
+scripts/deploy.sh local                                           # database + users, keys, images, apply (the API migrates)
 scripts/smoke.sh http://localhost:8080                            # 4 checks through the gateway (3 without SMOKE_CLIENT_*)
 ```
 
@@ -1091,18 +1076,19 @@ Staging or production, in this order:
    (format: `{"Authentication":{"Consumers":[{"ClientId":"...","SecretHash":"...","Roles":["viewer"]}]}}`).
 4. **Infrastructure.** Run the manual job `infra:<env>` (or `scripts/infra.sh up` with kubectl on that cluster). The
    service's database and users are created by the first `deploy:<env>` (it runs `create-database.sh` when they are
-   missing); the migrations then create the tables.
+   missing); the API's first pod then creates the tables (its migrations).
 5. **Switch the environment on.** `STAGING_ENABLED=true` (later `PRODUCTION_ENABLED=true`) in this project, and the
    pipeline schedule for `update:staging`: Build → Pipeline schedules → New schedule, description "update staging",
    interval `*/15 * * * *` (every 15 minutes; any interval works), target branch `main`, active. Create it as a
    Maintainer: the schedule's owner is who the job pushes as.
-6. **Release.** Tag a version in backend (`v1.0.0`) and in frontend (`v1.0.0`); their tag pipelines publish
-   `api:1.0.0`, `web:1.0.0`, `gateway:1.0.0`. The next `update:staging` (or start it by hand in a pipeline on `main`)
-   commits `staging: api 1.0.0, web 1.0.0, gateway 1.0.0`, then in the same job migrates, deploys and smoke-checks
-   staging. Until every image has a version, `update:staging` keeps `unreleased` for the missing ones and
+6. **Release.** Tag a version in backend (`v1.0.0`) and in frontend (`v1.0.0`); their tag pipelines publish `api:1.0.0`,
+   `web:1.0.0`, `gateway:1.0.0`. The next `update:staging` (or start it by hand in a pipeline on `main`) commits
+   `staging: api 1.0.0, web 1.0.0, gateway 1.0.0`, then in the same job deploys (the API migrates as it starts) and
+   smoke-checks staging. Until every image has a version, `update:staging` keeps `unreleased` for the missing ones and
    `deploy.sh` refuses to apply.
 7. **Production.** Start `propose:production` (or run `scripts/set-version.sh production all <version>` and open a
-   merge request yourself). Merging it and starting `deploy:production` migrates and deploys production.
+   merge request yourself). Merging it and starting `deploy:production` deploys production (the API migrates as it
+   starts).
 
 ### How a change reaches an environment
 
@@ -1123,8 +1109,8 @@ flowchart LR
     PP["propose:production (manual)<br/>or set-version.sh production"]
     MR["merge request<br/>environments/production"]
     P["environments/production<br/>kustomization.yaml"]
-    D1["deploy:staging (people's commits)<br/>migrate.sh, apply, smoke"]
-    D2["deploy:production (manual)<br/>migrate.sh, apply, smoke"]
+    D1["deploy:staging (people's commits)<br/>apply, smoke<br/>(new API pods migrate)"]
+    D2["deploy:production (manual)<br/>apply, smoke<br/>(new API pods migrate)"]
   end
   REG -. "versions.sh: newest X.Y.Z" .-> U
   U -- "commit: staging: api 1.4.0, ...<br/>(job token: no new pipeline)" --> S
@@ -1141,7 +1127,7 @@ flowchart LR
   the registry, `scripts/set-version.sh staging all latest` takes the newest `X.Y.Z` of each image (never a release
   candidate, never backwards), and `scripts/update-versions.sh` commits `staging: api 1.4.0` to `main` with the job's
   own token. A push made with the job token starts no pipeline, so the same job then deploys that commit:
-  `scripts/deploy.sh staging apps` (migrations with the new API image, then apply, then wait for the rollouts) and
+  `scripts/deploy.sh staging apps` (apply, then wait for the rollouts; the new API pods migrate first) and
   `scripts/smoke.sh`, under staging's lock (`resource_group: staging`). Nothing new: no commit, no deployment. A
   person's commit to `environments/staging` (or a merge) starts the normal pipeline instead: `validate:*`,
   `deploy:staging`, `smoke:staging`. A release candidate reaches staging only when a person sets it
@@ -1149,8 +1135,14 @@ flowchart LR
 * **Promotion to production.** `propose:production` (manual, only for people allowed to deploy to the protected
   `production` environment) opens the merge request `production: api 1.4.0, web 2.1.0, gateway 2.1.0` with the
   versions staging runs; or a person runs `scripts/set-version.sh production api 1.4.0` and opens one. Merging it is
-  the release decision (with approvals where the tier has them); `deploy:production` (manual) then migrates and
-  applies.
+  the release decision (with approvals where the tier has them); `deploy:production` (manual) then applies.
+* **Migrations.** They happen when the new API pods start: the first new pod takes a lock in the database, applies
+  the migrations its version brings (as `pm_migrator`), then starts serving; the next pods find the schema up to date.
+  Until then the old pods keep serving (`maxUnavailable: 0`), so a migration must work with the version still running
+  (expand/contract: add a column, deploy, use it, remove the old one in a later version). If a migration fails, the
+  new pod exits and restarts (`CrashLoopBackOff`), the rollout stops there and the old pods keep serving; the job
+  fails at the wait, and `kubectl -n product-management logs deployment/api` shows why. The SQL a version will run
+  is the backend pipeline's `migrations:sql` artifact, reviewed in its merge request.
 * **Rollback (downgrade).** The same command with the older version: `scripts/set-version.sh production api 1.3.2`,
   through a merge request (or `git revert` of the version commit), then `deploy:production`. For staging, first
   deactivate the schedule (Build → Pipeline schedules), or `update:staging` moves it forward again within 15 minutes;
@@ -1170,7 +1162,7 @@ prepared in `argocd/` and checked by `scripts/validate.sh` on every change, but 
 | --- | --- | --- |
 | `deploy:staging` applies every commit to `environments/staging` | Application `product-management-staging`, automated sync with prune and selfHeal | `argocd/applications/staging.yaml` |
 | `deploy:production` (manual) | Application `product-management-production`, manual sync (a person presses Sync) | `argocd/applications/production.yaml` |
-| `scripts/migrate.sh` before `kubectl apply` | the Job `migrate` as a **PreSync** hook (`hook-delete-policy: BeforeHookCreation,HookSucceeded`): runs before every sync with the environment's API image; a failure stops the sync | `argocd/hooks/` (a Kustomize Component) |
+| the new API pods migrate the database when they start | unchanged: no PreSync hook or migration Job is needed, the pods Argo CD rolls out migrate themselves (a failed migration leaves the Application Degraded, with the old pods serving) | nothing to prepare |
 | `update:staging` (schedule) | **Argo CD Image Updater**: semver strategy, only `X.Y.Z` tags, git write-back to `main` (`kustomization.yaml`) | annotations in `staging.yaml`, `argocd/applications/image-updater.yaml` |
 | `propose:production`, merge request | unchanged: production is never updated automatically | `production.yaml` (a comment says why) |
 
@@ -1217,19 +1209,11 @@ Steps, in this order (versions pinned; check the current ones when you do it):
    The Secrets the pipeline creates in `product-management` today (`gitlab-registry`, `api-secrets`,
    `redis-credentials`) must exist before the first sync: create them once per environment with
    `scripts/deploy.sh <env>` as today, or move them to a secrets operator (e.g. External Secrets).
-5. **Include the migration hook** in both environments, in one merge request: add to
-   `environments/staging/kustomization.yaml` and `environments/production/kustomization.yaml`
-
-   ```yaml
-   components:
-     - ../../argocd/hooks
-   ```
-
-6. **Switch the pipeline's applying off**, in the same merge request: in `.gitlab-ci.yml` remove (or give `when: never`)
+5. **Switch the pipeline's applying off**, in one merge request: in `.gitlab-ci.yml` remove (or give `when: never`)
    `deploy:*`, `smoke:*` and `update:staging`; keep `validate:*`, `infra:*` and `propose:production`; deactivate the
    pipeline schedule. Two writers to `main` (the schedule and Image Updater) must never run at once.
-7. **Create the Applications:** `kubectl apply -k argocd/applications`. Staging syncs at once (running the hook
-   first); production shows OutOfSync until someone presses Sync. A GitLab webhook to Argo CD
+6. **Create the Applications:** `kubectl apply -k argocd/applications`. Staging syncs at once (its new API pods
+   migrate as they start); production shows OutOfSync until someone presses Sync. A GitLab webhook to Argo CD
    (`https://<argocd>/api/webhook`) makes syncs immediate instead of every 3 minutes.
 
 What changes for people: releasing in backend and frontend does not change at all (a tag). Staging still follows the
@@ -1331,7 +1315,8 @@ opens up to 10 connections and `max_connections` is 200.
 ### Rotate passwords and keys
 
 * **Database users:** `scripts/create-database.sh product-management product_management pm_app pm_migrator --rotate`,
-  then `kubectl -n product-management rollout restart deployment/api`.
+  then `kubectl -n product-management rollout restart deployment/api` (the API reads both passwords: `pm_app` for its
+  requests, `pm_migrator` for its migrations at startup).
 * **Redis:** `kubectl -n infra delete secret redis-auth && scripts/infra.sh up redis && scripts/deploy.sh <env> apps`
   (in staging and production: the manual `infra:<env>` job, then re-run the deploy job). Until the API restarts with
   the new password it cannot use Redis: reads bypass the cache, rate limits fall back to per-replica counters, and
@@ -1435,10 +1420,10 @@ The pipeline of this repository ([`.gitlab-ci.yml`](.gitlab-ci.yml)):
 | `validate:scripts` | validate | every merge request and commit | `shellcheck scripts/*.sh` |
 | `validate:alloy` | validate | every merge request and commit | `alloy validate` and `alloy fmt` on the configuration inside `infra/logs.yaml` |
 | `update:staging` | staging | the **pipeline schedule** on `main` with `STAGING_ENABLED`; also **manual** in any pipeline on `main` | `scripts/update-versions.sh staging`: the newest released versions into `environments/staging`, committed to `main` with the job token; when something was committed, deploys it in the same job (`scripts/deploy.sh staging apps`, then `scripts/smoke.sh $STAGING_URL`), since a job-token push starts no pipeline |
-| `deploy:staging` | staging | `main`, `STAGING_ENABLED`, when `environments/staging/`, `apps/`, `infra/`, `scripts/deploy.sh` or `scripts/migrate.sh` changed (people's commits and merges) | `scripts/deploy.sh staging apps`: Secrets, migrations (`scripts/migrate.sh`), apply, rollouts |
+| `deploy:staging` | staging | `main`, `STAGING_ENABLED`, when `environments/staging/`, `apps/`, `infra/` or `scripts/deploy.sh` changed (people's commits and merges) | `scripts/deploy.sh staging apps`: Secrets, apply, rollouts (the new API pods migrate the database as they start) |
 | `smoke:staging` | staging | after `deploy:staging` | `scripts/smoke.sh $STAGING_URL` |
 | `infra:staging` | staging | `main`, `STAGING_ENABLED`, **manual** | `scripts/deploy.sh staging infra` |
-| `deploy:production` | production | `main`, `PRODUCTION_ENABLED`, when `environments/production/`, `apps/`, `scripts/deploy.sh` or `scripts/migrate.sh` changed; **manual** | `scripts/deploy.sh production apps`: Secrets, migrations, apply, rollouts |
+| `deploy:production` | production | `main`, `PRODUCTION_ENABLED`, when `environments/production/`, `apps/` or `scripts/deploy.sh` changed; **manual** | `scripts/deploy.sh production apps`: Secrets, apply, rollouts (the new API pods migrate the database as they start) |
 | `smoke:production` | production | after `deploy:production` | `scripts/smoke.sh $PRODUCTION_URL` |
 | `infra:production` | production | `main`, `PRODUCTION_ENABLED`, **manual** | `scripts/deploy.sh production infra` |
 | `propose:production` | production | `main`, `PRODUCTION_ENABLED`, **manual** (protected environment `production`) | `scripts/update-versions.sh production`: the merge request "production: api 1.4.0, ..." with the versions staging runs |
@@ -1496,13 +1481,14 @@ a credential of this repository or of a cluster.
 | staging changed in git (`staging: api 1.4.0`) but no pipeline ran for that commit | expected: a push made with the job token starts no pipeline | nothing: `update:staging` deployed it itself (its log shows `deploy.sh` and `smoke.sh`); if that step failed, fix the cause and run a pipeline on `main` (Build → Pipelines → Run pipeline): `deploy:staging` applies it (re-running `update:staging` finds nothing new to commit) |
 | `update:staging` runs but staging stays on an older version | there is no newer plain `X.Y.Z` (release candidates are skipped), or for web/gateway only one of the two has it | `scripts/versions.sh all`; release the missing image |
 | staging went back up after a downgrade | `update:staging` moves it to the newest version again | deactivate the schedule while staging must stay older; better, release a fix |
-| `deploy:*` fails in `migrate.sh` (the migration pod's output in the log) | a migration failed: nothing was applied, the old version keeps running | fix forward in backend (a new version); the pod is gone, its log is in the job |
+| `deploy:*` fails waiting for `deployment/api`; a new api pod is in `CrashLoopBackOff` | a migration failed at the pod's startup (or the database is unreachable): the rollout stopped, the old pods keep serving | `kubectl -n product-management logs deployment/api` (or `logs <pod> --previous`) shows the error after "Applying N database migrations"; fix forward in backend (a new version), or roll back the version (`set-version.sh`); a migration that committed stays |
+| a new api pod stays `Running` but not ready for minutes, its log ends with "Another instance is migrating the database; waiting for it to finish" | another pod is applying a long migration (for example an index on a large table) | nothing: it starts when that migration commits (the startup probe allows 10 minutes); `kubectl -n product-management logs <the other pod>` shows its progress |
 | the first deploy stops in `create-database.sh` with `statefulsets.apps "postgres" not found` (or a psql error) | the shared PostgreSQL is not running on that cluster yet | `scripts/infra.sh up postgres` (or the job `infra:<env>`), then run the deploy again |
 | `No Secret gitlab-registry` / `No Secret api-secrets` | the CI/CD variables are missing | create the group deploy token; set `API_SIGNING_KEY`, `API_CONSUMERS` (File type) for the environment |
 | `API_SIGNING_KEY is not a PKCS#8 PEM private key` | wrong key format | `docker run --rm <api image> generate-signing-key` |
 | `No Secret infra/redis-auth` | the shared Redis is not running | `scripts/infra.sh up redis` (or `deploy.sh <env> infra`) |
 | pod `ImagePullBackOff` / `ErrImagePull` | remote: the tag does not exist or `gitlab-registry` is wrong; local: the image is not on the node (k3s import skipped) | `kubectl describe pod <pod>`; check the tag in the registry and the deploy token; locally run `deploy.sh local` again |
-| migrate pod fails with `password authentication failed for user "pm_migrator"` | the database's users were deleted (`infra.sh down postgres --delete-data`) but the old `database-credentials` remains | `scripts/create-database.sh product-management product_management pm_app pm_migrator` (it re-creates the users with the stored passwords) |
+| new api pods fail at startup with `The database is still unreachable ... (or the migrator's user or password is wrong)`, or `password authentication failed for user "pm_migrator"` | the database's users were deleted (`infra.sh down postgres --delete-data`) but the old `database-credentials` remains | `scripts/create-database.sh product-management product_management pm_app pm_migrator` (it re-creates the users with the stored passwords) |
 | `postgres-backups` PVC `Pending` on k3s | normal: `local-path` binds a volume only when a pod first uses it | nothing; it binds at the first backup (or `create job --from=cronjob/postgres-backup`) |
 | a pod `Pending` with `Insufficient cpu` / `memory` | the requests do not fit the node | give Docker Desktop 4 CPUs and 8 GB; or lower `resources.requests` |
 | `kubectl get hpa` shows `<unknown>` targets | no metrics-server | `scripts/infra.sh up` installs it (on k3s: wait for k3s' own) |
@@ -1521,7 +1507,8 @@ a credential of this repository or of a cluster.
 | --- | --- |
 | Verified locally (Docker Desktop Kubernetes, macOS) | `scripts/infra.sh up`, `scripts/deploy.sh local`: the API, web and gateway with the shared infrastructure, 850,000 products and a 20-million-row stock ledger; every assessment requirement, the end-to-end tests (Playwright), load tests (k6) and the log pipeline (Loki, Grafana, 12 alert rules) pass against it |
 | Verified on k3s (a fresh Ubuntu 24.04 VM) | `scripts/setup-ubuntu.sh`, `scripts/infra.sh up`, `scripts/deploy.sh local`, a start over from nothing, a backup; the smoke check, every assessment requirement and the 22 Playwright tests (from a laptop) pass through http://&lt;server-ip&gt;:8080 |
-| Verified locally, release flow | `scripts/versions.sh` and `scripts/set-version.sh` against a throwaway registry (latest, `--pre`, downgrade, unknown version refused; also the token flow against registry.gitlab.com); `scripts/update-versions.sh` against a throwaway git repository (commit, retry after a rejected push, production merge request branch); the app pipelines' publish step with crane against a throwaway registry (a new version is tagged, a re-run is a no-op, another image under an existing version is refused); `scripts/migrate.sh` on the local cluster ("Database is up to date", no data changed) through `scripts/deploy.sh local` |
+| Verified locally, release flow | `scripts/versions.sh` and `scripts/set-version.sh` against a throwaway registry (latest, `--pre`, downgrade, unknown version refused; also the token flow against registry.gitlab.com); `scripts/update-versions.sh` against a throwaway git repository (commit, retry after a rejected push, production merge request branch); the app pipelines' publish step with crane against a throwaway registry (a new version is tagged, a re-run is a no-op, another image under an existing version is refused) |
+| Verified locally, migrations at startup | `scripts/deploy.sh local` and `kubectl rollout restart deployment/api` on the local cluster with its 850,000 products: every new pod logs "Database is up to date (0 migrations applied as pm_migrator)" and becomes ready, no data changed; on the Ubuntu VM, a start over from nothing: the first API pod creates the schema in the empty database and inserts the 24 sample products, the smoke check passes |
 | Validated, not yet run on a real cluster | `environments/staging` and `environments/production` (rendered and schema-checked by `scripts/validate.sh`), the GitLab pipelines (schema-valid; jobs that need no cluster run on gitlab.com), `scripts/add-node.sh` (dry run) |
-| Prepared, not installed | Argo CD and Argo CD Image Updater: `argocd/` (Applications, ImageUpdater, the PreSync migration hook) is validated against their pinned CRDs on every change; [Moving to Argo CD](#moving-to-argo-cd) is the procedure |
+| Prepared, not installed | Argo CD and Argo CD Image Updater: `argocd/` (Applications, ImageUpdater) is validated against their pinned CRDs on every change; [Moving to Argo CD](#moving-to-argo-cd) is the procedure |
 | Still to provide per environment | a k3s (or any) cluster with cert-manager and the ClusterIssuer `letsencrypt`; the real hosts in `ingress.yaml` and `STAGING_URL` / `PRODUCTION_URL` (now `*.example.com`); the CI/CD variables above, the job token push setting and the `update:staging` schedule; the first versions (`newTag: unreleased` until then); a real alert contact point; off-node backups |

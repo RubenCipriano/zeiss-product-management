@@ -24,6 +24,9 @@ spec:
             # The shared Redis. No password here: the API adds Redis__Password.
             - name: ConnectionStrings__Redis
               value: "redis.infra.svc.cluster.local:6379"
+            # The 24 sample products, inserted after the migrations when the database has no product yet.
+            - name: Database__SeedSampleData
+              value: "true"
             # Swagger UI and the OpenAPI document, through a port-forward (see apps/backend/service.yaml).
             - name: OpenApi__Enabled
               value: "true"
