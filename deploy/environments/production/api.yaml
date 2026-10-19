@@ -7,10 +7,10 @@ metadata:
 spec:
   template:
     spec:
-      # The image is in the backend project's private registry: scripts/deploy.sh creates this Secret from the group
-      # deploy token.
+      # The image is in the repository's container registry (ghcr.io): scripts/deploy.sh creates this Secret from
+      # REGISTRY_USER and REGISTRY_PASSWORD (a token with read:packages).
       imagePullSecrets:
-        - name: gitlab-registry
+        - name: registry-credentials
       containers:
         - name: api
           env:

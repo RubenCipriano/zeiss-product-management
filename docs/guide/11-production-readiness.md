@@ -10,9 +10,9 @@ something" or "partly done"; ❌ means missing.
 **Verdict:** the application is production-ready as software: every requirement is implemented and checked
 automatically, it is secure by default, scales horizontally, stays correct under concurrency and overload, and has
 been measured at load. The deployment is written for staging and production too (one Kustomize folder per environment in a
-deploy repository applied by its own GitLab pipeline, shared PostgreSQL, Redis and logs in the cluster's `infra` namespace, least-privilege database users, logs
+`deploy/` folder applied by its own GitHub Actions workflow, shared PostgreSQL, Redis and logs in the cluster's `infra` namespace, least-privilege database users, logs
 with alerts), with a runbook in [chapter 12](12-from-zero.md). Going live still needs the environment items in
-[Before go-live](#before-go-live) (backups shipped off the node, the pipeline run for real, a secret manager, a
+[Before go-live](#before-go-live) (backups shipped off the node, the deploy workflows run for real, a secret manager, a
 multi-node cluster whose network plugin enforces NetworkPolicies); none of them requires application code changes.
 
 - [1. The assessment PDF](#1-the-assessment-pdf)
@@ -68,7 +68,7 @@ Checked against the running system by `tools/check-requirements.py` (14 checks, 
 | Database privileges | ✅ | the API's user `pm_app` reads and writes rows only (`CREATE`, `ALTER`, `DROP` refused), 30 s statement timeout; only the API's migration step at startup (its own unpooled connection, closed before it serves) uses the schema owner `pm_migrator`; users from [`create-database.sh`](../../deploy/scripts/lib/create-database.sh), grants from the migration [`GrantAppPermissions`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs) |
 | Network | ⚠️ | NetworkPolicies: the API and the web pods accept connections only from the gateway. **Not enforced on Docker Desktop** (its network plugin ignores them; verified: a web pod reaches an API pod). Enforced on k3s and on production clusters with Calico or Cilium. PostgreSQL and Redis (namespace `infra`) are reachable only inside the cluster and protected by random credentials; between nodes only the k3s ports are open ([chapter 12](12-from-zero.md)). |
 | Containers | ⚠️ | api, web: non-root, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp. gateway: the same, but with a writable root filesystem (nginx renders its configuration at start-up). |
-| Secrets | ⚠️ | no password in any YAML, connection string or CI/CD variable: the database and Redis passwords are random and live only in the cluster (`database-credentials` from `deploy/scripts/lib/create-database.sh`, `redis-credentials` copied by the deploy); the API's own keys in `api-secrets`, locally generated on each machine (`deploy/scripts/lib/local-secrets.sh`, gitignored), staging and production from the deploy project's protected CI/CD variables (`deploy/scripts/deploy.sh`; the deploy pipeline fails if a Secret appears in their environment folders). Next: a secret manager (External Secrets / Vault) |
+| Secrets | ⚠️ | no password in any YAML, connection string or repository secret: the database and Redis passwords are random and live only in the cluster (`database-credentials` from `deploy/scripts/lib/create-database.sh`, `redis-credentials` copied by the deploy); the API's own keys in `api-secrets`, locally generated on each machine (`deploy/scripts/lib/local-secrets.sh`, gitignored), staging and production from the secrets of their GitHub environment (`deploy/scripts/deploy.sh`; the Deploy workflow's validation fails if a Secret appears in their environment folders). Next: a secret manager (External Secrets / Vault) |
 | TLS | ⚠️ | at the edge: the staging and production environments have an Ingress with a Let's Encrypt certificate from cert-manager (then add HSTS). Inside the cluster (API to PostgreSQL and Redis): plain TCP on the pod network, optional; a database or cache outside the cluster would get `SSL Mode=VerifyFull` with the internal CA in the API pods ([chapter 12](12-from-zero.md)) |
 | Client IPs at the edge | ⚠️ | behind the Ingress the gateway trusts the controller's `X-Forwarded-For` (`GATEWAY_TRUSTED_PROXIES`); the controller's own load balancer must preserve client addresses (`externalTrafficPolicy: Local` / PROXY protocol) |
 | Image supply chain | ⚠️ | images built and deployed by immutable tag; production: a registry with vulnerability scanning and signing |
@@ -111,12 +111,12 @@ Checked against the running system by `tools/check-requirements.py` (14 checks, 
 
 | Item | Status | Notes |
 | --- | :---: | --- |
-| CI | ⚠️ | one GitLab pipeline per repository: build with warnings as errors, `dotnet format`, all test suites, lint, image scan (backend, frontend); every environment's manifests validated, shellcheck, the Alloy configuration (deploy); the PDF check and Playwright are run by hand against an environment; defined and validated against GitLab's CI schema, **not yet run on a GitLab instance** ([chapter 9](09-deployment-and-operations.md#cicd-pipelines)) |
-| CD to staging and production | ⚠️ | GitOps with a pull model: backend and frontend (test → build → scan; a version tag publishes `X.Y.Z` and a GitLab Release), deploy (validate → `update:staging` on a schedule → `deploy:staging` and smoke check → `propose:production` merge request → manual `deploy:production`; manual infra jobs; the new API pods migrate the database as they start); rollback is `set-version.sh` with an older version; **not yet run on a GitLab instance** ([chapter 12](12-from-zero.md)) |
+| CI | ⚠️ | GitHub Actions workflows per folder: build with warnings as errors, `dotnet format`, all test suites, lint, image scan to Security → Code scanning (Backend, Frontend); every environment's manifests validated, shellcheck, the Alloy configuration (Deploy); CodeQL on the whole repository; the PDF check and Playwright are run by hand against an environment; the workflows pass `actionlint`, **the deploy jobs not yet run against a cluster** ([chapter 9](09-deployment-and-operations.md#cicd-workflows)) |
+| CD to staging and production | ⚠️ | GitOps with a pull model: Backend and Frontend (test → build → scan; a tag `backend/vX.Y.Z` or `frontend/vX.Y.Z` publishes `X.Y.Z` and a GitHub Release), deploy (validate → Update staging after every release → `deploy-staging` with its smoke check → Propose production's pull request → `deploy-production` after a required reviewer approves; infra jobs started by hand; the new API pods migrate the database as they start); rollback is `set-version.sh` with an older version; **not yet run against a cluster** ([chapter 12](12-from-zero.md)) |
 | Database migrations | ✅ | applied by each new API version when its first pod starts, as `pm_migrator`, under an advisory lock (two instances starting together on an empty database: tested); a failure keeps the new pods unready while the old ones serve; large indexes built concurrently; expand/contract, never rolled back |
-| Independent deployment of each part | ✅ | the API and the web app are released on their own (each pipeline changes only its own image tags in the deploy repository); the shared infrastructure separately: `deploy/scripts/deploy.sh <environment> apps` or `infra`, locally `deploy/scripts/infra.sh up [postgres] [redis] [logs]` and `deploy/scripts/deploy.sh local` ([chapter 9](09-deployment-and-operations.md#the-layout-three-parts)) |
+| Independent deployment of each part | ✅ | the API and the web app are released on their own (each has its own tag line and workflow, and `deploy/` sets each image's version separately); the shared infrastructure separately: `deploy/scripts/deploy.sh <environment> apps` or `infra`, locally `deploy/scripts/infra.sh up [postgres] [redis] [logs]` and `deploy/scripts/deploy.sh local` ([chapter 9](09-deployment-and-operations.md#the-layout-three-parts)) |
 | Environments | ✅ | one Kustomize folder each (`deploy/environments/local`, `staging`, `production`); the differences fit in one short file per environment |
-| GitOps | ⚠️ | the deploy repository is the only record of what runs (one commit per release, `git revert` to roll back) and only its pipeline changes the clusters, with `kubectl apply`; Argo CD pointed at `deploy/environments/<environment>` is the next step (pruning, drift detection) |
+| GitOps | ⚠️ | `deploy/` is the only record of what runs (one commit per release, `git revert` to roll back) and only its workflows change the clusters, with `kubectl apply`; Argo CD pointed at `deploy/environments/<environment>` is the next step (pruning, drift detection) |
 
 ## Before go-live
 
@@ -126,11 +126,12 @@ Environment work, in order, following the runbook in [chapter 12](12-from-zero.m
    for point-in-time recovery and a standby, PostgreSQL under an operator (CloudNativePG); the logs on a Loki with
    object storage and the company's retention (or outside the cluster through `LOKI_URL`), Grafana behind SSO and
    alerts routed to on-call.
-2. **GitLab:** the agent for Kubernetes (or a `KUBECONFIG`), protected environments, protected tags `v*` in backend
-   and frontend, the deploy project's CI/CD variables (pushing with the job's own token for
-   `update:staging`) and the `update:staging` schedule; then a first version released through staging and a rehearsed
-   rollback (`deploy/scripts/set-version.sh` with the older version). The shared runners are enough: every job reaches the
-   cluster through `kubectl`.
+2. **GitHub:** the environments `staging` and `production` (production with required reviewers) and their secrets
+   (`KUBECONFIG`, `REGISTRY_USER` / `REGISTRY_PASSWORD`, `API_SIGNING_KEY`, `API_CONSUMERS`), the repository
+   variables, a tag ruleset for `backend/v*` and `frontend/v*`, push access to `main` for `github-actions[bot]` (for
+   Update staging) and the setting that lets GitHub Actions open pull requests; then a first version released through
+   staging and a rehearsed rollback (`deploy/scripts/set-version.sh` with the older version). GitHub-hosted runners are
+   enough: every job reaches the cluster through `kubectl` and the environment's kubeconfig.
 3. **TLS:** the certificate for the public names and HSTS; inside the cluster TLS is optional (a database or cache
    outside it would need `SSL Mode=VerifyFull` and the internal CA in the API pods).
 4. **Secrets** from a secret manager; a new signing key and consumer secrets per environment (never the local ones).

@@ -1,0 +1,37 @@
+# Static analysis (SAST) of the C# backend, the TypeScript frontend and these workflows with GitHub's CodeQL; the
+# results are in Security → Code scanning. Secrets are found by GitHub's own secret scanning and push protection
+# (Settings → Code security), which every public repository has.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"   # weekly, for queries added since the last push
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # build-mode none: the C# code is analysed without building it (no SDK or restore needed).
+        language: [csharp, javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}

@@ -13,7 +13,7 @@
 # places (README.md, "Where the images come from"):
 #   built      from the sibling checkouts ../backend and ../frontend (BACKEND_DIR, FRONTEND_DIR): for a developer
 #              trying local changes. The default when both folders exist; --build insists on it.
-#   published  a released version from the registry (registry.gitlab.com/zeiss/...): for a server or a demo with
+#   published  a released version from the registry (ghcr.io/rubencipriano/...): for a server or a demo with
 #              only this repository. The default when the checkouts are missing; --version X.Y.Z (or latest, the
 #              newest X.Y.Z that api, web and gateway all have) insists on it. Needs a registry login (below).
 # Steps:
@@ -22,7 +22,7 @@
 #      copies them into its containerd (docker save | sudo k3s ctr images import; Docker Desktop's Kubernetes runs the
 #      images of its Docker engine as they are).
 #      published: checks the version exists for all three images, built for the nodes' platform (scripts/versions.sh),
-#      and creates the pull Secret gitlab-registry from the registry login; the cluster pulls the images itself;
+#      and creates the pull Secret registry-credentials from the registry login; the cluster pulls the images itself;
 #   3. records the images in environments/local/generated/build (not committed): their tags, and for published
 #      images also their registry names and the pull Secret, so `kubectl diff -k environments/local` compares
 #      against exactly what was applied, and the committed environments/local stays the same for both;
@@ -31,11 +31,11 @@
 #   6. applies environments/local and waits for the rollouts: the new API pods apply the database migrations
 #      themselves when they start, before they serve (apps/backend/deployment.yaml).
 #
-# staging, production (this repository's pipeline, or a laptop whose kubectl reaches that cluster): never built here
+# staging, production (the Deploy workflow, or a laptop whose kubectl reaches that cluster): never built here
 # and never from ../backend or ../frontend; they run the versions committed in environments/<environment>.
 #   1. refuses an environment whose kustomization.yaml still names no version for an image (newTag: unreleased);
-#   2. creates the registry credential (Secret gitlab-registry) and the API's own Secret (api-secrets) from the CI/CD
-#      variables below, when they are set (otherwise the existing Secrets are kept);
+#   2. creates the registry credential (Secret registry-credentials) and the API's own Secret (api-secrets) from the
+#      variables below (the GitHub environment's secrets), when they are set (otherwise the existing Secrets are kept);
 #   3. creates the service's database and users on the first deploy (scripts/lib/create-database.sh);
 #   4. copies the shared Redis' password into the namespace (Secret redis-credentials);
 #   5. applies environments/<environment> exactly as committed and waits for the rollouts: the new API pods apply
@@ -44,17 +44,17 @@
 #   Which versions run is chosen in environments/<environment>/kustomization.yaml (scripts/set-version.sh).
 #
 # Variables:
-#   KUBE_CONTEXT                          the kubectl context to use (the GitLab agent: <project path>:<agent name>);
-#                                         default: the current context (e.g. of a KUBECONFIG file)
+#   KUBE_CONTEXT                          the kubectl context to use; default: the current context (e.g. of a
+#                                         KUBECONFIG file, which the GitHub workflow writes from the environment's
+#                                         secret KUBECONFIG)
 #   BACKEND_DIR, FRONTEND_DIR             local, built: the checkouts to build (default: ../backend and ../frontend)
 #   LOCAL_CLUSTER=docker-desktop|k3s      local, built: how the images reach the cluster, when the detection gets it
 #                                         wrong (default: docker-desktop for that context, k3s for a k3s node here)
 #   LOGS=off                              local: no log collector, the gateway answers /collect with 204
-#   REGISTRY_USER, REGISTRY_PASSWORD      local, published: a deploy token with read_registry (or CI_DEPLOY_USER and
-#                                         CI_DEPLOY_PASSWORD, or this machine's docker login registry.gitlab.com)
-#   CI_DEPLOY_USER, CI_DEPLOY_PASSWORD    staging/production: a deploy token with read_registry on both registries
-#                                         (GitLab passes the group deploy token named gitlab-deploy-token by itself)
-#   CI_REGISTRY                           the registry of that token (default: registry.gitlab.com)
+#   REGISTRY_USER, REGISTRY_PASSWORD      the registry login the cluster pulls with (Secret registry-credentials): a
+#                                         GitHub user and a token with read:packages (a classic personal access
+#                                         token). local, published: or this machine's docker login ghcr.io.
+#                                         staging/production: the environment's secrets of the same names
 #   API_SIGNING_KEY, API_CONSUMERS        staging/production: files with the ES256 private key (PEM) and consumers.json
 set -euo pipefail
 
@@ -105,7 +105,7 @@ if [[ -n "${KUBE_CONTEXT:-}" ]]; then
   kubectl config use-context "$KUBE_CONTEXT" >/dev/null
 fi
 if ! CONTEXT="$(kubectl config current-context 2>/dev/null)"; then
-  echo "No Kubernetes context: set KUBE_CONTEXT (GitLab agent) or KUBECONFIG (a kubeconfig file)" >&2
+  echo "No Kubernetes context: set KUBE_CONTEXT or KUBECONFIG (a kubeconfig file)" >&2
   exit 1
 fi
 # The laptop's cluster is never staging or production.
@@ -166,13 +166,13 @@ apply_secret() {
   fi
 }
 
-# The image pull Secret gitlab-registry: a docker config made with jq from its environment and read by kubectl from
+# The image pull Secret registry-credentials: a docker config made with jq from its environment and read by kubectl from
 # stdin, so the token is on no command line.
 registry_secret() {
   local server="$1" username="$2" password="$3"
   SERVER="$server" USERNAME="$username" PASSWORD="$password" jq -n '{auths: {(env.SERVER): {
       username: env.USERNAME, password: env.PASSWORD, auth: ((env.USERNAME + ":" + env.PASSWORD) | @base64)}}}' \
-    | kubectl -n "$NAMESPACE" create secret generic gitlab-registry --type=kubernetes.io/dockerconfigjson \
+    | kubectl -n "$NAMESPACE" create secret generic registry-credentials --type=kubernetes.io/dockerconfigjson \
         --from-file=.dockerconfigjson=/dev/stdin --dry-run=client -o yaml \
     | apply_secret >/dev/null
 }
@@ -249,7 +249,7 @@ ensure_database() {
 # ─── local, published images: the registry login and the version ─────────────────────────────────────────────────
 
 # The registry image of api, web or gateway: its newName in environments/staging/kustomization.yaml (the line after
-# its "- name:"), the images staging and production run, e.g. registry.gitlab.com/zeiss/backend/api.
+# its "- name:"), the images staging and production run, e.g. ghcr.io/rubencipriano/zeiss-product-management/api.
 registry_image() {
   awk -v image="product-management/$1" '
     $1 == "-" && $2 == "name:" { found = ($3 == image) }
@@ -257,18 +257,16 @@ registry_image() {
 }
 
 # The registry login, the first that is set (the same order as scripts/versions.sh): REGISTRY_USER and
-# REGISTRY_PASSWORD, CI_DEPLOY_USER and CI_DEPLOY_PASSWORD, or this machine's `docker login <host>` (also through a
+# REGISTRY_PASSWORD, or this machine's `docker login <host>` (also through a
 # credential helper such as the macOS keychain). Exported as REGISTRY_USER and REGISTRY_PASSWORD for versions.sh;
-# the cluster gets it as the pull Secret gitlab-registry.
+# the cluster gets it as the pull Secret registry-credentials.
 registry_login() {
   local host="$1" config="${DOCKER_CONFIG:-$HOME/.docker}/config.json" helper login=""
   if [[ -n "${REGISTRY_USER:-}" && -n "${REGISTRY_PASSWORD:-}" ]]; then
     export REGISTRY_USER REGISTRY_PASSWORD
     return
   fi
-  if [[ -n "${CI_DEPLOY_USER:-}" && -n "${CI_DEPLOY_PASSWORD:-}" ]]; then
-    login="$CI_DEPLOY_USER:$CI_DEPLOY_PASSWORD"
-  elif [[ -f "$config" ]]; then
+  if [[ -f "$config" ]]; then
     helper="$(HOST="$host" jq -r '.credHelpers[env.HOST] // .credsStore // empty' "$config")"
     if [[ -n "$helper" ]] && command -v "docker-credential-$helper" >/dev/null; then
       login="$("docker-credential-$helper" get <<<"$host" 2>/dev/null \
@@ -278,8 +276,8 @@ registry_login() {
     fi
   fi
   if [[ "$login" != *:* ]]; then
-    echo "Published images need a login to $host: set REGISTRY_USER and REGISTRY_PASSWORD (a deploy token with" >&2
-    echo "the scope read_registry, e.g. a group deploy token named server-pull), or run: docker login $host" >&2
+    echo "Published images need a login to $host: set REGISTRY_USER and REGISTRY_PASSWORD (your GitHub user and a" >&2
+    echo "personal access token with the scope read:packages), or run: docker login $host" >&2
     echo "Or build the images from ../backend and ../frontend: clone them next to this repository (--build)." >&2
     exit 1
   fi
@@ -424,12 +422,12 @@ write_images_component() {
     fi
     if [[ "$SOURCE" == published ]]; then
       cat <<'EOF'
-  # The registry is private: every Deployment pulls with the Secret gitlab-registry (made by deploy.sh).
+  # The registry is private: every Deployment pulls with the Secret registry-credentials (made by deploy.sh).
   - target: { kind: Deployment }
     patch: |-
       - op: add
         path: /spec/template/spec/imagePullSecrets
-        value: [{ name: gitlab-registry }]
+        value: [{ name: registry-credentials }]
 EOF
     fi
     if [[ "${LOGS:-on}" == off ]]; then
@@ -460,7 +458,7 @@ deploy_local_apps() {
 
   kubectl apply -f "$ROOT/apps/backend/namespace.yaml" >/dev/null
   if [[ "$SOURCE" == published ]]; then
-    echo "==> Secret gitlab-registry: the registry login, to pull the images"
+    echo "==> Secret registry-credentials: the registry login, to pull the images"
     registry_secret "$REGISTRY_HOST" "$REGISTRY_USER" "$REGISTRY_PASSWORD"
   fi
   ensure_database
@@ -479,23 +477,24 @@ deploy_remote_apps() {
     echo "environments/$ENVIRONMENT names no version yet for some images (newTag: unreleased):" >&2
     grep ':unreleased$' "$rendered" | sort -u >&2
     echo "Choose released versions first: scripts/set-version.sh $ENVIRONMENT all latest (commit it), or for staging" >&2
-    echo "the update:staging job, once backend and frontend have released a version (a vX.Y.Z tag)." >&2
+    echo "the workflow update-staging, once backend and frontend have released a version (a tag backend/vX.Y.Z," >&2
+    echo "frontend/vX.Y.Z)." >&2
     exit 1
   fi
 
   kubectl apply -f "$ROOT/apps/backend/namespace.yaml"
   ensure_database
 
-  # The registries are private: the nodes pull with this credential, also long after this job (a pod moved to another
-  # node, a restart), so it is a deploy token, not the job's own short-lived token.
-  if [[ -n "${CI_DEPLOY_USER:-}" && -n "${CI_DEPLOY_PASSWORD:-}" ]]; then
-    echo "==> Secret gitlab-registry: the deploy token, to pull the images"
-    registry_secret "${CI_REGISTRY:-registry.gitlab.com}" "$CI_DEPLOY_USER" "$CI_DEPLOY_PASSWORD"
+  # The registry may be private: the nodes pull with this credential, also long after this job (a pod moved to another
+  # node, a restart), so it is a long-lived token with read:packages, not the workflow's own short-lived GITHUB_TOKEN.
+  if [[ -n "${REGISTRY_USER:-}" && -n "${REGISTRY_PASSWORD:-}" ]]; then
+    echo "==> Secret registry-credentials: the registry login, to pull the images"
+    registry_secret "$(registry_image api | cut -d/ -f1)" "$REGISTRY_USER" "$REGISTRY_PASSWORD"
   fi
-  require_secret gitlab-registry \
-    "set CI_DEPLOY_USER and CI_DEPLOY_PASSWORD (a group deploy token named gitlab-deploy-token, scope read_registry)"
+  require_secret registry-credentials \
+    "set REGISTRY_USER and REGISTRY_PASSWORD (a GitHub user and a token with the scope read:packages)"
 
-  # The API's own keys. Changing the CI/CD variable and re-running the deploy job is how a key is rotated.
+  # The API's own keys. Changing the environment's secret and re-running the deploy job is how a key is rotated.
   if [[ -n "${API_SIGNING_KEY:-}" && -n "${API_CONSUMERS:-}" ]]; then
     grep -q -- '-----BEGIN PRIVATE KEY-----' "$API_SIGNING_KEY" \
       || { echo "API_SIGNING_KEY is not a PKCS#8 PEM private key (docker run --rm <api image> generate-signing-key)" >&2; exit 1; }
@@ -506,7 +505,7 @@ deploy_remote_apps() {
         --from-file=signing-key="$API_SIGNING_KEY" --from-file=consumers.json="$API_CONSUMERS" \
         --dry-run=client -o yaml | apply_secret)"
   fi
-  require_secret api-secrets "set API_SIGNING_KEY and API_CONSUMERS (File-type CI/CD variables of the environment)"
+  require_secret api-secrets "set API_SIGNING_KEY and API_CONSUMERS (secrets of the GitHub environment)"
   if [[ -n "$changed" ]]; then
     restart_api=true
   fi

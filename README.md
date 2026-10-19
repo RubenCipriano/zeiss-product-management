@@ -8,9 +8,9 @@ A product and stock management system:
 * **Deployment:** everything on Kubernetes, one Kustomize folder per environment (local, staging, production): the
   application (gateway, web app, API autoscaled 2–8 replicas) in the namespace `product-management`, and the shared
   infrastructure that any service on the cluster can use (PostgreSQL, Redis and the logs: Loki, Grafana and Alloy,
-  optional) in the namespace `infra`. GitOps: what runs in an environment is what the deploy repository holds, and
-  only its pipeline applies it. Releases are pulled: the backend and frontend pipelines only publish SemVer versions
-  (a tag `v1.4.0` publishes `api:1.4.0`), and the deploy repository chooses which version each environment runs.
+  optional) in the namespace `infra`. GitOps: what runs in an environment is what `deploy/` holds, and only its
+  workflow applies it. Releases are pulled: the Backend and Frontend workflows only publish SemVer versions (a tag
+  `backend/v1.4.0` publishes `api:1.4.0`), and `deploy/` chooses which version each environment runs.
 * **At scale:** k6 load tests run inside the cluster, including ten teams on 850,000 products; the stock ledger
   measured at 20 million rows.
 * **Stock ledger and idempotency:** every stock change is recorded with who made it; retried requests
@@ -26,14 +26,16 @@ A product and stock management system:
 
 ## Layout
 
-This folder is the local monorepo; the first three folders are each their own GitLab repository:
+This folder is one repository, [github.com/RubenCipriano/zeiss-product-management](https://github.com/RubenCipriano/zeiss-product-management)
+(`git clone https://github.com/RubenCipriano/zeiss-product-management.git`); its CI/CD is GitHub Actions, in
+`.github/workflows/`:
 
-| Folder | Repository | What it holds |
+| Folder | What it holds | Workflows |
 | --- | --- | --- |
-| `backend/` | [gitlab.com/zeiss/backend](https://gitlab.com/zeiss/backend) | the API, its tests, Dockerfile and pipeline ([README](backend/README.md)) |
-| `frontend/` | [gitlab.com/zeiss/frontend](https://gitlab.com/zeiss/frontend) | the web app, the gateway, the Playwright tests, Dockerfiles and pipeline ([README](frontend/README.md)) |
-| `deploy/` | [gitlab.com/zeiss/deploy](https://gitlab.com/zeiss/deploy) | the manifests of every environment, the shared infrastructure, the deploy scripts and the pipeline that applies them ([README](deploy/README.md)) |
-| `docs/`, `tools/` | local only | the documentation; the load tests (`tools/load-tests/`) and the requirements check (`tools/check-requirements.py`) |
+| `backend/` | the API, its tests and Dockerfile ([README](backend/README.md)) | [Backend](.github/workflows/backend.yml): test, build, scan; a tag `backend/vX.Y.Z` publishes `api:X.Y.Z` and a GitHub Release |
+| `frontend/` | the web app, the gateway, the Playwright tests and Dockerfiles ([README](frontend/README.md)) | [Frontend](.github/workflows/frontend.yml): the same for `web` and `gateway`, tag `frontend/vX.Y.Z` |
+| `deploy/` | the manifests of every environment, the shared infrastructure and the deploy scripts ([README](deploy/README.md)) | [Deploy](.github/workflows/deploy.yml) (validate, apply), [Update staging](.github/workflows/update-staging.yml), [Propose production](.github/workflows/propose-production.yml) |
+| `docs/`, `tools/` | the documentation; the load tests (`tools/load-tests/`) and the requirements check (`tools/check-requirements.py`) | none ([CodeQL](.github/workflows/codeql.yml) analyses the whole repository) |
 
 ## Quick start
 
@@ -48,7 +50,7 @@ open http://localhost:8080        # (macOS) sign in as viewer/viewer, clerk/cler
 
 Or the same from a menu: `deploy/menu.sh` (numbered items, a status line, each command shown before it runs). Here
 `deploy.sh local` builds the images from `backend/` and `frontend/`, the checkouts next to `deploy/` (`../backend`,
-`../frontend` as seen from it); with only the deploy repository (a server, a demo) it runs the published images
+`../frontend` as seen from it); with `--version` (a server, a demo) it runs the published images
 instead: [deploy/README.md → Where the images come from](deploy/README.md#where-the-images-come-from-backend-frontend-or-the-registry).
 
 On Windows (Docker Desktop with WSL 2) and on an Ubuntu server (k3s, set up by `deploy/scripts/setup-ubuntu.sh`):
@@ -60,7 +62,7 @@ the first deployment of staging or production follows the same section.
 ## Documentation
 
 The full documentation starts at **[docs/README.md](docs/README.md)**: a guide in thirteen short chapters (a 20-minute
-path and a full path), the decision records, the flows and the load-test results. Each repository's README covers
+path and a full path), the decision records, the flows and the load-test results. Each folder's README covers
 running, releasing or deploying it on its own: [backend](backend/README.md), [frontend](frontend/README.md),
 [deploy](deploy/README.md).
 
@@ -101,17 +103,18 @@ The API with `dotnet run` and the Angular dev server with `npm start`, for worki
 
 ## Deploy
 
-Every environment is a folder of the deploy repository (`deploy/environments/local`, `staging`, `production`) and is
-applied by `deploy/scripts/deploy.sh <environment> [infra|apps|all]`: locally by hand, in staging and production by
-the deploy repository's pipeline. The database schema needs no step of its own: each new API pod applies its
-version's EF Core migrations when it starts (as the schema owner, one pod at a time), before it serves. A release is a
-version tag in backend or frontend (`v1.4.0`): its pipeline publishes the images `X.Y.Z`; the deploy repository pulls
-them in (a scheduled job commits the newest versions to `deploy/environments/staging`; production changes through a
-merge request made with `deploy/scripts/set-version.sh`).
+Every environment is a folder of `deploy/` (`deploy/environments/local`, `staging`, `production`) and is applied by
+`deploy/scripts/deploy.sh <environment> [infra|apps|all]`: locally by hand, in staging and production by the Deploy
+workflow (GitHub Actions; production after a required reviewer approves). The database schema needs no step of its
+own: each new API pod applies its version's EF Core migrations when it starts (as the schema owner, one pod at a
+time), before it serves. A release is a version tag (`backend/v1.4.0` or `frontend/v1.4.0`): its workflow publishes
+the images `X.Y.Z` to ghcr.io; `deploy/` pulls them in (after every release the workflow Update staging commits the
+newest versions to `deploy/environments/staging`; production changes through a pull request made with
+`deploy/scripts/set-version.sh` or the workflow Propose production).
 A rollback is the same command with an older version. The shared infrastructure, databases and passwords, nodes,
-CI/CD variables and Argo CD: [deploy/README.md](deploy/README.md). Each application's pipeline and how to release a
-version: [backend/README.md](backend/README.md#ci), [frontend/README.md](frontend/README.md#ci). The full
-setup from an empty GitLab group: [chapter 12](docs/guide/12-from-zero.md).
+the environments' secrets and Argo CD: [deploy/README.md](deploy/README.md). Each application's workflow and how to
+release a version: [backend/README.md](backend/README.md#ci), [frontend/README.md](frontend/README.md#ci). The full
+setup from an empty GitHub repository: [chapter 12](docs/guide/12-from-zero.md).
 
 ---
 
@@ -127,7 +130,7 @@ infrastructure any service on the cluster can use). Only the gateway is reachabl
 | Namespace `product-management` | **gateway** (nginx, 2–6 pods, HPA): the only way in; per-IP rate limit, token check, 1 s microcache per role, routing | frontend | `deploy/apps/frontend/`; Service `gateway`, `LoadBalancer` on localhost:8080 locally (staging/production: an Ingress with TLS) |
 | | **web** (nginx, 2 pods): the Angular files | frontend | `deploy/apps/frontend/` |
 | | **api** (ASP.NET Core, 2–8 pods, HPA): its only Service, `api`, is headless, so the gateway balances per request and new pods get traffic at once. Each new pod first applies the database migrations as `pm_migrator` (a PostgreSQL advisory lock lets one pod at a time do it), then serves as `pm_app`. Its configuration is plain environment variables in the Deployment; the connection strings name `postgres.infra.svc.cluster.local:5432` and `redis.infra.svc.cluster.local:6379` | backend | `deploy/apps/backend/`; the connection strings in `deploy/environments/<environment>/api.yaml` (the same addresses in every environment) |
-| | **Secrets**: `api-secrets` (the token signing key, the registered consumers), `database-credentials` (the database users and passwords; the API reads `pm_app`'s for its requests and `pm_migrator`'s for its migrations), `redis-credentials` (a copy of the Redis password) | deploy | `api-secrets`: `deploy/scripts/lib/local-secrets.sh` locally, `deploy/scripts/deploy.sh` from the deploy project's CI/CD variables elsewhere; `database-credentials`: `deploy/scripts/lib/create-database.sh`; `redis-credentials`: `deploy/scripts/deploy.sh` |
+| | **Secrets**: `api-secrets` (the token signing key, the registered consumers), `database-credentials` (the database users and passwords; the API reads `pm_app`'s for its requests and `pm_migrator`'s for its migrations), `redis-credentials` (a copy of the Redis password) | deploy | `api-secrets`: `deploy/scripts/lib/local-secrets.sh` locally, `deploy/scripts/deploy.sh` from the GitHub environment's secrets elsewhere; `database-credentials`: `deploy/scripts/lib/create-database.sh`; `redis-credentials`: `deploy/scripts/deploy.sh` |
 | Namespace `infra` | **postgres** (StatefulSet, 1 pod): PostgreSQL 18, one database per service, data on the volume `data-postgres-0` (20 GiB); users `pm_migrator` (owns the schema; the API's migration step at startup) and `pm_app` (the API: rows only, 30 s statement timeout) | deploy | `deploy/infra/postgres.yaml`, `deploy/scripts/lib/create-database.sh` |
 | | **postgres-backup** (CronJob): every night at 02:30 a `pg_dump` of every database into the volume `postgres-backups`, kept 7 days | deploy | `deploy/infra/postgres.yaml` |
 | | **redis** (Deployment, 1 pod): Redis 8 for cache, idempotency keys, rate limits, failed sign-ins; memory only, password | deploy | `deploy/infra/redis.yaml` |
@@ -137,7 +140,7 @@ infrastructure any service on the cluster can use). Only the gateway is reachabl
 
 Every object, Secret and policy: [docs/architecture.md](docs/architecture.md). Every flow (sign-in, token check at the
 gateway, the cache layers, stock changes with idempotency, rate limiting, deployment, CI/CD, logs, autoscaling, load
-tests) as a diagram: [docs/flows.md](docs/flows.md). How the environments and the three repositories work:
+tests) as a diagram: [docs/flows.md](docs/flows.md). How the environments, the folders and the workflows work:
 [ADR 0021](docs/adr/0021-deployment-layout.md) and [deploy/README.md](deploy/README.md).
 
 The API scales on its own (HorizontalPodAutoscaler, 2–8 replicas at 60 % CPU; the gateway 2–6 at 70 %). Change its
@@ -236,27 +239,35 @@ deploy/scripts/ci/validate.sh                                    # every environ
 | End-to-end (Playwright)               | 22 | 11 scenarios on a desktop and a phone viewport against the running system: sign-in per role, the manager's full journey, paging served by the browser cache, security headers, `401` at the gateway, missing files are `404`, a real error thrown in the page read back from Loki (skipped when no Loki is reachable, e.g. with `LOGS=off`); any CSP violation or uncaught error fails the test. |
 | Load (k6, in cluster)                 | 8 scenarios | smoke, load (SLO thresholds), stress, spike, **stock consistency across replicas**, rate limiting, **teams** (many teams on 850,000 products, 30 % duplicate retries, then ledger = applied changes; `PEAK=` turns it into a capacity staircase), **browse** (read capacity with a hot set). See the [results](docs/load-test-results.md). |
 
-The GitLab pipelines, one per repository:
+The GitHub Actions workflows (`.github/workflows/`, GitHub-hosted `ubuntu-24.04` runners):
 
-* `backend/.gitlab-ci.yml`: test (build with warnings as errors, `dotnet format --verify-no-changes`, unit,
-  integration and acceptance tests) → build (API image `api:<short sha>`, migration SQL) → scan (Trivy); on a version
-  tag `vX.Y.Z` also → publish (`publish:api`: the tag `X.Y.Z` on the same image) → release (a GitLab Release with the
-  image digest and the commits since the previous version). It touches no environment;
-* `frontend/.gitlab-ci.yml`: test (ESLint and Prettier, unit, build) → build (web and gateway images) → scan, and on a
-  version tag publish (`web:X.Y.Z`, `gateway:X.Y.Z`) → release, the same way;
-* `deploy/.gitlab-ci.yml`: validate on every change (`validate:manifests`: every environment, the infra and the
-  prepared Argo CD objects with `deploy/scripts/ci/validate.sh`, kubeconform and the project's rules, no Secret where
-  there must be none; `validate:scripts`: shellcheck; `validate:alloy`: `alloy validate` and `alloy fmt`) →
-  `update:staging` on a pipeline schedule (the newest published versions, committed to main) → `deploy:staging`
-  (apply; the new API pods migrate the database as they start) and `smoke:staging` when main changes staging, `apps/`,
-  `infra/` or the deploy scripts → manual `propose:production` (a merge request with staging's versions), manual
-  `deploy:production` and `smoke:production` after it is merged; `infra:staging` / `infra:production` are manual.
+* **Backend** (`backend.yml`, on changes to `backend/` and on tags `backend/v*`): test (build with warnings as errors,
+  `dotnet format --verify-no-changes`, unit, integration and acceptance tests, Testcontainers on the runner's Docker)
+  → build (API image `api:<short sha>` for amd64 and arm64; the migration SQL as an artifact) → scan (Trivy, to
+  Security → Code scanning); on a version tag `backend/vX.Y.Z` also → publish (the tag `X.Y.Z` on the same image) →
+  release (a GitHub Release with the image digest and the commits since the previous version). It touches no
+  environment;
+* **Frontend** (`frontend.yml`, on changes to `frontend/` and on tags `frontend/v*`): test (ESLint and Prettier, unit,
+  build) → build (web and gateway images) → scan, and on a version tag publish (`web:X.Y.Z`, `gateway:X.Y.Z`) →
+  release, the same way;
+* **Deploy** (`deploy.yml`, on changes to `deploy/`): validate on every change (`validate-manifests`: every
+  environment, the infra and the prepared Argo CD objects with `deploy/scripts/ci/validate.sh`, kubeconform and the
+  project's rules, no Secret where there must be none; `validate-scripts`: shellcheck; `validate-alloy`:
+  `alloy validate` and `alloy fmt`) → `deploy-staging` (apply, then the smoke check; the new API pods migrate the
+  database as they start) when main changes staging, `apps/`, `infra/` or the deploy scripts → `deploy-production`
+  after a production pull request is merged and a required reviewer approves; `infra-staging` / `infra-production`
+  and redeploys are started by hand (Run workflow);
+* **Update staging** (`update-staging.yml`, after every successful release run of Backend or Frontend): the newest
+  published versions, committed to main, then deployed and smoke-checked in the same job;
+* **Propose production** (`propose-production.yml`, by hand): a pull request with staging's versions;
+* **CodeQL** (`codeql.yml`): static analysis of the C#, the TypeScript and the workflows; secrets are covered by
+  GitHub's secret scanning and push protection.
 
-The requirements check, the Playwright tests and the load tests need a running system and are not pipeline jobs: run
+The requirements check, the Playwright tests and the load tests need a running system and are not workflow jobs: run
 them by hand against an environment (`BASE_URL=<environment URL> E2E_<ROLE>_SECRET=... npm run e2e`,
-`BASE_URL=... CHECK_CLIENT_ID=... CHECK_CLIENT_SECRET=... python3 tools/check-requirements.py`). The pipelines are **not yet run on a GitLab instance**: each file is validated against
-GitLab's CI schema and its job graph checked with `npx gitlab-ci-local@4 --list` from inside the repository. The
-setup is [chapter 12](docs/guide/12-from-zero.md).
+`BASE_URL=... CHECK_CLIENT_ID=... CHECK_CLIENT_SECRET=... python3 tools/check-requirements.py`). The workflows pass
+`actionlint`; the jobs that deploy need clusters, which do not exist yet. The setup is
+[chapter 12](docs/guide/12-from-zero.md).
 
 What each kind of test proves, with examples: [docs/guide/10-testing-and-quality.md](docs/guide/10-testing-and-quality.md).
 
@@ -525,7 +536,7 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 | [0018](docs/adr/0018-autoscaling-and-scale-testing.md) | Autoscaling and testing at scale |
 | [0019](docs/adr/0019-content-security-policy.md) | Strict Content Security Policy, no third-party assets |
 | [0020](docs/adr/0020-edge-token-verification.md) | Token verification at the gateway, microcache shared per role |
-| [0021](docs/adr/0021-deployment-layout.md) | Deployment layout: a deploy repository applied by its own pipeline (GitOps), one Kustomize folder per environment, revised: pull model with SemVer releases; revised: the API applies its migrations at startup |
+| [0021](docs/adr/0021-deployment-layout.md) | Deployment layout: a deploy repository applied by its own pipeline (GitOps), one Kustomize folder per environment, revised: pull model with SemVer releases; revised: the API applies its migrations at startup; revised: one GitHub repository (`deploy/` a folder of it), GitHub Actions |
 | [0022](docs/adr/0022-database-at-scale.md) | The database at scale: indexes, vacuum, the ledger beyond 20 million rows |
 
 ---
@@ -572,19 +583,21 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 * least-privilege database users; migrations applied by the API at startup, as the schema owner, one replica at a
   time (no separate step to forget);
 * a nightly `pg_dump` of every database (CronJob `postgres-backup`, 7 days), on the database's node;
-* one Kustomize folder per environment in the deploy repository, local, staging and production (Ingress with a
-  cert-manager certificate in staging and production); Secrets created by the deploy pipeline from CI/CD variables
-  or, for the database and Redis passwords, generated at random in the cluster; none stored in a repository;
+* one Kustomize folder per environment in `deploy/`, local, staging and production (Ingress with a cert-manager
+  certificate in staging and production); Secrets created by the Deploy workflow from the GitHub environments'
+  secrets or, for the database and Redis passwords, generated at random in the cluster; none stored in the repository;
 * logs of every component, the browser's errors included, in Grafana (Loki, 14 days' retention), with two
   dashboards, 12 alert rules and their runbooks;
-* one GitLab pipeline per repository, GitOps with a pull release model: the application pipelines only publish SemVer
-  versions and GitLab Releases; the deploy repository pulls the newest into staging on a schedule and promotes to
-  production by merge request, then applies (the new API pods migrate the database as they start); rollback is the same
-  command with an older version (written, not yet run on a GitLab instance); load tests with SLO thresholds.
+* GitHub Actions workflows per folder, GitOps with a pull release model: the Backend and Frontend workflows only
+  publish SemVer versions and GitHub Releases; `deploy/` pulls the newest into staging after every release and
+  promotes to production by pull request with a required reviewer, then applies (the new API pods migrate the
+  database as they start); rollback is the same command with an older version (written and linted, the deploy jobs not
+  yet run against a cluster); CodeQL and Trivy in Security → Code scanning; load tests with SLO thresholds.
 
 **Next** (full assessment: [chapter 11](docs/guide/11-production-readiness.md); runbook: [chapter 12](docs/guide/12-from-zero.md)):
 
-* **Secrets** from a secret manager (External Secrets or Vault) instead of CI/CD variables, for audit and rotation.
+* **Secrets** from a secret manager (External Secrets or Vault) instead of the GitHub environments' secrets, for audit
+  and rotation.
 * **Backups off the node** and restores rehearsed: the nightly dumps shipped to object storage, or volume snapshots
   (chapter 12); for a standby and point-in-time recovery, a PostgreSQL operator such as CloudNativePG
   ([ADR 0006](docs/adr/0006-postgresql.md)); later PgBouncer and read replicas.
@@ -597,7 +610,7 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 * **Keyset pagination** (`?after=`) for constant-time deep pages; monthly partitions for `stock_movements` past
   50–100 million rows ([ADR 0022](docs/adr/0022-database-at-scale.md)).
 * A replicated Redis, so idempotency claims survive a Redis restart.
-* **Argo CD** pointed at `deploy/environments/<environment>` instead of `kubectl apply` from the deploy pipeline
+* **Argo CD** pointed at `deploy/environments/<environment>` instead of `kubectl apply` from the Deploy workflow
   (pruning, drift detection), with Argo CD Image Updater for staging (no migration hook needed: the API migrates
   itself): prepared and validated in `deploy/argocd/`, not installed.
 
@@ -605,11 +618,11 @@ Each decision has an ADR in [`docs/adr`](docs/adr/README.md):
 
 ## Repository layout
 
-The three repositories, their folders and scripts are described in their own READMEs:
+The three application folders, their subfolders and scripts are described in their own READMEs:
 [backend/README.md](backend/README.md) (the solution's projects, the image and its commands),
 [frontend/README.md](frontend/README.md) (the Angular structure, the gateway, the images) and
-[deploy/README.md](deploy/README.md) (`apps/`, `environments/`, `infra/`, `argocd/`, `scripts/`). The local-only folders:
-`docs/` (this documentation) and `tools/` (`load-tests/`: the k6 scenarios, `run.sh`, the bulk seed and the data
+[deploy/README.md](deploy/README.md) (`apps/`, `environments/`, `infra/`, `argocd/`, `scripts/`). The workflows are in `.github/workflows/` (and the
+composite action `.github/actions/environment-secrets`). The other folders: `docs/` (this documentation) and `tools/` (`load-tests/`: the k6 scenarios, `run.sh`, the bulk seed and the data
 checks; `check-requirements.py`: the assessment's requirements, checked against the running system).
 
 ## Tech stack
@@ -621,5 +634,5 @@ checks; `check-requirements.py`: the assessment's requirements, checked against 
 | Security | JWT (ES256) issued by the API and verified at the gateway (nginx njs), PBKDF2 secret hashes, ASP.NET Core authorization and rate limiting |
 | Frontend | Angular 22 (standalone, zoneless, signals), Tailwind CSS 4, Angular CDK, Vitest, ESLint, Prettier |
 | Testing  | xUnit v3 (Microsoft Testing Platform), Shouldly, NSubstitute, Testcontainers, Respawn, Reqnroll, k6 |
-| Delivery | Docker (images), Kubernetes for everything (Docker Desktop locally; k3s as the production target), Kustomize, nginx, GitLab CI/CD, Trivy |
+| Delivery | Docker (images), Kubernetes for everything (Docker Desktop locally; k3s as the production target), Kustomize, nginx, GitHub Actions, ghcr.io, Trivy, CodeQL |
 | Operations | Grafana 12, Loki 3, Grafana Alloy (logs only), Grafana Faro (browser errors) |

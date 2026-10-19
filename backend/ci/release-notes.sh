@@ -1,15 +1,16 @@
 #!/bin/sh
-# Writes the description of a GitLab Release (Markdown, to stdout): the images the version published, with their
-# digests, and the commits since the previous version. Run by the pipeline's release job (POSIX sh: the release-cli
-# image has no bash); the same script is in the backend and the frontend repository.
+# Writes the description of a GitHub Release (Markdown, to stdout): the images the version published, with their
+# digests, and the commits since the previous version that changed this folder (backend/). Run by the workflow's
+# release job from this folder (POSIX sh); the same script is in backend/ci and frontend/ci.
 #
 #   ci/release-notes.sh <tag> <image reference>...
-#   ci/release-notes.sh v1.4.0 registry.gitlab.com/zeiss/backend/api:1.4.0@sha256:...
+#   ci/release-notes.sh backend/v1.4.0 ghcr.io/rubencipriano/zeiss-product-management/api:1.4.0@sha256:...
 #
-# The previous version is the newest earlier tag v* reachable from this one: for a release X.Y.Z the previous release
-# (release candidates are skipped, so 1.4.0 lists everything since 1.3.0), for a release candidate the previous tag of
-# any kind. Without one, every commit up to the tag is listed. Needs git with the whole history and the tags
-# (GIT_DEPTH 0, git fetch --tags).
+# A tag is <component>/vX.Y.Z (backend/v1.4.0, frontend/v1.4.0: one repository, two release lines). The previous
+# version is the newest earlier tag of the same component reachable from this one: for a release X.Y.Z the previous
+# release (release candidates are skipped, so 1.4.0 lists everything since 1.3.0), for a release candidate the previous
+# tag of any kind. Without one, every commit up to the tag is listed. Needs git with the whole history and the tags
+# (actions/checkout with fetch-depth: 0).
 set -eu
 
 if [ $# -lt 1 ]; then
@@ -18,10 +19,12 @@ if [ $# -lt 1 ]; then
 fi
 tag="$1"
 shift
+# "backend/" of backend/v1.4.0 (empty for a plain v1.4.0).
+prefix="${tag%v[0-9]*}"
 
 case "$tag" in
-  *-rc.*) previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$tag^" 2>/dev/null || true)" ;;
-  *) previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude 'v*-rc.*' "$tag^" 2>/dev/null || true)" ;;
+  *-rc.*) previous="$(git describe --tags --abbrev=0 --match "${prefix}v[0-9]*" "$tag^" 2>/dev/null || true)" ;;
+  *) previous="$(git describe --tags --abbrev=0 --match "${prefix}v[0-9]*" --exclude "${prefix}v*-rc.*" "$tag^" 2>/dev/null || true)" ;;
 esac
 
 echo "## Images"
@@ -43,8 +46,9 @@ else
   range="$tag"
 fi
 echo
-git log --no-merges --format='- %s (%h, %an)' "$range"
-if [ -n "$previous" ] && [ -n "${CI_PROJECT_URL:-}" ]; then
+# Only the commits that changed this folder: the other component's work is in its own releases.
+git log --no-merges --format='- %s (%h, %an)' "$range" -- .
+if [ -n "$previous" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
   echo
-  echo "Full comparison: $CI_PROJECT_URL/-/compare/$previous...$tag"
+  echo "Full comparison: ${GITHUB_SERVER_URL:-https://github.com}/$GITHUB_REPOSITORY/compare/$previous...$tag"
 fi

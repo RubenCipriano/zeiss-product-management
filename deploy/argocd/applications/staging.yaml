@@ -1,21 +1,22 @@
-# Argo CD Application for staging: Argo CD (inside the cluster) watches environments/staging on main of this repository
-# and applies every commit by itself, instead of the pipeline's deploy:staging job.
+# Argo CD Application for staging: Argo CD (inside the cluster) watches deploy/environments/staging on main of this
+# repository
+# and applies every commit by itself, instead of the Deploy workflow's deploy-staging job.
 #
 #   automated sync   a new commit on main is applied within about 3 minutes (Argo CD's polling interval), or at once
-#                    with a GitLab webhook to Argo CD
+#                    with a GitHub webhook to Argo CD
 #   prune            an object removed from git is removed from the cluster
 #   selfHeal         a change made by hand in the cluster (kubectl edit) is put back to what git says
 #
 # The annotations are for Argo CD Image Updater (the ImageUpdater in image-updater.yaml reads them): it does what the
-# pipeline's update:staging job does today. It checks the registry for new versions of the three images, takes the
-# newest X.Y.Z (SemVer; pre-releases -rc.N are left out by allow-tags), and writes it into
-# environments/staging/kustomization.yaml (`images:` newTag) as a git commit on main (write-back-method git), pushed
-# over SSH with the deploy key in the Secret argocd/deploy-write-key. Argo CD then syncs that commit. So staging's
-# history stays in git.
+# workflow update-staging does today. It checks the registry for new versions of the three images, takes the newest
+# X.Y.Z (SemVer; pre-releases -rc.N are left out by allow-tags), and writes it into
+# deploy/environments/staging/kustomization.yaml (`images:` newTag) as a git commit on main (write-back-method git),
+# pushed over SSH with the deploy key in the Secret argocd/deploy-write-key. Argo CD then syncs that commit. So
+# staging's history stays in git.
 #
-# The repository is reached over SSH (repoURL git@gitlab.com:...): Argo CD reads it with a read-only deploy key (the
-# repository Secret repo-zeiss-deploy), Image Updater pushes with a second deploy key that has write access. Deploy keys
-# exist on every GitLab tier (README.md, "Moving to Argo CD", steps 3 and 4).
+# The repository is reached over SSH (repoURL git@github.com:...): Argo CD reads it with a read-only deploy key (the
+# repository Secret repo-zeiss-deploy), Image Updater pushes with a second deploy key that has write access (GitHub:
+# Settings → Deploy keys → "Allow write access"; README.md, "Moving to Argo CD", steps 3 and 4).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -26,7 +27,7 @@ metadata:
     image-updater: product-management
   annotations:
     # The images to watch, as <alias>=<repository>; the alias names them in the annotations below.
-    argocd-image-updater.argoproj.io/image-list: api=registry.gitlab.com/zeiss/backend/api,web=registry.gitlab.com/zeiss/frontend/web,gateway=registry.gitlab.com/zeiss/frontend/gateway
+    argocd-image-updater.argoproj.io/image-list: api=ghcr.io/rubencipriano/zeiss-product-management/api,web=ghcr.io/rubencipriano/zeiss-product-management/web,gateway=ghcr.io/rubencipriano/zeiss-product-management/gateway
     # Newest SemVer version; only plain releases X.Y.Z.
     argocd-image-updater.argoproj.io/api.update-strategy: semver
     argocd-image-updater.argoproj.io/api.allow-tags: regexp:^[0-9]+\.[0-9]+\.[0-9]+$
@@ -38,14 +39,14 @@ metadata:
     argocd-image-updater.argoproj.io/api.kustomize.image-name: product-management/api
     argocd-image-updater.argoproj.io/web.kustomize.image-name: product-management/web
     argocd-image-updater.argoproj.io/gateway.kustomize.image-name: product-management/gateway
-    # The registries are private: the group deploy token (read_registry), as a docker-registry Secret in argocd.
-    argocd-image-updater.argoproj.io/api.pull-secret: pullsecret:argocd/gitlab-registry
-    argocd-image-updater.argoproj.io/web.pull-secret: pullsecret:argocd/gitlab-registry
-    argocd-image-updater.argoproj.io/gateway.pull-secret: pullsecret:argocd/gitlab-registry
+    # The registry may be private: a token with read:packages, as a docker-registry Secret in argocd.
+    argocd-image-updater.argoproj.io/api.pull-secret: pullsecret:argocd/registry-credentials
+    argocd-image-updater.argoproj.io/web.pull-secret: pullsecret:argocd/registry-credentials
+    argocd-image-updater.argoproj.io/gateway.pull-secret: pullsecret:argocd/registry-credentials
     # Write the new versions to git (not only into Argo CD's state): a commit on main to the kustomization.yaml of the
     # Application's path, pushed to spec.source.repoURL over SSH with the Secret argocd/deploy-write-key (key
-    # sshPrivateKey: the private half of a deploy key of this project with "Grant write permissions to this key",
-    # allowed to push to the protected main). The Secret must be in the ImageUpdater's namespace (argocd).
+    # sshPrivateKey: the private half of a deploy key of this repository with "Allow write access", allowed to push to
+    # the protected main). The Secret must be in the ImageUpdater's namespace (argocd).
     argocd-image-updater.argoproj.io/write-back-method: git:secret:argocd/deploy-write-key
     argocd-image-updater.argoproj.io/write-back-target: kustomization
     argocd-image-updater.argoproj.io/git-branch: main
@@ -53,9 +54,9 @@ spec:
   project: default
   source:
     # SSH, so Image Updater's write-back can push with a deploy key (repository Secret: README.md, "Moving to Argo CD").
-    repoURL: git@gitlab.com:zeiss/deploy.git
+    repoURL: git@github.com:RubenCipriano/zeiss-product-management.git
     targetRevision: main
-    path: environments/staging
+    path: deploy/environments/staging
   destination:
     server: https://kubernetes.default.svc
     namespace: product-management

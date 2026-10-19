@@ -1,6 +1,6 @@
 # Architecture
 
-How the system is put together and what every running piece does. The diagrams are Mermaid (rendered by GitLab
+How the system is put together and what every running piece does. The diagrams are Mermaid (rendered by GitHub
 and VS Code). How requests travel through it, step by step, is in [flows.md](flows.md); decisions and their
 reasons are in the [ADRs](adr/README.md).
 
@@ -16,13 +16,14 @@ reasons are in the [ADRs](adr/README.md).
 
 Everything runs in the Kubernetes cluster, in two namespaces: `product-management` holds this application (stateless
 pods), and `infra` holds the shared infrastructure that any service on the cluster can use: PostgreSQL, Redis and the
-logs. The code is in two GitLab repositories, **backend** (the API) and **frontend** (the web app and the gateway);
-everything that runs in a cluster is described by a third, **deploy** (`deploy/`), whose pipeline is the only one that
-applies it (GitOps, [ADR 0021](adr/0021-deployment-layout.md)):
+logs. The code is in two folders of the one GitHub repository, **backend** (the API) and **frontend** (the web app
+and the gateway); everything that runs in a cluster is described by a third, **deploy** (`deploy/`), whose workflow
+(Deploy, GitHub Actions) is the only one that applies it (GitOps, [ADR 0021](adr/0021-deployment-layout.md)):
 
 * `deploy/apps/backend`, `deploy/apps/frontend`: the applications' manifests, the same in every environment;
 * `deploy/environments/{local,staging,production}`: one Kustomize folder per environment with what differs and, in
-  staging and production, the released image tags, which the backend and frontend pipelines update by committing;
+  staging and production, the released image versions (`ghcr.io/rubencipriano/zeiss-product-management/...:X.Y.Z`),
+  pulled in by `deploy/` (the workflow Update staging commits staging's; production's change by pull request);
 * `deploy/infra/`: the namespace `infra`, from one manifest per component (`postgres.yaml`, `redis.yaml`,
   `logs.yaml`);
 * `deploy/scripts/`: `deploy.sh <environment> [infra|apps|all]` applies them; `infra.sh` the shared infrastructure;
@@ -46,7 +47,7 @@ flowchart LR
             gw["<b>gateway</b> nginx ×2–6 (HPA)<br/>rate limit · JWT check · microcache<br/>(frontend)"]
             web["<b>web</b> nginx ×2<br/>Angular files<br/>(frontend)"]
             api["<b>api</b> ASP.NET Core ×2–8 (HPA)<br/>headless Service api<br/>migrates the schema at startup<br/>(backend)"]
-            sec["Secrets api-secrets,<br/>database-credentials, redis-credentials,<br/>gitlab-registry (staging, production)"]
+            sec["Secrets api-secrets,<br/>database-credentials, redis-credentials,<br/>registry-credentials (staging, production)"]
         end
         subgraph inf["namespace infra (shared)"]
             pg[("<b>PostgreSQL 18</b> StatefulSet<br/>pm_app · pm_migrator")]
@@ -114,8 +115,8 @@ port-forward the Deployment (`kubectl -n product-management port-forward deploym
 | Object                          | What it holds / does |
 | ------------------------------- | -------------------- |
 | API environment                 | Every setting as a plain env entry in `deploy/apps/backend/deployment.yaml` (token lifetime, rate limits, sign-in throttle, idempotency lifetimes, `ApplyMigrationsOnStartup=true` with the migrator's user and password from `database-credentials`); each environment's `api.yaml` sets what differs and always `ConnectionStrings__ProductManagement` (user `pm_app`, pool of 10 per replica, no password), `ConnectionStrings__Redis` (no password) and `Database__SeedSampleData` (`true` locally and in staging, `false` in production). A change rolls the pods. |
-| Secret `api-secrets`            | The API's own keys: `signing-key` → `Authentication__SigningKey`, the ES256 (P-256) private key that signs access tokens (only the API holds it; verifiers get the public key from `/.well-known/jwks.json`); `consumers.json` → the file `/app/config/consumers.json` (client id, PBKDF2 hash of the secret, roles). Locally `api-secrets-<hash>`, generated from `deploy/environments/local/generated/`; in staging and production made by `deploy/scripts/deploy.sh` from the deploy project's CI/CD variables `API_SIGNING_KEY`, `API_CONSUMERS`. |
-| Secret `gitlab-registry`        | Staging and production only: the credential every pod pulls its image with (`imagePullSecrets`), from the `zeiss` group's deploy token `gitlab-deploy-token` (`read_registry`, reads both registries). Made by `deploy/scripts/deploy.sh` (the migration pod pulls with it too). |
+| Secret `api-secrets`            | The API's own keys: `signing-key` → `Authentication__SigningKey`, the ES256 (P-256) private key that signs access tokens (only the API holds it; verifiers get the public key from `/.well-known/jwks.json`); `consumers.json` → the file `/app/config/consumers.json` (client id, PBKDF2 hash of the secret, roles). Locally `api-secrets-<hash>`, generated from `deploy/environments/local/generated/`; in staging and production made by `deploy/scripts/deploy.sh` from the GitHub environment's secrets `API_SIGNING_KEY`, `API_CONSUMERS`. |
+| Secret `registry-credentials`   | Staging and production (and local with published images): the credential every pod pulls its image from ghcr.io with (`imagePullSecrets`), from the environment's secrets `REGISTRY_USER` / `REGISTRY_PASSWORD` (a GitHub user and a classic personal access token with `read:packages`). Made by `deploy/scripts/deploy.sh`. |
 | Secret `database-credentials`   | Made by `deploy/scripts/lib/create-database.sh` (random passwords, kept on re-runs unless `--rotate`): `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password`. The API takes `app-password` → `PGPASSWORD` (Npgsql uses it when the connection string has none, the readiness check's connection too), and `migrator-user` / `migrator-password` → `Database__MigratorUsername` / `Database__MigratorPassword` for its migration step at startup. |
 | Secret `redis-credentials`      | `password` → `Redis__Password`: a copy of the shared Redis' password (`infra/redis-auth`), made by `deploy/scripts/deploy.sh` on every deploy, because a pod can only read the Secrets of its own namespace. |
 | Secrets in `infra`              | `postgres-admin` (PostgreSQL's superuser), `redis-auth` (Redis): random, created once by `deploy/scripts/infra.sh up`, kept by `down` unless `--delete-data`; `loki-external` only with `LOKI_URL`. |
@@ -124,10 +125,10 @@ port-forward the Deployment (`kubectl -n product-management port-forward deploym
 | PodDisruptionBudgets            | `api`, `web`, `gateway`: at least one pod stays up during node maintenance. |
 | NetworkPolicies                 | The API and web pods accept connections only from the gateway; so does Alloy's browser-error receiver. PostgreSQL and Redis have cluster-internal Services only, never published outside the cluster, and are protected by their passwords. |
 
-Secrets in the repositories: none. Locally `deploy/scripts/lib/local-secrets.sh` generates the API's own keys on each
-machine (gitignored); staging and production get them from the deploy project's CI/CD variables, which
-`deploy/scripts/deploy.sh` turns into `api-secrets`, and the pull credential from the group deploy token. The database
-and Redis passwords are never variables: `deploy/scripts/infra.sh` and `deploy/scripts/lib/create-database.sh` generate
+Secrets in the repository: none. Locally `deploy/scripts/lib/local-secrets.sh` generates the API's own keys on each
+machine (gitignored); staging and production get them from the secrets of their GitHub environment, which
+`deploy/scripts/deploy.sh` turns into `api-secrets`, and the pull credential from `REGISTRY_USER` /
+`REGISTRY_PASSWORD` there. The database and Redis passwords are never secrets of the repository: `deploy/scripts/infra.sh` and `deploy/scripts/lib/create-database.sh` generate
 them in each cluster.
 
 ## Caching

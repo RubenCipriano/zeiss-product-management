@@ -16,8 +16,8 @@
 # Secrets database-credentials (scripts/lib/create-database.sh) and redis-credentials (scripts/deploy.sh).
 #
 # Needs openssl and python3. The user-secrets step needs the .NET SDK and is skipped without it (run the script again
-# once it is installed). Staging and production never use these: their secrets come from CI/CD variables
-# (API_SIGNING_KEY, API_CONSUMERS; scripts/deploy.sh).
+# once it is installed). Staging and production never use these: their secrets come from the GitHub environments'
+# secrets (API_SIGNING_KEY, API_CONSUMERS; scripts/deploy.sh).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

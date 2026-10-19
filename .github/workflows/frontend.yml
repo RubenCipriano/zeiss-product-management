@@ -1,0 +1,294 @@
+# CI of the frontend (the web app and the gateway, frontend/). It only builds and publishes: it tests, builds and scans
+# the two images, and when someone tags a commit with a version it publishes that version of both and creates a GitHub
+# Release. It never touches an environment or deploy/: that folder chooses which published version each environment
+# runs and applies it (the "pull" model, deploy.yml and update-staging.yml).
+#
+#   test ─────► build ─────────► scan ──────► publish (tag frontend/vX.Y.Z only) ──► release (same tag only)
+#   lint,       web and gateway  Trivy        both images get the tag X.Y.Z           a GitHub Release with both image
+#   format,     images           (fails on    (no v, SemVer), same digest             references and digests, and the
+#   unit tests, :<short sha>     critical)                                            commits since the previous version
+#   build
+#
+# Pull requests and pushes to main: test, build, scan; the images are
+# ghcr.io/<owner>/zeiss-product-management/{web,gateway}:<short sha> (builds of that commit, never deployed by a
+# version rule). Tags frontend/v<MAJOR>.<MINOR>.<PATCH> or frontend/v<MAJOR>.<MINOR>.<PATCH>-rc.<N>
+# (frontend/README.md, "How to release a version"): test, build (reusing main's images of that commit when they exist),
+# scan, then publish adds the tag <MAJOR>.<MINOR>.<PATCH>[-rc.<N>] to both images, and release creates the GitHub
+# Release. web and gateway always share a version: they are one frontend release. update-staging.yml then picks the
+# newest X.Y.Z up for staging; production changes through a pull request.
+#
+# The end-to-end tests (Playwright, e2e/) are not a job here: they need the whole running system (gateway, API, Redis,
+# PostgreSQL). Run them against an environment: BASE_URL=https://<environment host> npm run e2e (frontend/README.md).
+#
+# Nothing has to be configured: the jobs use only the workflow's own GITHUB_TOKEN (ghcr.io, releases, code scanning).
+# Protect the tags frontend/v* (Settings → Rules → Rulesets, a tag ruleset) so only maintainers release. A version is
+# never overwritten: publish refuses to move an existing X.Y.Z to another image.
+name: Frontend
+
+on:
+  push:
+    branches: [main]
+    tags: ["frontend/v*"]
+    paths: ["frontend/**", ".github/workflows/frontend.yml"]
+  pull_request:
+    paths: ["frontend/**", ".github/workflows/frontend.yml"]
+  workflow_dispatch:
+
+# A new commit on the same branch or pull request cancels the run before it; a version tag always finishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  # Every image is built for both processor families: ordinary x86-64 servers and ARM ones (Apple silicon VMs,
+  # Graviton, Raspberry Pi). A node pulls only its own platform from the image index. The Dockerfiles build on the
+  # runner's own platform for both, so nothing is emulated.
+  PLATFORMS: linux/amd64,linux/arm64
+  # Tool versions, pinned (bump them with Dependabot or by hand).
+  TRIVY_IMAGE: aquasec/trivy:0.74.0
+  CRANE_VERSION: v0.20.3
+
+defaults:
+  run:
+    shell: bash
+    working-directory: frontend
+
+jobs:
+  # The names every other job uses: the images of this commit, and for a version tag the version.
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      prefix: ${{ steps.meta.outputs.prefix }}
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      push: ${{ steps.meta.outputs.push }}
+    steps:
+      - id: meta
+        working-directory: .
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # A pull request from a fork gets no token that can write packages: its images are built, not pushed.
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          version=""
+          if [[ "$GITHUB_REF" == refs/tags/frontend/v* ]]; then
+            version="${GITHUB_REF_NAME#frontend/v}"
+            # SemVer with an optional release candidate -rc.N; any other frontend/v* tag is refused.
+            if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]]; then
+              echo "::error::$GITHUB_REF_NAME is not frontend/vX.Y.Z or frontend/vX.Y.Z-rc.N"
+              exit 1
+            fi
+          fi
+          push=true
+          [[ "$FORK" != true ]] || push=false
+          {
+            echo "prefix=ghcr.io/${GITHUB_REPOSITORY,,}"
+            echo "tag=${SHA::8}"
+            echo "version=$version"
+            echo "push=$push"
+          } >> "$GITHUB_OUTPUT"
+
+  # ─── test ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run test:ci -- --reporters=junit --reporters=default --output-file=reports/junit.xml
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: frontend-test-results
+          path: frontend/reports/junit.xml
+          retention-days: 30
+
+  # ─── build ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  # BuildKit (docker buildx) with the same Dockerfiles as a local build, and a layer cache in GitHub's cache service.
+  # APP_VERSION is the release the web app reports with its browser errors (the gateway ignores it): the commit. For a
+  # version tag the commit was normally built already by its run on main: that image is reused (the version is then
+  # exactly the bits that were tested on main), and it is built only if it does not exist.
+  build:
+    needs: meta
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - name: web
+            context: frontend
+          - name: gateway
+            context: frontend/gateway
+    env:
+      IMAGE: ${{ needs.meta.outputs.prefix }}/${{ matrix.name }}:${{ needs.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/login-action@v3
+        if: needs.meta.outputs.push == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: existing
+        if: needs.meta.outputs.version != ''
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "$IMAGE exists (built by the run on main): reusing it"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/setup-buildx-action@v3
+        if: steps.existing.outputs.found != 'true'
+      - uses: docker/build-push-action@v6
+        if: steps.existing.outputs.found != 'true'
+        with:
+          context: ${{ matrix.context }}
+          platforms: ${{ env.PLATFORMS }}
+          pull: true
+          push: ${{ needs.meta.outputs.push == 'true' }}
+          tags: ${{ env.IMAGE }}
+          build-args: APP_VERSION=${{ needs.meta.outputs.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+  # ─── scan ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  # Every vulnerability goes to the code scanning report (Security → Code scanning); the job fails on CRITICAL ones
+  # that have a fix (upgrade the base image or the package, or record an accepted risk in frontend/.trivyignore with a
+  # reason and an expiry).
+  scan:
+    needs: [meta, build]
+    if: needs.meta.outputs.push == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [web, gateway]
+    env:
+      IMAGE: ${{ needs.meta.outputs.prefix }}/${{ matrix.name }}:${{ needs.meta.outputs.tag }}
+      TRIVY_USERNAME: ${{ github.actor }}
+      TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-${{ github.run_id }}-${{ matrix.name }}
+          restore-keys: trivy-
+      - name: Trivy
+        run: |
+          mkdir -p ~/.cache/trivy
+          trivy() {
+            docker run --rm -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_NO_PROGRESS=true -e TRIVY_SCANNERS=vuln \
+              -v "$HOME/.cache/trivy:/root/.cache/trivy" -v "$PWD:/work" -w /work "$TRIVY_IMAGE" "$@"
+          }
+          trivy image --format sarif --output trivy.sarif "$IMAGE"
+          trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed "$IMAGE"
+      - uses: github/codeql-action/upload-sarif@v4
+        if: ${{ !cancelled() && hashFiles('frontend/trivy.sarif') != '' }}
+        with:
+          sarif_file: frontend/trivy.sarif
+          category: trivy-${{ matrix.name }}
+
+  # ─── publish (version tags only) ──────────────────────────────────────────────────────────────────────────────────
+
+  # Publishes the version: the tag <MAJOR>.<MINOR>.<PATCH>[-rc.<N>] (the git tag without frontend/v, SemVer as Argo CD
+  # Image Updater's semver strategy and deploy/scripts/versions.sh expect it) on the images this run tested and
+  # scanned. `crane tag` adds a tag in the registry without pulling or pushing the image, so the version has the same
+  # digest as the commit's build. One job for both images, after every test and scan: a version is published for both
+  # or for none (both are checked before either is tagged).
+  publish:
+    needs: [meta, test, build, scan]
+    if: needs.meta.outputs.version != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      web: ${{ steps.publish.outputs.web }}
+      gateway: ${{ steps.publish.outputs.gateway }}
+    env:
+      PREFIX: ${{ needs.meta.outputs.prefix }}
+      TAG: ${{ needs.meta.outputs.tag }}
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - name: Install crane
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -sSfL "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/go-containerregistry_Linux_x86_64.tar.gz" \
+            | tar -xzf - crane
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - id: publish
+        working-directory: .
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GITHUB_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          # A version is never overwritten: if X.Y.Z already exists it must already be this very image (a re-run of
+          # this job); anything else stops the release, before either image is tagged.
+          for name in web gateway; do
+            if existing="$(crane digest "$PREFIX/$name:$VERSION" 2>/dev/null)" \
+              && [[ "$existing" != "$(crane digest "$PREFIX/$name:$TAG")" ]]; then
+              echo "::error::$PREFIX/$name:$VERSION already exists as another image ($existing): versions are never overwritten, release a new one"
+              exit 1
+            fi
+          done
+          for name in web gateway; do
+            crane tag "$PREFIX/$name:$TAG" "$VERSION"
+            digest="$(crane digest "$PREFIX/$name:$VERSION")"
+            echo "$name=$digest" >> "$GITHUB_OUTPUT"
+            echo "Published $PREFIX/$name:$VERSION ($digest)"
+          done
+
+  # ─── release (version tags only) ──────────────────────────────────────────────────────────────────────────────────
+
+  # A GitHub Release named after the tag (Releases), with the gh CLI of the runner. Its description
+  # (ci/release-notes.sh) lists the two published images with their digests and the commits since the previous
+  # frontend version.
+  release:
+    needs: [meta, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PREFIX: ${{ needs.meta.outputs.prefix }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      WEB_DIGEST: ${{ needs.publish.outputs.web }}
+      GATEWAY_DIGEST: ${{ needs.publish.outputs.gateway }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: |
+          ci/release-notes.sh "$GITHUB_REF_NAME" \
+            "$PREFIX/web:$VERSION@$WEB_DIGEST" "$PREFIX/gateway:$VERSION@$GATEWAY_DIGEST" > release-notes.md
+          cat release-notes.md
+          prerelease=()
+          [[ "$VERSION" != *-rc.* ]] || prerelease=(--prerelease)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md "${prerelease[@]}"
+          fi

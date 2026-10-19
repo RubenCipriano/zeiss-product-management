@@ -118,10 +118,11 @@ tools/load-tests/verify-data.sh                              # data invariants
 On macOS with Homebrew, the .NET SDK may need
 `export PATH="/opt/homebrew/opt/dotnet/bin:$PATH" DOTNET_ROOT=/opt/homebrew/opt/dotnet/libexec`.
 
-CI runs the back-end and front-end tests, lint and format checks on every merge request and commit
-([chapter 9](09-deployment-and-operations.md#cicd-pipelines)); the back-end job also fails on unformatted code
-(`dotnet format --verify-no-changes`). The checks that need a running system (the requirements check, the
-end-to-end tests, Lighthouse and the load tests) are not pipeline jobs: they are run by hand against an environment,
+CI (the GitHub Actions workflows Backend and Frontend) runs the back-end and front-end tests, lint and format
+checks on every pull request and commit to `main` that touches their folder
+([chapter 9](09-deployment-and-operations.md#cicd-workflows)); the back-end job also fails on unformatted code
+(`dotnet format --verify-no-changes`), and the JUnit reports are kept as run artifacts. The checks that need a
+running system (the requirements check, the end-to-end tests, Lighthouse and the load tests) are not workflow jobs: they are run by hand against an environment,
 the end-to-end tests with `BASE_URL=<environment URL> npm run e2e`.
 
 ## Where to look

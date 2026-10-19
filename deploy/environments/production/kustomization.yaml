@@ -1,14 +1,14 @@
 # Production environment: the API, the web app and the gateway, at versions that staging ran first.
 #
-# Changed only through merge requests that set a newTag below: a person runs scripts/set-version.sh production
-# <image> <version> (or starts the pipeline's propose:production job, which proposes the versions staging runs).
-# Merging it is the release decision; this repository's pipeline then offers deploy:production (manual,
-# scripts/deploy.sh production: migrations, then apply). Rollback: the same command with the older version (or a revert
-# of the merge), through a merge request.
+# Changed only through pull requests that set a newTag below: a person runs scripts/set-version.sh production
+# <image> <version> (or starts the workflow propose-production, which proposes the versions staging runs). Merging it
+# is the release decision; the Deploy workflow then runs deploy-production once a reviewer of the environment
+# production approves (scripts/deploy.sh production: apply; the new API pods migrate the database). Rollback: the same
+# command with the older version (or a revert of the merge), through a pull request.
 #
-# No Secret is here: scripts/deploy.sh creates the registry credential (gitlab-registry) and api-secrets from
-# protected CI/CD variables and copies redis-credentials from the shared Redis; database-credentials is made once by
-# scripts/lib/create-database.sh. Replace the example.* host in ingress.yaml with the real one.
+# No Secret is here: scripts/deploy.sh creates the registry credential (registry-credentials) and api-secrets from the
+# production environment's secrets and copies redis-credentials from the shared Redis; database-credentials is made
+# once by scripts/lib/create-database.sh. Replace the example.* host in ingress.yaml with the real one.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # Also on what the environment adds (the Ingress); apps/ labels the rest.
@@ -23,15 +23,15 @@ patches:
   - path: api.yaml
   - path: gateway.yaml
   - path: registry.yaml
-# The deployed versions (SemVer X.Y.Z): changed only by merge requests (scripts/set-version.sh production ...).
+# The deployed versions (SemVer X.Y.Z): changed only by pull requests (scripts/set-version.sh production ...).
 # "unreleased": no version chosen yet; scripts/deploy.sh refuses to apply until every image has one.
 images:
   - name: product-management/api
-    newName: registry.gitlab.com/zeiss/backend/api
+    newName: ghcr.io/rubencipriano/zeiss-product-management/api
     newTag: unreleased
   - name: product-management/web
-    newName: registry.gitlab.com/zeiss/frontend/web
+    newName: ghcr.io/rubencipriano/zeiss-product-management/web
     newTag: unreleased
   - name: product-management/gateway
-    newName: registry.gitlab.com/zeiss/frontend/gateway
+    newName: ghcr.io/rubencipriano/zeiss-product-management/gateway
     newTag: unreleased

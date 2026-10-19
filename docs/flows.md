@@ -1,6 +1,6 @@
 # Flows
 
-Every important flow of the system, end to end, as Mermaid diagrams (rendered by GitLab and VS Code). Each
+Every important flow of the system, end to end, as Mermaid diagrams (rendered by GitHub and VS Code). Each
 diagram was drawn from the code as it is now; the links under each one point to the files that implement it and to
 the decision record (ADR) that explains why. The static picture (topology, components, data model) is in
 [architecture.md](architecture.md).
@@ -15,7 +15,7 @@ the decision record (ADR) that explains why. The static picture (topology, compo
 | 6 | [Create a product, update with If-Match](#6-create-a-product-update-with-if-match) | sequences | `ProductCommandService`, `UnitOfWork` |
 | 7 | [Rate limiting](#7-rate-limiting) | flowchart | `SharedTokenBucketRateLimiter`, `RedisDistributedRateLimiter` |
 | 8 | [Frontend: the product list screen](#8-frontend-the-product-list-screen) | flowchart | `products-store.ts`, `products-api.ts` |
-| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `deploy/scripts/` (`deploy.sh`, `infra.sh`, `lib/create-database.sh`, `set-version.sh`, `ci/update-versions.sh`), `DatabaseMigrator.cs` (migrations at API startup), `ci/release-notes.sh`, `.gitlab-ci.yml` (×3) |
+| 9 | [Deployment and CI/CD](#9-deployment-and-cicd) | flowcharts | `deploy/scripts/` (`deploy.sh`, `infra.sh`, `lib/create-database.sh`, `set-version.sh`, `ci/update-versions.sh`), `DatabaseMigrator.cs` (migrations at API startup), `ci/release-notes.sh`, `.github/workflows/` (Backend, Frontend, Deploy, Update staging, Propose production) |
 | 10 | [Autoscaling](#10-autoscaling) | flowchart | `hpa.yaml`, `gateway.yaml`, `default.conf.template` |
 | 11 | [Load test and verification](#11-load-test-and-verification) | flowcharts | `tools/load-tests/`, `tools/check-requirements.py` |
 | 12 | [Logs, from a request to Grafana](#12-logs-from-a-request-to-grafana) | flowchart | `trace.js`, `logs.yaml` (Alloy's configuration), `browser-errors.ts` |
@@ -632,7 +632,7 @@ fresh, so a crowd of open screens is answered by the microcache. An empty name f
 
 ### Deploy to the current kubectl context
 
-Everything that runs in a cluster is described by the deploy repository (`deploy/`) and applied by its
+Everything that runs in a cluster is described by `deploy/` and applied by its
 `scripts/deploy.sh <local|staging|production> [infra|apps|all]`. `infra` (`scripts/infra.sh up`) creates the shared
 infrastructure in the namespace `infra` (PostgreSQL, Redis, and the logs: Loki, Grafana, Alloy) and installs
 metrics-server when the cluster has none; `scripts/lib/create-database.sh` gives the API its database, its two users and
@@ -640,8 +640,9 @@ their Secret, once per cluster; `apps` deploys the API, the web app and the gate
 Locally (`deploy.sh local`, Docker Desktop or a k3s on the same machine) the images come from one of two places:
 when the sibling checkouts `../backend` and `../frontend` exist (or with `--build`) it builds the three images from
 them, with an immutable tag (the commit, plus a timestamp when the working tree is dirty), straight into the local
-Docker engine (on k3s, copied into its containerd); with only the deploy repository (or with `--version X.Y.Z`) it
-runs a published version from the registry, after checking that it exists, with the pull Secret `gitlab-registry`.
+Docker engine (on k3s, copied into its containerd); with only `deploy/` (or with `--version X.Y.Z`) it runs a
+published version from the registry (ghcr.io), after checking that it exists, with the pull Secret
+`registry-credentials`.
 It creates the database itself on the first run. Staging and production apply exactly what is committed (below).
 `deploy/menu.sh` runs the same scripts from a numbered menu.
 
@@ -659,7 +660,7 @@ flowchart TD
     subgraph local["deploy/scripts/deploy.sh local"]
         l0["local-secrets.sh, first run:<br/>signing key, consumers<br/>(environments/local/generated)"] --> ls{"../backend and ../frontend?<br/>(--build / --version force one)"}
         ls -->|"yes: built"| l1["docker build ../backend,<br/>../frontend, ../frontend/gateway<br/>tag = short SHA + dirty timestamp"]
-        ls -->|"no: published"| lp["versions.sh: the version exists?<br/>(latest = newest common X.Y.Z)<br/>Secret gitlab-registry from<br/>REGISTRY_USER / REGISTRY_PASSWORD"]
+        ls -->|"no: published"| lp["versions.sh: the version exists?<br/>(latest = newest common X.Y.Z)<br/>Secret registry-credentials from<br/>REGISTRY_USER / REGISTRY_PASSWORD"]
         l1 --> l2["images into<br/>environments/local/generated/build:<br/>built tags, or registry names, version,<br/>imagePullSecrets (LOGS=off: no collector)"]
         lp --> l2
         l2 --> l3{"Secret database-credentials?"}
@@ -728,73 +729,87 @@ every older snapshot to end, so the two would wait for each other forever. Code:
 [`deployment.yaml`](../deploy/apps/backend/deployment.yaml) (the startup probe, the migrator's credentials);
 tests: [`MigrationsAtStartupTests.cs`](../backend/ProductManagement.Api.IntegrationTests/Persistence/MigrationsAtStartupTests.cs).
 
-### CI/CD pipelines (GitLab, GitOps, pull releases)
+### CI/CD workflows (GitHub Actions, GitOps, pull releases)
 
-One pipeline per repository. The backend and the frontend only build and publish: a version tag `vX.Y.Z` makes their
-pipeline add the tag `X.Y.Z` to the tested and scanned image(s) and create a GitLab Release; they never touch the
-deploy repository or a cluster. The deploy repository pulls versions in: the scheduled `update:staging` commits the
-newest `X.Y.Z` to `environments/staging` on `main`, and `environments/production` changes through a merge request
-(`propose:production` or `set-version.sh`). Its pipeline is the only one that changes the clusters: it applies what
-`main` holds (the new API pods migrate the database as they start) and smoke-checks it. Each environment's
-jobs exist once it is switched on (`STAGING_ENABLED`, `PRODUCTION_ENABLED`). Every job runs on gitlab.com's shared
-runners; the staging and production jobs have not yet run against real clusters.
+One repository, GitHub Actions workflows per folder (`.github/workflows/`), each started only by changes to its
+folder. The Backend and Frontend workflows only build and publish: a version tag `backend/vX.Y.Z` or
+`frontend/vX.Y.Z` makes them add the tag `X.Y.Z` to the tested and scanned image(s) in ghcr.io and create a GitHub
+Release; they never touch `deploy/` or a cluster. `deploy/` pulls versions in: after every successful run of a version
+tag, the workflow Update staging commits the newest `X.Y.Z` to `deploy/environments/staging` on `main`, and
+`deploy/environments/production` changes through a pull request (Propose production or `set-version.sh`). Only
+`deploy/`'s workflows change the clusters: they apply what `main` holds (the new API pods migrate the database as they
+start) and smoke-check it. Each environment's jobs run once it is switched on (`STAGING_ENABLED`,
+`PRODUCTION_ENABLED`). Every job runs on GitHub-hosted `ubuntu-24.04` runners; the staging and production jobs have
+not yet run against real clusters.
 
 ```mermaid
 flowchart TB
-    subgraph be["backend/.gitlab-ci.yml"]
+    subgraph be["Backend: .github/workflows/backend.yml"]
         direction LR
-        bt["<b>test</b><br/>unit, integration,<br/>format, SAST"] --> bb["<b>build</b><br/>api:short-sha,<br/>migrations.sql"]
-        bb --> bs["<b>scan</b><br/>Trivy"]
-        bs --> bp["publish:api<br/>tag vX.Y.Z only:<br/>crane tag api:X.Y.Z"]
-        bp --> br["release<br/>GitLab Release vX.Y.Z:<br/>digest, changes"]
+        bt["<b>test</b><br/>format, build, unit,<br/>integration, acceptance"] --> bb["<b>build</b><br/>api:short-sha, amd64 + arm64<br/>migrations-sql artifact"]
+        bb --> bs["<b>scan</b><br/>Trivy, to code scanning"]
+        bs --> bp["<b>publish</b><br/>tag backend/vX.Y.Z only:<br/>crane tag api:X.Y.Z"]
+        bp --> br["<b>release</b><br/>GitHub Release backend/vX.Y.Z:<br/>digest, changes"]
     end
 
-    subgraph fe["frontend/.gitlab-ci.yml"]
+    subgraph fe["Frontend: frontend.yml"]
         direction LR
-        ft["<b>test</b><br/>lint, unit, build, SAST"] --> fb["<b>build</b><br/>web, gateway:short-sha"]
-        fb --> fs["<b>scan</b><br/>Trivy"]
-        fs --> fp["publish:web, publish:gateway<br/>tag vX.Y.Z only"]
-        fp --> fr["release<br/>GitLab Release vX.Y.Z"]
+        ft["<b>test</b><br/>lint, format, unit, build"] --> fb["<b>build</b><br/>web, gateway:short-sha"]
+        fb --> fs["<b>scan</b><br/>Trivy, to code scanning"]
+        fs --> fp["<b>publish</b><br/>tag frontend/vX.Y.Z only:<br/>web and gateway together"]
+        fp --> fr["<b>release</b><br/>GitHub Release frontend/vX.Y.Z"]
     end
 
-    reg[("Container Registry<br/>api, web, gateway:X.Y.Z")]
+    reg[("ghcr.io<br/>api, web, gateway:X.Y.Z")]
     bp --> reg
     fp --> reg
 
-    subgraph dp["deploy/.gitlab-ci.yml"]
+    subgraph us["Update staging: update-staging.yml"]
         direction LR
-        du["update:staging<br/>pipeline schedule:<br/>set-version.sh staging all latest,<br/>commit to main"]
-        dpp["propose:production<br/>manual: merge request<br/>with staging's versions"]
-        dv["<b>validate</b><br/>validate.sh (+ argocd/),<br/>shellcheck, alloy validate"] --> dds["deploy:staging<br/>deploy.sh staging apps:<br/>apply (the API migrates)"]
-        dds --> dss["smoke:staging<br/>scripts/ci/smoke.sh"]
-        dv --> ddp["deploy:production<br/>manual, after the merge:<br/>apply (the API migrates)"]
-        ddp --> dsp["smoke:production"]
-        dv --> di["infra:staging, infra:production<br/>manual: deploy.sh env infra"]
+        du["<b>update-staging</b><br/>set-version.sh staging all latest,<br/>commit to main with GITHUB_TOKEN"] --> dud["deploy.sh staging apps<br/>(the API migrates), smoke.sh"]
     end
 
+    subgraph pp["Propose production: propose-production.yml"]
+        dpp["<b>propose-production</b><br/>Run workflow: a pull request<br/>with staging's versions"]
+    end
+
+    subgraph dp["Deploy: deploy.yml"]
+        direction LR
+        dv["<b>validate</b><br/>validate-manifests (+ argocd/),<br/>validate-scripts, validate-alloy"] --> dds["<b>deploy-staging</b><br/>deploy.sh staging apps<br/>(the API migrates), smoke.sh"]
+        dv --> ddp["<b>deploy-production</b><br/>a required reviewer approves,<br/>then apply, smoke.sh"]
+        dv --> di["<b>infra-staging, infra-production</b><br/>Run workflow: deploy.sh env infra"]
+    end
+
+    br -.->|"successful tag run"| du
+    fr -.->|"successful tag run"| du
     reg -.->|"versions.sh:<br/>newest X.Y.Z"| du
-    du -->|"push to main<br/>staging: api 1.4.0, ..."| dv
+    pc(["a person's commit or merge<br/>environments/staging"]) --> dv
     dpp -.->|"merged by a person<br/>environments/production"| dv
 ```
 
-`deploy:staging` runs when a commit on `main` changes `environments/staging`, `apps/`, `infra/`, `scripts/deploy.sh`
-or `scripts/lib/`; `deploy:production` when it changes `environments/production`, `apps/` or those scripts, and waits
-for a person. A
-scheduled pipeline runs only `update:staging`. `deploy.sh` refuses an environment while an image still has `newTag:
-unreleased`, creates the Secrets `gitlab-registry` (the group deploy token) and `api-secrets` (the deploy project's
-`API_SIGNING_KEY`, `API_CONSUMERS`), copies `redis-credentials`, applies and waits for the rollouts (a failed migration
-in the new API pods fails the wait, with the old pods still serving). The smoke check calls the public URL: `/healthz`,
-`/`, an unknown client's `POST /api/auth/token` (401 `invalid_client`), and with `SMOKE_CLIENT_ID` /
-`SMOKE_CLIENT_SECRET` a signed-in `GET /api/categories`. **Rollback** is `set-version.sh <env> <image> <older version>`
-(or a `git revert` of the version commit) in the deploy repository; the pipeline applies the older images. Migrations
-are never rolled back (expand/contract). The cluster jobs reach it through the GitLab agent for Kubernetes
-(`KUBE_CONTEXT`) or a kubeconfig (`KUBECONFIG`), so no runner needs to be inside the private network; no database or
-Redis password is a CI/CD variable, and the app repositories hold no credential of the deploy repository. With Argo CD
-(prepared in `deploy/argocd/`), Argo CD Image Updater replaces `update:staging` and Argo CD's sync replaces the deploy
-jobs; the migrations need nothing (the API migrates itself). The end-to-end tests and the requirements check are not
-pipeline jobs: they run by hand against an environment. Code: [`backend/.gitlab-ci.yml`](../backend/.gitlab-ci.yml),
-[`release-notes.sh`](../backend/ci/release-notes.sh), [`frontend/.gitlab-ci.yml`](../frontend/.gitlab-ci.yml),
-[`deploy/.gitlab-ci.yml`](../deploy/.gitlab-ci.yml), [`set-version.sh`](../deploy/scripts/set-version.sh),
+`deploy-staging` runs when a push to `main` changes `deploy/environments/staging`, `apps/`, `infra/`,
+`scripts/deploy.sh` or `scripts/lib/`; `deploy-production` when it changes `deploy/environments/production`, `apps/`
+or those scripts, and waits for a required reviewer of the GitHub environment `production`. Update staging's own
+commit starts no workflow (a push made with `GITHUB_TOKEN`), so the same job deploys it, in the concurrency group
+`staging` it shares with `deploy-staging`. `deploy.sh` refuses an environment while an image still has `newTag:
+unreleased`, creates the Secrets `registry-credentials` (the environment's `REGISTRY_USER` / `REGISTRY_PASSWORD`, a
+token with `read:packages`) and `api-secrets` (the environment's `API_SIGNING_KEY`, `API_CONSUMERS`, written to files
+by the action `environment-secrets`), copies `redis-credentials`, applies and waits for the rollouts (a failed
+migration in the new API pods fails the wait, with the old pods still serving). The smoke check calls the public URL:
+`/healthz`, `/`, an unknown client's `POST /api/auth/token` (401 `invalid_client`), and with `SMOKE_CLIENT_ID` /
+`SMOKE_CLIENT_SECRET` a signed-in `GET /api/categories`. **Rollback** is `set-version.sh <env> <image> <older
+version>` (or a `git revert` of the version commit) in `deploy/`; the Deploy workflow applies the older images.
+Migrations are never rolled back (expand/contract). The cluster jobs reach the cluster with the environment's
+`KUBECONFIG`, so no runner needs to be inside the private network (the cluster's API must be reachable from GitHub's
+runners); no database or Redis password is a secret of the repository, and the Backend and Frontend workflows hold no
+credential of `deploy/` or of a cluster. With Argo CD (prepared in `deploy/argocd/`), Argo CD Image Updater replaces
+Update staging and Argo CD's sync replaces the deploy jobs; the migrations need nothing (the API migrates itself). The
+end-to-end tests and the requirements check are not workflow jobs: they run by hand against an environment. Code:
+[`backend.yml`](../.github/workflows/backend.yml), [`release-notes.sh`](../backend/ci/release-notes.sh),
+[`frontend.yml`](../.github/workflows/frontend.yml), [`deploy.yml`](../.github/workflows/deploy.yml),
+[`update-staging.yml`](../.github/workflows/update-staging.yml),
+[`propose-production.yml`](../.github/workflows/propose-production.yml),
+[`environment-secrets`](../.github/actions/environment-secrets/action.yml), [`set-version.sh`](../deploy/scripts/set-version.sh),
 [`update-versions.sh`](../deploy/scripts/ci/update-versions.sh), [`validate.sh`](../deploy/scripts/ci/validate.sh),
 [`smoke.sh`](../deploy/scripts/ci/smoke.sh), [`environments/staging`](../deploy/environments/staging/kustomization.yaml),
 [`argocd/`](../deploy/argocd). Setup: [guide chapter 12](guide/12-from-zero.md).
@@ -890,7 +905,7 @@ first and set back on exit, so no override is left behind. Code:
 
 ### The assessment, checked against the running system
 
-`tools/check-requirements.py` (a local tool, not a pipeline job) walks the assessment PDF requirement by requirement through the gateway (so the
+`tools/check-requirements.py` (a tool run by hand, not a workflow job) walks the assessment PDF requirement by requirement through the gateway (so the
 requests spread over the replicas), with `Cache-Control: no-cache` on every call and retrying on 429.
 
 ```mermaid

@@ -1,10 +1,11 @@
-# Argo CD Application for production: environments/production on main of this repository, applied only when a person
-# presses Sync (or runs `argocd app sync product-management-production`), instead of the pipeline's deploy:production.
+# Argo CD Application for production: deploy/environments/production on main of this repository, applied only when a
+# person presses Sync (or runs `argocd app sync product-management-production`), instead of the Deploy workflow's
+# deploy-production.
 #
 # Production is NOT updated by Argo CD Image Updater (no annotations here, no automated sync): which version runs in
-# production is a decision. It changes only through a merge request that sets the versions in
-# environments/production/kustomization.yaml (scripts/set-version.sh production ..., or the pipeline's
-# propose:production job); merging it and pressing Sync is the release. Argo CD shows the Application OutOfSync between
+# production is a decision. It changes only through a pull request that sets the versions in
+# deploy/environments/production/kustomization.yaml (scripts/set-version.sh production ..., or the workflow
+# propose-production); merging it and pressing Sync is the release. Argo CD shows the Application OutOfSync between
 # the merge and the sync, so nobody forgets it.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -15,9 +16,9 @@ spec:
   project: default
   source:
     # The same repository registration as staging: SSH with a read-only deploy key (README.md, "Moving to Argo CD").
-    repoURL: git@gitlab.com:zeiss/deploy.git
+    repoURL: git@github.com:RubenCipriano/zeiss-product-management.git
     targetRevision: main
-    path: environments/production
+    path: deploy/environments/production
   destination:
     server: https://kubernetes.default.svc
     namespace: product-management

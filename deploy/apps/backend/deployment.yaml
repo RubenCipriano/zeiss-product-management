@@ -11,7 +11,7 @@
 #   redis-credentials      a copy of the shared Redis' password (infra/redis-auth), made by scripts/deploy.sh
 #     password             → Redis__Password (added to the Redis connection by the API)
 #   api-secrets            the API's own keys: locally generated from files made by scripts/lib/local-secrets.sh; in
-#                          staging and production created by scripts/deploy.sh from CI/CD variables
+#                          staging and production created by scripts/deploy.sh from the environment's secrets
 #     signing-key          → Authentication__SigningKey (the ES256 private key that signs access tokens, PEM)
 #     consumers.json       → the file /app/config/consumers.json (registered consumers: client ids, secret hashes, roles)
 apiVersion: apps/v1

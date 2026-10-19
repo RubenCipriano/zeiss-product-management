@@ -2,13 +2,16 @@
 
 The backend of the Product Management system: a REST API built with .NET 10 / ASP.NET Core, EF Core and PostgreSQL,
 with Redis as a shared cache and coordination store. It manages a catalogue of products and their stock, issues its own
-access tokens to registered clients, and enforces three roles. This repository holds the code, the tests, the
-container image and the CI pipeline. The web app and the gateway are in [frontend](https://gitlab.com/zeiss/frontend);
-the Kubernetes manifests, the environments and the deployment scripts are in [deploy](https://gitlab.com/zeiss/deploy).
+access tokens to registered clients, and enforces three roles. This folder (`backend/` of the
+[zeiss-product-management](https://github.com/RubenCipriano/zeiss-product-management) repository) holds the code, the
+tests and the container image; its CI is the workflow [Backend](../.github/workflows/backend.yml). The web app and the
+gateway are in [frontend/](../frontend/README.md); the Kubernetes manifests, the environments and the deployment
+scripts are in [deploy/](../deploy/README.md).
 
 This README is the API's specification (every endpoint, header, error code and setting) and explains how the code is
-built, why, and how to run, test and release it. A release is a version tag (`v1.4.0`): the pipeline publishes the
-image `registry.gitlab.com/zeiss/backend/api:1.4.0`, and the deploy repository decides when an environment runs it.
+built, why, and how to run, test and release it. A release is a version tag (`backend/v1.4.0`): the Backend workflow
+publishes the image `ghcr.io/rubencipriano/zeiss-product-management/api:1.4.0`, and `deploy/` decides when an
+environment runs it.
 
 ## Contents
 
@@ -469,7 +472,7 @@ replica waits for every older snapshot, so both would wait forever (measured too
 
 Every migration must work with the version still running (expand/contract): during a rollout the old pods serve next
 to the new ones. A rollback (an older version) never undoes a migration; a bad one is fixed forward. The SQL each
-version runs is the `migrations:sql` artifact of its pipeline, reviewed in the merge request.
+version runs is the `migrations-sql` artifact of its workflow run, reviewed in the pull request.
 
 ## Consistency
 
@@ -520,7 +523,7 @@ in the frontend README.
 * **Least privilege in the database.** The API's requests connect as `pm_app`, which may read and write rows but not
   change the schema; its statements end after 30 s and idle transactions after 60 s. Only the migration step at
   startup connects as `pm_migrator`, the schema owner (`Database:MigratorUsername` / `MigratorPassword`), on
-  connections that are closed when it ends. Both users are created by the deploy repository's
+  connections that are closed when it ends. Both users are created by `deploy/`'s
   `scripts/lib/create-database.sh`.
 * **Hashed client secrets.** PBKDF2-HMAC-SHA256, 100,000 iterations, 16-byte random salt, 32-byte hash, stored as
   `pbkdf2-sha256$100000$<salt>$<hash>` (Base64). `hash-secret` makes one. Comparison is constant-time.
@@ -575,8 +578,8 @@ only), `config/consumers.json` (optional) and environment variables, later sourc
 | `ASPNETCORE_ENVIRONMENT` | `Production` | `Development` loads `appsettings.Development.json` and user-secrets; anything but `Development`/`Testing` requires Redis |
 | `ASPNETCORE_HTTP_PORTS` | `8080` in the image | the HTTP port |
 
-What the Kubernetes deployment sets (the deploy repository's `apps/backend/deployment.yaml` and
-`environments/<env>/api.yaml`): `ASPNETCORE_ENVIRONMENT=Production`, `Authentication__AccessTokenLifetime=01:00:00`,
+What the Kubernetes deployment sets (`deploy/apps/backend/deployment.yaml` and
+`deploy/environments/<env>/api.yaml`): `ASPNETCORE_ENVIRONMENT=Production`, `Authentication__AccessTokenLifetime=01:00:00`,
 `Database__ApplyMigrationsOnStartup=true`, `Database__SeedSampleData` (`true` locally and in staging, `false` in
 production), `OpenApi__Enabled` (`true` locally and in staging), the five
 `RateLimiting__*` values above, `SignInThrottle__MaxFailures=10`, `SignInThrottle__Window=00:01:00`,
@@ -589,7 +592,7 @@ production), `OpenApi__Enabled` (`true` locally and in staging), the five
 
 `docker build -t product-management/api .` builds the image every environment runs (SDK 10.0 to build,
 `mcr.microsoft.com/dotnet/aspnet:10.0` to run, as the non-root `app` user, port 8080). When it starts it applies the
-database migrations, then serves HTTP. The pipeline builds it for `linux/amd64` and `linux/arm64` (`PLATFORMS`): the
+database migrations, then serves HTTP. The Backend workflow builds it for `linux/amd64` and `linux/arm64` (`PLATFORMS`): the
 SDK stage runs once on the builder's own platform (its output is portable .NET code), so nothing is emulated. It also has two commands for setting an environment up; each runs and exits:
 
 | Command | Does | Used by |
@@ -604,7 +607,7 @@ docker run --rm product-management/api hash-secret <secret>
 
 ### Outside Kubernetes: docker run, Docker Compose
 
-The published image (`registry.gitlab.com/zeiss/backend/api:<version>`) is a plain OCI image with no Kubernetes in
+The published image (`ghcr.io/rubencipriano/zeiss-product-management/api:<version>`) is a plain OCI image with no Kubernetes in
 it: it runs on Kubernetes, with `docker run`, Docker Compose or Docker Swarm, anywhere it can reach a PostgreSQL and a
 Redis. Everything it needs is environment variables (and one optional file):
 
@@ -625,7 +628,7 @@ owner, then serves; several containers started at once take turns. Every other s
 [Configuration](#configuration).
 
 ```bash
-image=registry.gitlab.com/zeiss/backend/api:1.4.0
+image=ghcr.io/rubencipriano/zeiss-product-management/api:1.4.0
 docker run --rm "$image" generate-signing-key > signing-key.pem
 printf '{"Authentication":{"Consumers":[{"ClientId":"viewer","SecretHash":"%s","Roles":["viewer"]}]}}\n' \
   "$(docker run --rm "$image" hash-secret viewer)" > consumers.json             # one account: viewer / viewer
@@ -652,7 +655,7 @@ services:
     image: redis:8-alpine
     command: ["redis-server", "--requirepass", "change-me-too"]
   api:                            # applies its migrations when it starts, then serves
-    image: registry.gitlab.com/zeiss/backend/api:1.4.0
+    image: ghcr.io/rubencipriano/zeiss-product-management/api:1.4.0
     environment:
       ConnectionStrings__ProductManagement: "Host=postgres;Port=5432;Database=product_management;Username=product_management"
       PGPASSWORD: change-me
@@ -665,8 +668,8 @@ services:
 ```
 
 This minimal file uses one database user for brevity; in Kubernetes the API's requests connect as `pm_app` (rows
-only) and only its migrations as the schema owner (`Database__MigratorUsername` / `Database__MigratorPassword`; the
-deploy repository's `scripts/lib/create-database.sh` creates both users). A Swarm stack takes the same
+only) and only its migrations as the schema owner (`Database__MigratorUsername` / `Database__MigratorPassword`;
+`deploy/scripts/lib/create-database.sh` creates both users). A Swarm stack takes the same
 file (`docker stack deploy`), with the key and the accounts as Docker secrets instead of a variable and a bind mount.
 
 ## Run locally
@@ -717,7 +720,7 @@ for account in viewer:viewer clerk:stock-clerk manager:manager; do           # c
 done
 ```
 
-(With the deploy repository cloned next to this one, its `scripts/lib/local-secrets.sh` does the same.)
+(`deploy/scripts/lib/local-secrets.sh`, next to this folder, does the same.)
 
 **3. Run:**
 
@@ -730,7 +733,7 @@ Optionally a Redis as in the cluster: `docker run -d --name dev-redis -p 6379:63
 `ConnectionStrings__Redis=localhost:6379`. The web app's dev server (`npm start` in frontend) proxies `/api` to
 http://localhost:5080.
 
-**Against the local cluster's PostgreSQL and Redis** (after the deploy repository's `scripts/deploy.sh local`), as in
+**Against the local cluster's PostgreSQL and Redis** (after `deploy/scripts/deploy.sh local`), as in
 the cluster: requests as `pm_app`, the migrations at startup as `pm_migrator`; stop `dev-postgres` first, it uses the
 same port:
 
@@ -746,21 +749,20 @@ dotnet run --project ProductManagement.Api
 ```
 
 **The whole system in a cluster** (API, web app, gateway, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes
-(macOS, Windows) or k3s on an Ubuntu server. To try your local changes there, clone this repository next to the deploy
-repository (and frontend); its `scripts/deploy.sh local` then builds the API image from this checkout, `../backend`
-as seen from `deploy`:
+(macOS, Windows) or k3s on an Ubuntu server. To try your local changes there, use `deploy/` of the same clone: its
+`scripts/deploy.sh local` builds the API image from this folder, `../backend` as seen from `deploy`:
 
 ```text
-zeiss/                 any folder of yours
-├── backend/           git clone https://gitlab.com/zeiss/backend.git
-├── frontend/          git clone https://gitlab.com/zeiss/frontend.git
-└── deploy/            git clone https://gitlab.com/zeiss/deploy.git   → cd deploy; scripts/deploy.sh local
+zeiss-product-management/   git clone https://github.com/RubenCipriano/zeiss-product-management.git
+├── backend/                this folder
+├── frontend/
+└── deploy/                 → cd deploy; scripts/deploy.sh local
 ```
 
-`scripts/infra.sh up` first, once; then `scripts/deploy.sh local` after every change (or the deploy repository's menu,
-`./menu.sh`). Servers and demos do not need this checkout: they run the published images (`deploy.sh local --version
-1.0.0`), and staging and production never use it. The deploy repository's README explains the two sources:
-[Where the images come from](https://gitlab.com/zeiss/deploy#where-the-images-come-from-backend-frontend-or-the-registry).
+`scripts/infra.sh up` first, once; then `scripts/deploy.sh local` after every change (or `deploy/`'s menu,
+`./menu.sh`). Servers and demos can run the published images instead (`deploy.sh local --version 1.0.0`), and staging
+and production never use this folder. The deploy README explains the two sources:
+[Where the images come from](../deploy/README.md#where-the-images-come-from-backend-frontend-or-the-registry).
 
 ## Tests
 
@@ -786,51 +788,56 @@ The integration and acceptance tests start PostgreSQL and Redis containers thems
 
 ## CI
 
-[`.gitlab-ci.yml`](.gitlab-ci.yml). The pipeline only builds and publishes: it tests, builds and scans the image, and
-for a version tag publishes that version and creates a GitLab Release. It never touches an environment or the deploy
-repository: the deploy repository chooses which published version each environment runs (its
-`environments/<env>/kustomization.yaml`) and rolls it out (the "pull" model, see its README); the new API pods then
-apply the version's migrations themselves when they start.
+The workflow [Backend](../.github/workflows/backend.yml) (`.github/workflows/backend.yml` at the repository's root).
+It only builds and publishes: it tests, builds and scans the image, and for a version tag publishes that version and
+creates a GitHub Release. It never touches an environment or `deploy/`: `deploy/` chooses which published version
+each environment runs (its `environments/<env>/kustomization.yaml`) and rolls it out (the "pull" model, see its
+README); the new API pods then apply the version's migrations themselves when they start. Every job runs on a
+GitHub-hosted `ubuntu-24.04` runner.
 
-| Job | Stage | When | Does |
-| --- | --- | --- | --- |
-| `test:backend` | test | every pipeline | restore, format check, Release build (warnings are errors), every test suite (Testcontainers on Docker-in-Docker), JUnit report |
-| GitLab SAST, Secret Detection | test | every pipeline | GitLab's own analysers (included templates) |
-| `build:api` | build | every pipeline | builds and pushes `registry.gitlab.com/zeiss/backend/api:<short sha>` (BuildKit, layer cache in the registry); in a tag pipeline it reuses that image when the pipeline on `main` already built it |
-| `migrations:sql` | build | every pipeline | the idempotent SQL script of all migrations (`dotnet ef migrations script --idempotent`), as an artifact to review in the merge request (review only: the API applies the migrations itself when it starts) |
-| `scan:api` | scan | every pipeline | Trivy: full report to GitLab; fails on fixable critical vulnerabilities |
-| `publish:api` | publish | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | after test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `v`) to the same image, so the version has the commit build's digest; the digest goes to `release`. If `X.Y.Z` already exists it must be this same image (a re-run: nothing to do); another image fails the job, so a version is never overwritten |
-| `release` | release | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | GitLab's `release:` keyword (image `release-cli`): the Release `vX.Y.Z`, with the image reference and digest and the commits since the previous version ([`ci/release-notes.sh`](ci/release-notes.sh)) |
+| Job | When | Does |
+| --- | --- | --- |
+| `meta` | every run | the names the other jobs use: the image `ghcr.io/rubencipriano/zeiss-product-management/api:<short sha>` (the first 8 characters of the commit) and, for a version tag, the version; refuses a `backend/v*` tag that is not `backend/vX.Y.Z[-rc.N]` |
+| `test` | every run | restore, format check, Release build (warnings are errors), every test suite (Testcontainers on the runner's own Docker); the JUnit reports as the artifact `backend-test-results` |
+| `build` | every run | builds and pushes `api:<short sha>` for `linux/amd64` and `linux/arm64` (BuildKit through buildx, layer cache in GitHub Actions' cache, `type=gha`); for a version tag it reuses that image when the run on `main` already built it. A pull request from a fork builds without pushing |
+| `migrations-sql` | every run | the idempotent SQL script of all migrations (`dotnet ef migrations script --idempotent`), as the artifact `migrations-sql` (kept 90 days) to review in the pull request (review only: the API applies the migrations itself when it starts) |
+| `scan` | every run that pushed an image | Trivy: the full report to Security → Code scanning (SARIF, category `trivy-api`); fails on fixable critical vulnerabilities |
+| `publish` | tag `backend/vX.Y.Z` or `backend/vX.Y.Z-rc.N` only | after test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `backend/v`) to the same image, so the version has the commit build's digest; the digest goes to `release`. If `X.Y.Z` already exists it must be this same image (a re-run: nothing to do); another image fails the job, so a version is never overwritten |
+| `release` | the same tags only | `gh release create`: the GitHub Release `backend/vX.Y.Z` (a pre-release for `-rc.N`), with the image reference and digest and the commits since the previous backend version that changed `backend/` ([`ci/release-notes.sh`](ci/release-notes.sh)); on a re-run it updates the notes |
 
-Which pipelines run: merge requests and `main` (test, build, scan), and tags that match
-`v<MAJOR>.<MINOR>.<PATCH>` with an optional `-rc.<N>`; any other tag starts no pipeline. Images on `main` are
-`api:<short sha>`: builds of a commit, which the deploy repository never picks up by itself. Only `api:X.Y.Z` tags are
-versions.
+Static analysis is the repository's [CodeQL](../.github/workflows/codeql.yml) workflow (C#, TypeScript and the
+workflows; results in Security → Code scanning); secrets are caught by GitHub's secret scanning and push protection.
 
-**`ci/release-notes.sh`** (the same in frontend; POSIX `sh`, because the release-cli image has no bash):
+Which runs happen: pull requests and pushes to `main` that change `backend/` (or the workflow), Run workflow, and
+tags `backend/v*`; a tag that is not `backend/v<MAJOR>.<MINOR>.<PATCH>` with an optional `-rc.<N>` fails in `meta`. A
+new commit on the same branch or pull request cancels the run before it; a version tag's run always finishes. Images
+on `main` are `api:<short sha>`: builds of a commit, which `deploy/` never picks up by itself. Only `api:X.Y.Z` tags
+are versions.
+
+**`ci/release-notes.sh`** (the same in `frontend/ci`; POSIX `sh`):
 `ci/release-notes.sh <tag> <image reference>...` prints the Release's description in Markdown: the images with their
-digests, then `git log --no-merges` since the previous version tag (for a release `X.Y.Z` the previous release,
-skipping release candidates; for a release candidate the previous tag of any kind) and a compare link. To see what
-it would write: `ci/release-notes.sh v1.4.0 registry.gitlab.com/zeiss/backend/api:1.4.0` in a clone with the tags.
+digests, then `git log --no-merges -- .` (the commits that changed this folder) since the previous version tag of the
+same component (`backend/v*`; for a release `X.Y.Z` the previous release, skipping release candidates; for a release
+candidate the previous tag of any kind) and a compare link. To see what it would write:
+`ci/release-notes.sh backend/v1.4.0 ghcr.io/rubencipriano/zeiss-product-management/api:1.4.0` from `backend/` in a
+clone with the tags.
 
 **Migrations must be backward compatible** (expand/contract): the first new pod applies them while the previous
 version is still serving, and the two versions run side by side during the rollout. A rollback (choosing an older
-version in the deploy repository) never touches the schema; a bad migration is fixed forward.
+version in `deploy/`) never touches the schema; a bad migration is fixed forward.
 
-**No CI/CD variable is needed in this project:** the jobs use only what GitLab provides (`CI_REGISTRY_USER` /
-`CI_REGISTRY_PASSWORD` for the registry, the job token for the release). One project setting matters:
+**No secret or variable is needed for this workflow:** the jobs use only the run's own `GITHUB_TOKEN` (ghcr.io, the
+release, code scanning). One repository setting matters:
 
-* **Protected tags** (Settings → Repository → Protected tags): `v*`, allowed to create: Maintainers. Only maintainers
-  can then release, and the publish and release jobs run with protected-branch rights.
+* **A tag ruleset** (Settings → Rules → Rulesets → New tag ruleset) for `backend/v*` that restricts creating,
+  updating and deleting those tags to maintainers (the bypass list). Only maintainers can then release.
 
-A published version is never overwritten: `publish:api` refuses to point an existing `X.Y.Z` at another image (on
-every GitLab tier). On GitLab Ultimate, protected **immutable** container tags (Settings → Packages and registries →
-Container registry → Protected container tags → Immutable) can enforce the same in the registry itself, an optional
-extra. A cleanup policy, where one runs, must keep the `X.Y.Z` tags.
+A published version is never overwritten: `publish` refuses to point an existing `X.Y.Z` at another image. A cleanup
+policy for the package, where one runs, must keep the `X.Y.Z` tags.
 
 ## How to release a version
 
-A version is a git tag on a commit of `main` that passed its pipeline. Versions follow
+A version is a git tag `backend/vX.Y.Z` on a commit of `main` that passed its workflow run. Versions follow
 [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 
 | Change since the previous version | Raise | Example |
@@ -843,23 +850,25 @@ A version is a git tag on a commit of `main` that passed its pipeline. Versions 
 A database migration does not by itself make a major version: migrations are always backward compatible
 (expand/contract). Removing something clients use does.
 
-1. Merge the changes into `main` and wait for its pipeline (it builds `api:<short sha>`).
-2. Create the tag on that commit, from the UI (Code → Tags → New tag: name `v1.4.0`, create from `main`, a message) or
-   from a clone:
+1. Merge the changes into `main` and wait for its Backend run (it builds `api:<short sha>`).
+2. Create the tag on that commit from a clone (the `backend/` prefix tells the release lines of the one repository
+   apart: `frontend/v*` is the frontend's):
 
    ```bash
    git switch main && git pull
-   git tag -a v1.4.0 -m "v1.4.0: stock history export"
-   git push origin v1.4.0
+   git tag -a backend/v1.4.0 -m "backend/v1.4.0: stock history export"
+   git push origin backend/v1.4.0
    ```
 
-3. The tag's pipeline tests and scans that commit again, publishes `registry.gitlab.com/zeiss/backend/api:1.4.0`
-   (`publish:api`) and creates the Release `v1.4.0` (Deploy → Releases), with the image, its digest and the changes.
-4. Nothing else here: staging picks `1.4.0` up by itself (the deploy repository's scheduled `update:staging` job takes
-   the newest `X.Y.Z`; release candidates only when someone sets them), and production changes through a merge request
-   in the deploy repository (`scripts/set-version.sh production api 1.4.0`). Its README has the details.
+3. The tag's Backend run tests and scans that commit again, publishes
+   `ghcr.io/rubencipriano/zeiss-product-management/api:1.4.0` (`publish`) and creates the GitHub Release
+   `backend/v1.4.0` (Releases), with the image, its digest and the changes.
+4. Nothing else here: staging picks `1.4.0` up by itself (the workflow Update staging starts after the successful tag
+   run and takes the newest `X.Y.Z`; release candidates only when someone sets them), and production changes through a
+   pull request that changes `deploy/environments/production` (`scripts/set-version.sh production api 1.4.0`). The
+   deploy README has the details.
 
-A tag is never moved or reused: a fix is a new version (`v1.4.1`). Delete a wrong tag only before its pipeline
+A tag is never moved or reused: a fix is a new version (`backend/v1.4.1`). Delete a wrong tag only before its run
 published it.
 
 ## Design decisions
@@ -877,7 +886,7 @@ published it.
 | The API issues its own ES256 tokens with a public JWKS | no external identity provider needed for registered clients; the gateway verifies without a secret |
 | Permissions, not roles, on endpoints | the role mapping lives in one place |
 | The API applies its own migrations at startup, as the schema owner, under an advisory lock | one path for every environment (no job or pod to forget); the schema and the code that needs it come from the same build; replicas take turns instead of racing; the app user never needs schema rights; a failed migration keeps the new pods unready while the old ones serve |
-| Versions as SemVer tags; the pipeline only publishes, the deploy repository pulls | this repository needs no access to any environment or to the deploy repository; a version is published only after its tests and scan; the same image digest from `main` to production; Argo CD Image Updater can follow the same tags |
+| Versions as SemVer tags; the Backend workflow only publishes, `deploy/` pulls | this workflow needs no access to any environment and never writes to `deploy/`; a version is published only after its tests and scan; the same image digest from `main` to production; Argo CD Image Updater can follow the same tags |
 | Problem details (RFC 9457) with `errorCode` | one standard error shape that clients can branch on |
 
 ## Troubleshooting
@@ -894,10 +903,10 @@ published it.
 | sign-in `429 too_many_failed_attempts` | 10 failed sign-ins from your IP within a minute | wait for `Retry-After` |
 | `503 idempotency_unavailable` | Redis unreachable and the request has an `Idempotency-Key` | fix Redis; retry with the same key |
 | integration tests fail at startup | Docker is not running (Testcontainers) | start Docker |
-| startup fails with `permission denied for schema public` | the migrations ran as `pm_app` (no `Database:MigratorUsername` / `MigratorPassword`) | set them to the schema owner (`pm_migrator`), as the deploy repository's `apps/backend/deployment.yaml` does |
+| startup fails with `permission denied for schema public` | the migrations ran as `pm_app` (no `Database:MigratorUsername` / `MigratorPassword`) | set them to the schema owner (`pm_migrator`), as `deploy/apps/backend/deployment.yaml` does |
 | a new instance waits at startup with "Another instance is migrating the database; waiting for it to finish" | another instance holds the migration lock (a long migration) | nothing: it starts when the other one is done (at most 10 minutes) |
 | startup fails with `The database is still unreachable after 30 attempts (or the migrator's user or password is wrong)` | PostgreSQL is down, or the migrator's credentials are wrong | check the database and `Database:MigratorUsername` / `MigratorPassword` |
-| a tag starts no pipeline | the tag is not `vX.Y.Z` / `vX.Y.Z-rc.N` (e.g. `1.4.0` without `v`, or `v1.4`) | delete it and create `v1.4.0` |
-| `publish:api` fails: `... already exists as another image ...: versions are never overwritten` | the version was published before from another build (its git tag deleted and created again on another commit) | versions are never reused: release `v1.4.1`. Re-running the pipeline of the same tag is fine (same image, nothing to do) |
-| `release` fails with `already exists` | a Release with that tag exists (a re-run) | nothing to do, or delete the Release in Deploy → Releases and retry the job |
-| the deploy repository does not see a new version | `publish:api` did not run (the tag pipeline failed before it), or the registry token there cannot read this registry | check the tag's pipeline; in deploy, `scripts/versions.sh api` |
+| a tag starts no Backend run | the tag does not start with `backend/v` (e.g. `v1.4.0` or `1.4.0`) | delete it and create `backend/v1.4.0` |
+| `meta` fails: `... is not backend/vX.Y.Z or backend/vX.Y.Z-rc.N` | a `backend/v*` tag that is not SemVer (e.g. `backend/v1.4`) | delete it and create `backend/v1.4.0` |
+| `publish` fails: `... already exists as another image ...: versions are never overwritten` | the version was published before from another build (its git tag deleted and created again on another commit) | versions are never reused: release `backend/v1.4.1`. Re-running the run of the same tag is fine (same image, nothing to do) |
+| `deploy/` does not see a new version | `publish` did not run (the tag's run failed before it), or the registry token there cannot read the package | check the tag's Backend run in Actions; in `deploy/`, `scripts/versions.sh api` |

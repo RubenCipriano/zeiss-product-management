@@ -1,0 +1,39 @@
+# The cluster and the API's keys of one GitHub environment (staging or production), as the files that
+# deploy/scripts/deploy.sh reads: the environment's secrets hold the files' contents, this action writes them under
+# $RUNNER_TEMP (readable only by this job) and exports their paths. The kubeconfig is required; without the two API
+# keys nothing is exported for them, and deploy.sh keeps the Secret api-secrets the cluster has.
+name: Environment secrets
+description: Writes the environment's kubeconfig, signing key and consumers to files and exports their paths
+inputs:
+  kubeconfig:
+    description: A kubeconfig whose current context is the environment's cluster (secret KUBECONFIG)
+    required: true
+  api-signing-key:
+    description: The API's ES256 private key, PKCS#8 PEM (secret API_SIGNING_KEY)
+    required: false
+  api-consumers:
+    description: The API's consumers.json (secret API_CONSUMERS)
+    required: false
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        KUBECONFIG_DATA: ${{ inputs.kubeconfig }}
+        SIGNING_KEY_DATA: ${{ inputs.api-signing-key }}
+        CONSUMERS_DATA: ${{ inputs.api-consumers }}
+      run: |
+        umask 077
+        dir="$RUNNER_TEMP/environment-secrets"
+        mkdir -p "$dir"
+        if [[ -z "$KUBECONFIG_DATA" ]]; then
+          echo "::error::The environment has no secret KUBECONFIG (Settings → Environments → <environment> → secrets)"
+          exit 1
+        fi
+        printf '%s\n' "$KUBECONFIG_DATA" > "$dir/kubeconfig"
+        echo "KUBECONFIG=$dir/kubeconfig" >> "$GITHUB_ENV"
+        if [[ -n "$SIGNING_KEY_DATA" && -n "$CONSUMERS_DATA" ]]; then
+          printf '%s\n' "$SIGNING_KEY_DATA" > "$dir/signing-key.pem"
+          printf '%s\n' "$CONSUMERS_DATA" > "$dir/consumers.json"
+          { echo "API_SIGNING_KEY=$dir/signing-key.pem"; echo "API_CONSUMERS=$dir/consumers.json"; } >> "$GITHUB_ENV"
+        fi

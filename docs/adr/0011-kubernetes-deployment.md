@@ -18,7 +18,9 @@
 > headless Service `api-headless` renamed to `api` ([0021, update](0021-deployment-layout.md#update-2026-10-10));
 > finally every manifest and environment moved into one deploy repository (`deploy/apps/`, `deploy/environments/`),
 > whose pipeline is the only one that applies, while the app pipelines release by committing image tags to it
-> ([0021, revision](0021-deployment-layout.md#revision-2026-10-10-gitops-with-a-deploy-repository)).
+> ([0021, revision](0021-deployment-layout.md#revision-2026-10-10-gitops-with-a-deploy-repository)). Since 2026-10-19
+> `deploy/` is a folder of one GitHub repository, applied by its GitHub Actions workflow Deploy
+> ([0021, revision](0021-deployment-layout.md#revision-2026-10-19-one-github-repository-github-actions)).
 
 ## Context
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Chooses which published version of an image an environment runs: sets its newTag in
 # environments/<environment>/kustomization.yaml. Upgrading and downgrading (rolling back) are the same command. It only
-# edits the file and prints the change: commit it yourself (staging: directly on main or through a merge request;
-# production: always a merge request). The pipeline's update:staging job runs it for staging and commits.
+# edits the file and prints the change: commit it yourself (staging: directly on main or through a pull request;
+# production: always a pull request). The workflow update-staging runs it for staging and commits.
 #
 #   scripts/set-version.sh <staging|production> <api|web|gateway|frontend|all> <version|latest> [--pre] [--registry <host>]
 #
@@ -18,7 +18,7 @@
 # backwards: if the environment already runs a newer version (e.g. a pre-release set by hand), it stays. An image with
 # no released version yet keeps its current tag (with a warning).
 #
-# Variables: REGISTRY, REGISTRY_USER, REGISTRY_PASSWORD (or CI_DEPLOY_USER, CI_DEPLOY_PASSWORD, or your docker login),
+# Variables: REGISTRY, REGISTRY_USER, REGISTRY_PASSWORD (or your docker login),
 # as for scripts/versions.sh. Needs: bash, curl, jq, yq, diff.
 set -euo pipefail
 

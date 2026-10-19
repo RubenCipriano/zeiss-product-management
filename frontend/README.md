@@ -1,16 +1,18 @@
 # Product Management — Web and Gateway
 
-This repository holds two things that are built and released together:
+This folder (`frontend/` of the [zeiss-product-management](https://github.com/RubenCipriano/zeiss-product-management)
+repository) holds two things that are built and released together:
 
 * the **web app**: an Angular 22 single-page application (Tailwind CSS, Angular CDK) where people sign in, browse
   products, change stock and manage the catalogue, according to their role;
 * the **gateway**: an nginx server in front of the whole application (web app and API), with its own logic for
   routing, token checks, rate limits, caching, security headers and tracing.
 
-It contains their code, the unit and end-to-end tests, the two container images and the CI pipeline that tests, builds,
-scans and publishes them: a version tag (`v2.1.0`) publishes `web:2.1.0` and `gateway:2.1.0`, and the deploy
-repository decides when an environment runs them. The API is in [backend](https://gitlab.com/zeiss/backend); the Kubernetes manifests, the
-environments and the scripts that deploy everything are in [deploy](https://gitlab.com/zeiss/deploy).
+It contains their code, the unit and end-to-end tests and the two container images; the workflow
+[Frontend](../.github/workflows/frontend.yml) tests, builds, scans and publishes them: a version tag
+(`frontend/v2.1.0`) publishes `web:2.1.0` and `gateway:2.1.0`, and `deploy/` decides when an environment runs them.
+The API is in [backend/](../backend/README.md); the Kubernetes manifests, the environments and the scripts that deploy
+everything are in [deploy/](../deploy/README.md).
 
 ## Contents
 
@@ -277,7 +279,7 @@ browser ──HTTPS──► Ingress controller (Traefik) ──HTTP──► ga
 The **Ingress** belongs to the cluster: it accepts HTTPS for every application on it, chooses the application by host
 name and terminates TLS (certificates from cert-manager). The **gateway** belongs to this application and carries its
 logic. Locally there is no Ingress: Kubernetes publishes the gateway directly on http://localhost:8080. Keeping the
-logic in the gateway means it does not depend on which Ingress controller a cluster has. The deploy repository's
+logic in the gateway means it does not depend on which Ingress controller a cluster has. The deploy
 README explains Ingress, TLS and cert-manager in detail.
 
 ## The web app
@@ -331,7 +333,7 @@ src/
   testing/                      test fixtures (fake auth, sample products)
 e2e/                            Playwright end-to-end tests and the Lighthouse user flow
 gateway/                        the gateway image
-ci/release-notes.sh             the description of a GitLab Release (the release job)
+ci/release-notes.sh             the description of a GitHub Release (the release job)
 ```
 
 The dependency rule inside a feature, so each piece has one reason to change:
@@ -442,7 +444,7 @@ paginator's range are announced to screen readers (`aria-live="polite"`); the ta
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `APP_VERSION` (Docker build argument, passed as `ng build --define`) | `dev` | the release the app reports with its errors; the pipeline passes the commit (`<short sha>`: a version reuses that build, so it reports the commit it was built from), the deploy repository's `scripts/deploy.sh local` its local image tag |
+| `APP_VERSION` (Docker build argument, passed as `ng build --define`) | `dev` | the release the app reports with its errors; the Frontend workflow passes the commit (`<short sha>`: a version reuses that build, so it reports the commit it was built from), `deploy/scripts/deploy.sh local` its local image tag |
 
 **Run time (gateway image):** environment variables, rendered into the nginx configuration when the container starts
 (the official nginx image's template mechanism), so one image serves every environment.
@@ -460,7 +462,7 @@ paginator's range are announced to screen readers (`aria-live="polite"`); the ta
 | `NGINX_ENTRYPOINT_LOCAL_RESOLVERS` | `1` | take the DNS resolver from the container (Kubernetes DNS) |
 
 Fixed in the configuration: the `/collect` limit (5 per second, burst 20, 64 KB), the 1-second microcache, the 7-day
-static cache, request bodies up to 1 MB. The deployed values are in the deploy repository
+static cache, request bodies up to 1 MB. The deployed values are in `deploy/`
 (`apps/frontend/gateway.yaml`, `environments/<env>/gateway.yaml`).
 
 **Development server:** `API_URL` (default `http://localhost:5080`) is where `npm start` proxies `/api`
@@ -487,7 +489,7 @@ The dev server sends `/api` to `API_URL`:
 
 | The API | How |
 | --- | --- |
-| on this machine | `dotnet run --project ProductManagement.Api` in the backend repository (its README), then `npm start` |
+| on this machine | `dotnet run --project ProductManagement.Api` in `backend/` (its README), then `npm start` |
 | the local cluster's | `kubectl -n product-management port-forward deployment/api 5080:8080`, then `npm start`; or through its gateway: `API_URL=http://localhost:8080 npm start` |
 | an environment's | `API_URL=https://staging.products.example.com npm start` (the gateway serves the API under the same `/api`) |
 
@@ -495,22 +497,21 @@ Sign in with an account of that API: locally `viewer`/`viewer`, `clerk`/`clerk` 
 has no gateway: no edge token check, microcache or CSP; the API checks tokens itself.
 
 **The whole system in a cluster** (gateway, web app, API, PostgreSQL, Redis, logs) on Docker Desktop's Kubernetes
-(macOS, Windows) or k3s on an Ubuntu server. To try your local changes there, clone this repository next to the deploy
-repository (and backend); its `scripts/deploy.sh local` then builds the web and gateway images from this checkout,
-`../frontend` as seen from `deploy`:
+(macOS, Windows) or k3s on an Ubuntu server. To try your local changes there, use `deploy/` of the same clone: its
+`scripts/deploy.sh local` builds the web and gateway images from this folder, `../frontend` as seen from `deploy`:
 
 ```text
-zeiss/                 any folder of yours
-├── backend/           git clone https://gitlab.com/zeiss/backend.git
-├── frontend/          git clone https://gitlab.com/zeiss/frontend.git
-└── deploy/            git clone https://gitlab.com/zeiss/deploy.git   → cd deploy; scripts/deploy.sh local
+zeiss-product-management/   git clone https://github.com/RubenCipriano/zeiss-product-management.git
+├── backend/
+├── frontend/               this folder
+└── deploy/                 → cd deploy; scripts/deploy.sh local
 ```
 
-`scripts/infra.sh up` first, once; then `scripts/deploy.sh local` after every change (or the deploy repository's menu,
-`./menu.sh`) → http://localhost:8080 (on an Ubuntu server also http://&lt;server-ip&gt;:8080). Servers and demos do
-not need this checkout: they run the published images (`deploy.sh local --version 1.0.0`), and staging and production
-never use it. The deploy repository's README explains the two sources:
-[Where the images come from](https://gitlab.com/zeiss/deploy#where-the-images-come-from-backend-frontend-or-the-registry).
+`scripts/infra.sh up` first, once; then `scripts/deploy.sh local` after every change (or `deploy/`'s menu,
+`./menu.sh`) → http://localhost:8080 (on an Ubuntu server also http://&lt;server-ip&gt;:8080). Servers and demos can
+run the published images instead (`deploy.sh local --version 1.0.0`), and staging and production never use this
+folder. The deploy README explains the two sources:
+[Where the images come from](../deploy/README.md#where-the-images-come-from-backend-frontend-or-the-registry).
 
 ## Scripts
 
@@ -525,7 +526,7 @@ never use it. The deploy repository's README explains the two sources:
 | `npm run format` / `npm run format:check` | Prettier: write / check (`src/**/*.{ts,html,scss}`, `e2e/**/*.ts`) |
 | `npm run e2e` | Playwright end-to-end tests against a running system ([Tests](#tests)) |
 | `npm run audit:lighthouse` | Lighthouse user flow, signed in (mobile; `FORM_FACTOR=desktop` for desktop); report in `e2e/reports/` |
-| `ci/release-notes.sh` | the description of a GitLab Release: images, digests, commits since the previous version ([CI](#ci)) |
+| `ci/release-notes.sh` | the description of a GitHub Release: images, digests, commits since the previous version ([CI](#ci)) |
 
 ## Tests
 
@@ -553,7 +554,7 @@ the API and reuses the session (the token endpoint is rate limited per IP). The 
 ```bash
 npx playwright install chromium                    # once, if Google Chrome is not installed (then PLAYWRIGHT_CHANNEL=chromium)
 npm run e2e                                        # against http://localhost:8080 with the local demo accounts
-BASE_URL=http://<server-ip>:8080 npm run e2e       # against the deploy repository's k3s on an Ubuntu server
+BASE_URL=http://<server-ip>:8080 npm run e2e       # against deploy/'s k3s on an Ubuntu server
 kubectl -n infra port-forward svc/loki 3100:3100 & # optional: the browser-errors test reads Loki (LOKI_URL, default http://localhost:3100)
 BASE_URL=https://staging.products.example.com \
 E2E_VIEWER_SECRET=… E2E_CLERK_SECRET=… E2E_MANAGER_SECRET=… npm run e2e     # against an environment
@@ -575,32 +576,32 @@ docker build --build-arg APP_VERSION=dev -t product-management/web .
 docker build -t product-management/gateway gateway
 ```
 
-The pipeline builds both images for `linux/amd64` and `linux/arm64` (`PLATFORMS` in `.gitlab-ci.yml`), so they run on
+The Frontend workflow builds both images for `linux/amd64` and `linux/arm64` (`PLATFORMS` in `.github/workflows/frontend.yml`), so they run on
 x86-64 and ARM nodes alike. The Angular build runs once, on the builder's own platform (its output is static files);
 only the nginx stage is per platform, and it has no `RUN` step, so nothing is emulated.
 
 ### Outside Kubernetes: docker run, Docker Compose
 
-The published images (`registry.gitlab.com/zeiss/frontend/web:<version>` and `.../gateway:<version>`) are plain OCI
+The published images (`ghcr.io/rubencipriano/zeiss-product-management/web:<version>` and `.../gateway:<version>`) are plain OCI
 images with no Kubernetes in them: they run on Kubernetes, with `docker run`, Docker Compose or Docker Swarm. Both
 listen on port 8080 as a non-root user.
 
-* **web** needs nothing: `docker run -d -p 8081:8080 registry.gitlab.com/zeiss/frontend/web:2.1.0` serves the app
+* **web** needs nothing: `docker run -d -p 8081:8080 ghcr.io/rubencipriano/zeiss-product-management/web:2.1.0` serves the app
   (it calls `/api` on its own origin, so on its own it shows the sign-in page and nothing more; behind the gateway it
   is the whole application).
 * **gateway** needs to know where the others are ([Configuration](#configuration) lists every variable): `API_UPSTREAM`
   and `WEB_UPSTREAM` (`host:port`), `JWKS_URL` (the API's public keys) and `COLLECTOR_UPSTREAM` (`""` without a log
   collector: `/collect` answers 204). Names are resolved through the container's DNS, so Compose service names work.
 
-Next to the API's Compose file (backend README, [Outside Kubernetes](https://gitlab.com/zeiss/backend#outside-kubernetes-docker-run-docker-compose)),
+Next to the API's Compose file (backend README, [Outside Kubernetes](../backend/README.md#outside-kubernetes-docker-run-docker-compose)),
 these two services complete the system on http://localhost:8080:
 
 ```yaml
 services:
   web:
-    image: registry.gitlab.com/zeiss/frontend/web:2.1.0
+    image: ghcr.io/rubencipriano/zeiss-product-management/web:2.1.0
   gateway:
-    image: registry.gitlab.com/zeiss/frontend/gateway:2.1.0
+    image: ghcr.io/rubencipriano/zeiss-product-management/gateway:2.1.0
     ports: ["8080:8080"]
     environment:
       API_UPSTREAM: api:8080
@@ -611,46 +612,53 @@ services:
 ```
 
 The gateway alone, in front of an API somewhere else:
-`docker run -d -p 8080:8080 -e API_UPSTREAM=api.example.internal:8080 -e WEB_UPSTREAM=web.example.internal:8080 -e JWKS_URL=http://api.example.internal:8080/.well-known/jwks.json -e COLLECTOR_UPSTREAM= registry.gitlab.com/zeiss/frontend/gateway:2.1.0`.
+`docker run -d -p 8080:8080 -e API_UPSTREAM=api.example.internal:8080 -e WEB_UPSTREAM=web.example.internal:8080 -e JWKS_URL=http://api.example.internal:8080/.well-known/jwks.json -e COLLECTOR_UPSTREAM= ghcr.io/rubencipriano/zeiss-product-management/gateway:2.1.0`.
 Behind another proxy, set `GATEWAY_TRUSTED_PROXIES` to its network so rate limits see the real client addresses.
 
 ## CI
 
-[`.gitlab-ci.yml`](.gitlab-ci.yml). The pipeline only builds and publishes: it tests, builds and scans the two images,
-and for a version tag publishes that version of both and creates a GitLab Release. It never touches an environment or
-the deploy repository: the deploy repository chooses which published version each environment runs (its
-`environments/<env>/kustomization.yaml`) and applies it (the "pull" model, see its README).
+The workflow [Frontend](../.github/workflows/frontend.yml) (`.github/workflows/frontend.yml` at the repository's
+root). It only builds and publishes: it tests, builds and scans the two images, and for a version tag publishes that
+version of both and creates a GitHub Release. It never touches an environment or `deploy/`: `deploy/` chooses which
+published version each environment runs (its `environments/<env>/kustomization.yaml`) and applies it (the "pull"
+model, see its README). Every job runs on a GitHub-hosted `ubuntu-24.04` runner.
 
-| Job | Stage | When | Does |
-| --- | --- | --- | --- |
-| `test:frontend` | test | every pipeline | `npm ci`, lint, format check, unit tests (JUnit report), production build |
-| GitLab SAST, Secret Detection | test | every pipeline | GitLab's own analysers (included templates) |
-| `build:web`, `build:gateway` | build | every pipeline | build and push `registry.gitlab.com/zeiss/frontend/{web,gateway}:<short sha>` (BuildKit on Docker-in-Docker, layer cache in the registry); in a tag pipeline they reuse those images when the pipeline on `main` already built them |
-| `scan:web`, `scan:gateway` | scan | every pipeline | Trivy: full report to GitLab; fails on fixable critical vulnerabilities |
-| `publish:web`, `publish:gateway` | publish | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | after every test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `v`) to each image, so a version has the commit build's digest; the digests go to `release`. If `X.Y.Z` already exists it must be this same image (a re-run: nothing to do); another image fails the job, so a version is never overwritten |
-| `release` | release | tag `vX.Y.Z` or `vX.Y.Z-rc.N` only | GitLab's `release:` keyword (image `release-cli`): the Release `vX.Y.Z`, with both image references and digests and the commits since the previous version ([`ci/release-notes.sh`](ci/release-notes.sh)) |
+| Job | When | Does |
+| --- | --- | --- |
+| `meta` | every run | the names the other jobs use: `ghcr.io/rubencipriano/zeiss-product-management/{web,gateway}` and the commit's tag `<short sha>` (its first 8 characters) and, for a version tag, the version; refuses a `frontend/v*` tag that is not `frontend/vX.Y.Z[-rc.N]` |
+| `test` | every run | `npm ci`, lint, format check, unit tests (the JUnit report as the artifact `frontend-test-results`), production build |
+| `build` (web, gateway) | every run | build and push `{web,gateway}:<short sha>` for `linux/amd64` and `linux/arm64` (BuildKit through buildx, layer cache in GitHub Actions' cache, `type=gha`); for a version tag they reuse those images when the run on `main` already built them. A pull request from a fork builds without pushing |
+| `scan` (web, gateway) | every run that pushed the images | Trivy: the full report to Security → Code scanning (SARIF, categories `trivy-web`, `trivy-gateway`); fails on fixable critical vulnerabilities |
+| `publish` | tag `frontend/vX.Y.Z` or `frontend/vX.Y.Z-rc.N` only | after every test and scan passed: `crane tag` adds the tag `X.Y.Z` (no `frontend/v`) to both images, so a version has the commit build's digest; the digests go to `release`. One job for both, and both are checked before either is tagged: if `X.Y.Z` already exists it must be this same image (a re-run: nothing to do); another image fails the job, so a version is never overwritten |
+| `release` | the same tags only | `gh release create`: the GitHub Release `frontend/vX.Y.Z` (a pre-release for `-rc.N`), with both image references and digests and the commits since the previous frontend version that changed `frontend/` ([`ci/release-notes.sh`](ci/release-notes.sh)); on a re-run it updates the notes |
 
-Which pipelines run: merge requests and `main` (test, build, scan), and tags that match
-`v<MAJOR>.<MINOR>.<PATCH>` with an optional `-rc.<N>`; any other tag starts no pipeline. Images on `main` are
-`<image>:<short sha>`: builds of a commit, which the deploy repository never picks up by itself. Only `X.Y.Z` tags are
-versions, and web and gateway always get the same one: they are one frontend release.
+Static analysis is the repository's [CodeQL](../.github/workflows/codeql.yml) workflow (TypeScript, C# and the
+workflows; results in Security → Code scanning); secrets are caught by GitHub's secret scanning and push protection.
+The end-to-end tests (Playwright) are not a job: they need the whole running system; run them against an environment
+([Tests](#tests)).
 
-**`ci/release-notes.sh`** (the same in backend; POSIX `sh`, because the release-cli image has no bash):
+Which runs happen: pull requests and pushes to `main` that change `frontend/` (or the workflow), Run workflow, and
+tags `frontend/v*`; a tag that is not `frontend/v<MAJOR>.<MINOR>.<PATCH>` with an optional `-rc.<N>` fails in `meta`.
+A new commit on the same branch or pull request cancels the run before it; a version tag's run always finishes.
+Images on `main` are `<image>:<short sha>`: builds of a commit, which `deploy/` never picks up by itself. Only `X.Y.Z`
+tags are versions, and web and gateway always get the same one: they are one frontend release.
+
+**`ci/release-notes.sh`** (the same in `backend/ci`; POSIX `sh`):
 `ci/release-notes.sh <tag> <image reference>...` prints the Release's description in Markdown: the images with their
-digests, then `git log --no-merges` since the previous version tag (for a release `X.Y.Z` the previous release,
-skipping release candidates; for a release candidate the previous tag of any kind) and a compare link.
+digests, then `git log --no-merges -- .` (the commits that changed this folder) since the previous version tag of the
+same component (`frontend/v*`; for a release `X.Y.Z` the previous release, skipping release candidates; for a release
+candidate the previous tag of any kind) and a compare link.
 
-**No CI/CD variable is needed in this project:** the jobs use only what GitLab provides (`CI_REGISTRY_USER` /
-`CI_REGISTRY_PASSWORD`, the job token). One project setting matters: **protected tags** `v*` (Settings → Repository →
-Protected tags, allowed to create: Maintainers), so only maintainers release. A published version is never
-overwritten: `publish:web` and `publish:gateway` refuse to point an existing `X.Y.Z` at another image (on every GitLab
-tier). On GitLab Ultimate, protected **immutable** container tags (Settings → Packages and registries → Container
-registry → Protected container tags → Immutable) can enforce the same in the registry itself, an optional extra. A
-cleanup policy, where one runs, must keep the `X.Y.Z` tags.
+**No secret or variable is needed for this workflow:** the jobs use only the run's own `GITHUB_TOKEN` (ghcr.io, the
+release, code scanning). One repository setting matters: a **tag ruleset** for `frontend/v*` (Settings → Rules →
+Rulesets → New tag ruleset), so only maintainers release. A published version is never overwritten: `publish` refuses
+to point an existing `X.Y.Z` at another image. A cleanup policy for the packages, where one runs, must keep the `X.Y.Z`
+tags.
 
 ## How to release a version
 
-A version is a git tag on a commit of `main` that passed its pipeline, and it versions both images. Versions follow
+A version is a git tag `frontend/vX.Y.Z` on a commit of `main` that passed its workflow run, and it versions both
+images. Versions follow
 [Semantic Versioning](https://semver.org): `MAJOR.MINOR.PATCH`.
 
 | Change since the previous version | Raise | Example |
@@ -660,23 +668,23 @@ A version is a git tag on a commit of `main` that passed its pipeline, and it ve
 | backward compatible fixes only (bugs, styling, performance, base-image or dependency updates) | PATCH | 2.1.0 → 2.1.1 |
 | a version to try first (a release candidate) | `-rc.N` | 2.2.0-rc.1, then 2.2.0 |
 
-1. Merge the changes into `main` and wait for its pipeline (it builds `web:<short sha>` and `gateway:<short sha>`).
-2. Create the tag on that commit, from the UI (Code → Tags → New tag: name `v2.1.0`, create from `main`, a message) or
-   from a clone:
+1. Merge the changes into `main` and wait for its Frontend run (it builds `web:<short sha>` and `gateway:<short sha>`).
+2. Create the tag on that commit from a clone (the `frontend/` prefix tells the release lines of the one repository
+   apart: `backend/v*` is the API's):
 
    ```bash
    git switch main && git pull
-   git tag -a v2.1.0 -m "v2.1.0: stock history filters"
-   git push origin v2.1.0
+   git tag -a frontend/v2.1.0 -m "frontend/v2.1.0: stock history filters"
+   git push origin frontend/v2.1.0
    ```
 
-3. The tag's pipeline tests and scans that commit again, publishes `web:2.1.0` and `gateway:2.1.0` and creates the
-   Release `v2.1.0` (Deploy → Releases).
-4. Nothing else here: staging picks `2.1.0` up by itself (the deploy repository's scheduled `update:staging` job takes
-   the newest `X.Y.Z` that both images have), and production changes through a merge request in the deploy repository
-   (`scripts/set-version.sh production frontend 2.1.0`).
+3. The tag's Frontend run tests and scans that commit again, publishes `web:2.1.0` and `gateway:2.1.0` and creates the
+   GitHub Release `frontend/v2.1.0` (Releases).
+4. Nothing else here: staging picks `2.1.0` up by itself (the workflow Update staging starts after the successful tag
+   run and takes the newest `X.Y.Z` that both images have), and production changes through a pull request that changes
+   `deploy/environments/production` (`scripts/set-version.sh production frontend 2.1.0`).
 
-A tag is never moved or reused: a fix is a new version (`v2.1.1`). If the app needs a new API, release and deploy the
+A tag is never moved or reused: a fix is a new version (`frontend/v2.1.1`). If the app needs a new API, release and deploy the
 backend version first (the API stays backward compatible, so the order is always API, then frontend).
 
 ## Troubleshooting
@@ -686,8 +694,8 @@ backend version first (the API stays backward compatible, so the order is always
 | `npm start`: every API call fails and the terminal shows proxy errors (`ECONNREFUSED`) | nothing listens on `API_URL` | start the API (`dotnet run`), port-forward it, or set `API_URL` |
 | sign-in fails with `invalid_client` | wrong account for that API | locally `viewer`/`viewer`, `clerk`/`clerk`, `manager`/`manager` |
 | every API call answers `401 invalid_token` at the gateway | expired token, or the API's signing key changed | sign in again; check `JWKS_URL` reaches the API (the gateway logs `JWKS download failed`) |
-| `429 Too Many Requests` during a load test | the per-IP limit (200/s, burst 400) or the API's per-user limits | raise `GATEWAY_RATE_LIMIT_*` in the deploy repository, or spread the test over users |
-| `/collect` answers 502 | `COLLECTOR_UPSTREAM` is set but Alloy is not running | start the logs (`scripts/infra.sh up logs` in deploy), or deploy with `LOGS=off` (then 204) |
+| `429 Too Many Requests` during a load test | the per-IP limit (200/s, burst 400) or the API's per-user limits | raise `GATEWAY_RATE_LIMIT_*` in `deploy/`, or spread the test over users |
+| `/collect` answers 502 | `COLLECTOR_UPSTREAM` is set but Alloy is not running | start the logs (`scripts/infra.sh up logs` in `deploy/`), or deploy with `LOGS=off` (then 204) |
 | browser errors never show up in Grafana | development build (reporting is off in dev mode), or no collector | test against a deployed environment |
 | a change made elsewhere appears only after up to 15 s | the background refresh interval (plus the 1-second microcache) | expected; your own changes appear at once |
 | Playwright: `Cannot sign in as viewer` | the accounts do not exist there, or wrong `E2E_<ROLE>_SECRET` | register the accounts in that API, set the secrets |
@@ -695,6 +703,7 @@ backend version first (the API stays backward compatible, so the order is always
 | Playwright: Chrome not found | no Google Chrome installed | `npx playwright install chromium` and `PLAYWRIGHT_CHANNEL=chromium` |
 | Playwright: browser-errors test skipped | Loki not reachable at `LOKI_URL` | `kubectl -n infra port-forward svc/loki 3100:3100` |
 | `npm run audit:lighthouse` cannot launch Chrome | it uses the macOS Chrome path by default | set `CHROME_PATH` |
-| a tag starts no pipeline | the tag is not `vX.Y.Z` / `vX.Y.Z-rc.N` (e.g. `2.1.0` without `v`, or `v2.1`) | delete it and create `v2.1.0` |
-| `publish:*` fails: `... already exists as another image ...: versions are never overwritten` | the version was published before from another build (its git tag deleted and created again on another commit) | versions are never reused: release `v2.1.1`. Re-running the pipeline of the same tag is fine (same images, nothing to do) |
-| staging keeps the previous frontend version | only one of the two images has the new version (a publish job failed), and staging takes the newest version both have | re-run the failed publish job of the tag's pipeline |
+| a tag starts no Frontend run | the tag does not start with `frontend/v` (e.g. `v2.1.0` or `2.1.0`) | delete it and create `frontend/v2.1.0` |
+| `meta` fails: `... is not frontend/vX.Y.Z or frontend/vX.Y.Z-rc.N` | a `frontend/v*` tag that is not SemVer (e.g. `frontend/v2.1`) | delete it and create `frontend/v2.1.0` |
+| `publish` fails: `... already exists as another image ...: versions are never overwritten` | the version was published before from another build (its git tag deleted and created again on another commit) | versions are never reused: release `frontend/v2.1.1`. Re-running the run of the same tag is fine (same images, nothing to do) |
+| staging keeps the previous frontend version | only one of the two images has the new version (the publish job stopped between the two tags), and staging takes the newest version both have | re-run the failed `publish` job of the tag's run |

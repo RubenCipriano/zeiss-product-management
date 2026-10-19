@@ -27,7 +27,7 @@ exactly-once writes and load tests. [Chapter 11](11-production-readiness.md) say
 Every caller is a **registered API consumer**: a client id, a secret (stored only as a PBKDF2 hash) and one or more
 roles. The local demo consumers' hashes are generated on each machine by
 [`deploy/scripts/lib/local-secrets.sh`](../../deploy/scripts/lib/local-secrets.sh) (into the Secret `api-secrets`; never committed); staging and
-production get theirs from the deploy repository's CI/CD variables.
+production get theirs from the secrets of their GitHub environment.
 
 | Consumer | Role | What it may do | Who it represents |
 | --- | --- | --- | --- |
@@ -68,20 +68,21 @@ feature, no EF Core and no HTTP) ← `Infrastructure` (EF Core, Redis) ← `Api`
 
 ## Three parts, one place that deploys
 
-The system is in three GitLab repositories: backend, frontend and deploy. The two application repositories hold code,
-tests, Dockerfiles and a pipeline that builds images and publishes SemVer versions of them (a tag `v1.4.0`); the deploy
-repository holds what runs in every environment (GitOps): the Kubernetes manifests with the chosen versions, the shared
-infrastructure and the scripts that apply them (the API then migrates its own database). Only its pipeline changes the
-clusters, and it pulls new versions in (a pull release model):
+The system is one GitHub repository with three folders: backend, frontend and deploy. The two application folders
+hold code, tests and Dockerfiles, and each has a GitHub Actions workflow that builds images and publishes SemVer
+versions of them (a tag `backend/v1.4.0` or `frontend/v1.4.0`); `deploy/` holds what runs in every environment
+(GitOps): the Kubernetes manifests with the chosen versions, the shared infrastructure and the scripts that apply them
+(the API then migrates its own database). Only its workflows change the clusters, and they pull new versions in (a
+pull release model):
 
 | Part | What it holds | Released or deployed by |
 | --- | --- | --- |
-| `backend/` | The .NET solution, its Dockerfile and tests; `ci/release-notes.sh` for its GitLab Releases. | its pipeline publishes `api:X.Y.Z` for a tag `vX.Y.Z`; the deploy repository picks it up (staging by schedule, production by merge request) |
-| `frontend/` | The Angular workspace, the web and gateway Dockerfiles, unit and Playwright tests; `ci/release-notes.sh`. | its pipeline publishes `web:X.Y.Z` and `gateway:X.Y.Z` for a tag `vX.Y.Z`, like the backend |
-| `deploy/` | `apps/backend/` (the API's Deployment, with its configuration as environment variables, the headless Service `api`, autoscaler, disruption budget, network policy) and `apps/frontend/` (the web app and the gateway); `environments/<local, staging, production>/` (one Kustomize folder per environment: connection strings, a few settings, the image tags); `infra/` (the shared infrastructure in the namespace `infra`: PostgreSQL in `postgres.yaml` with its settings, StatefulSet and nightly backup, Redis in `redis.yaml`, the logs in `logs.yaml`: Loki, Grafana with its alert rules, Alloy; the dashboards in `dashboards/`); `scripts/` (`deploy.sh`, `infra.sh`, `create-database.sh` for a service's database, users and the Secret `database-credentials`, `versions.sh` and `set-version.sh` for the versions, `add-node.sh` for a k3s node); `argocd/` (prepared for Argo CD). | its pipeline (`update:staging` on a schedule, `deploy:staging`, `deploy:production`) runs `scripts/deploy.sh <environment> apps` (migrations, then apply); locally `deploy/scripts/infra.sh up` and `deploy/scripts/deploy.sh local` |
+| `backend/` | The .NET solution, its Dockerfile and tests; `ci/release-notes.sh` for its GitHub Releases. | the workflow Backend publishes `api:X.Y.Z` for a tag `backend/vX.Y.Z`; `deploy/` picks it up (staging after every release, production by pull request) |
+| `frontend/` | The Angular workspace, the web and gateway Dockerfiles, unit and Playwright tests; `ci/release-notes.sh`. | the workflow Frontend publishes `web:X.Y.Z` and `gateway:X.Y.Z` for a tag `frontend/vX.Y.Z`, like the backend |
+| `deploy/` | `apps/backend/` (the API's Deployment, with its configuration as environment variables, the headless Service `api`, autoscaler, disruption budget, network policy) and `apps/frontend/` (the web app and the gateway); `environments/<local, staging, production>/` (one Kustomize folder per environment: connection strings, a few settings, the image tags); `infra/` (the shared infrastructure in the namespace `infra`: PostgreSQL in `postgres.yaml` with its settings, StatefulSet and nightly backup, Redis in `redis.yaml`, the logs in `logs.yaml`: Loki, Grafana with its alert rules, Alloy; the dashboards in `dashboards/`); `scripts/` (`deploy.sh`, `infra.sh`, `create-database.sh` for a service's database, users and the Secret `database-credentials`, `versions.sh` and `set-version.sh` for the versions, `add-node.sh` for a k3s node); `argocd/` (prepared for Argo CD). | its workflows (Update staging after every release; Deploy's `deploy-staging` and `deploy-production`) run `scripts/deploy.sh <environment> apps` (apply; the new API pods migrate); locally `deploy/scripts/infra.sh up` and `deploy/scripts/deploy.sh local` |
 
-The documentation (`docs/`) and the local tools (`tools/`: the load tests and the requirements check) are in no
-repository; they sit next to the three.
+The documentation (`docs/`) and the tools (`tools/`: the load tests and the requirements check) sit next to the
+three, in the same repository.
 
 | Image | Built from | Used by |
 | --- | --- | --- |
@@ -89,8 +90,8 @@ repository; they sit next to the three.
 | `product-management/web` | `frontend/Dockerfile` | the web pods |
 | `product-management/gateway` | `frontend/gateway/Dockerfile` | the gateway pods |
 
-`deploy/scripts/deploy.sh` takes an environment (`local`, `staging` or `production`); the deploy repository's
-pipeline runs the same script ([chapter 9](09-deployment-and-operations.md)). The API knows its data stores only
+`deploy/scripts/deploy.sh` takes an environment (`local`, `staging` or `production`); the Deploy workflow runs the
+same script ([chapter 9](09-deployment-and-operations.md)). The API knows its data stores only
 through two connection strings in its environment's `api.yaml` (`postgres.infra.svc.cluster.local:5432`,
 `redis.infra.svc.cluster.local:6379`), which hold no password; the passwords come from the Secrets
 `database-credentials` (made by `deploy/scripts/lib/create-database.sh`) and `redis-credentials` (copied by
@@ -130,7 +131,7 @@ The contract between the API and the web app is small and made of names only:
 | [6. Scaling and capacity](06-scaling-and-capacity.md) | autoscaling, why the database is the ceiling, what each load test found |
 | [7. Front end](07-frontend.md) | the Angular structure, the product page's data flow, what Lighthouse and Playwright found |
 | [8. Logs, dashboards and alerts](08-observability.md) | how the system is observed through its logs, and what each alert means |
-| [9. Deployment and operations](09-deployment-and-operations.md) | what runs where, the three repositories, the environments, CI/CD and releases, day-2 commands |
+| [9. Deployment and operations](09-deployment-and-operations.md) | what runs where, the three folders, the environments, CI/CD and releases, day-2 commands |
 | [10. Testing and quality](10-testing-and-quality.md) | the test pyramid, what each layer proves, how to run it |
 | [11. Production readiness](11-production-readiness.md) | what is done, what the environment must still provide |
 | [12. From zero to production](12-from-zero.md) | the runbook for standing up staging and production |

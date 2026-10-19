@@ -24,5 +24,5 @@ Short records of the decisions that shape this codebase: the context, the decisi
 | 0018 | [Autoscaling and testing at scale](0018-autoscaling-and-scale-testing.md)   |
 | 0019 | [Content Security Policy and no third-party assets](0019-content-security-policy.md) |
 | 0020 | [Token verification at the gateway and a microcache shared per role](0020-edge-token-verification.md) |
-| 0021 | [Deployment layout: Kustomize overlays, servers outside the cluster, migrations in the pipeline](0021-deployment-layout.md) (revised: a deploy repository; pull model with SemVer releases; the API applies its migrations at startup) |
+| 0021 | [Deployment layout: Kustomize overlays, servers outside the cluster, migrations in the pipeline](0021-deployment-layout.md) (revised: a deploy repository; pull model with SemVer releases; the API applies its migrations at startup; one GitHub repository and GitHub Actions) |
 | 0022 | [The database at scale: indexes, vacuum and the ledger beyond 20 million rows](0022-database-at-scale.md) |

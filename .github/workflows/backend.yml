@@ -1,0 +1,305 @@
+# CI of the backend (the API, backend/). It only builds and publishes: it tests, builds and scans the API image, and
+# when someone tags a commit with a version it publishes that version and creates a GitHub Release. It never touches
+# an environment or deploy/: that folder chooses which published version each environment runs and applies it (the
+# "pull" model, deploy.yml and update-staging.yml); the new API pods then migrate their database themselves when they
+# start.
+#
+#   test ─────► build ─────────► scan ──────► publish (tag backend/vX.Y.Z only) ──► release (same tag only)
+#   format,     api image        Trivy        the image gets the tag X.Y.Z           a GitHub Release with the image
+#   build,      :<short sha>,    (fails on    (no v, SemVer), same digest            reference and digest, and the
+#   every test  migrations SQL   critical)                                           commits since the previous version
+#   suite       (artifact)
+#
+# Pull requests and pushes to main: test, build, scan; every image is
+# ghcr.io/<owner>/zeiss-product-management/api:<short sha> (a build of that commit, never deployed by a version rule).
+# Tags backend/v<MAJOR>.<MINOR>.<PATCH> or backend/v<MAJOR>.<MINOR>.<PATCH>-rc.<N> (backend/README.md, "How to release
+# a version"): test, build (reusing main's image of that commit when it exists), scan, then publish adds the tag
+# <MAJOR>.<MINOR>.<PATCH>[-rc.<N>] to that same image, and release creates the GitHub Release. A version is therefore
+# published only after its tests and its scan passed. update-staging.yml then picks the newest X.Y.Z up for staging;
+# production changes through a pull request.
+#
+# Nothing has to be configured: the jobs use only the workflow's own GITHUB_TOKEN (ghcr.io, releases, code scanning).
+# Protect the tags backend/v* (Settings → Rules → Rulesets, a tag ruleset) so only maintainers release. A version is
+# never overwritten: publish refuses to move an existing X.Y.Z to another image.
+name: Backend
+
+on:
+  push:
+    branches: [main]
+    tags: ["backend/v*"]
+    paths: ["backend/**", ".github/workflows/backend.yml"]
+  pull_request:
+    paths: ["backend/**", ".github/workflows/backend.yml"]
+  workflow_dispatch:
+
+# A new commit on the same branch or pull request cancels the run before it; a version tag always finishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  # Every image is built for both processor families: ordinary x86-64 servers and ARM ones (Apple silicon VMs,
+  # Graviton, Raspberry Pi). A node pulls only its own platform from the image index. The Dockerfile builds on the
+  # runner's own platform for both, so nothing is emulated.
+  PLATFORMS: linux/amd64,linux/arm64
+  # Tool versions, pinned (bump them with Dependabot or by hand).
+  TRIVY_IMAGE: aquasec/trivy:0.74.0
+  CRANE_VERSION: v0.20.3
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+defaults:
+  run:
+    shell: bash
+    working-directory: backend
+
+jobs:
+  # The names every other job uses: the image of this commit, and for a version tag the version.
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      version: ${{ steps.meta.outputs.version }}
+      push: ${{ steps.meta.outputs.push }}
+    steps:
+      - id: meta
+        working-directory: .
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # A pull request from a fork gets no token that can write packages: its images are built, not pushed.
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/api:${SHA::8}"
+          version=""
+          if [[ "$GITHUB_REF" == refs/tags/backend/v* ]]; then
+            version="${GITHUB_REF_NAME#backend/v}"
+            # SemVer with an optional release candidate -rc.N; any other backend/v* tag is refused.
+            if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]]; then
+              echo "::error::$GITHUB_REF_NAME is not backend/vX.Y.Z or backend/vX.Y.Z-rc.N"
+              exit 1
+            fi
+          fi
+          push=true
+          [[ "$FORK" != true ]] || push=false
+          { echo "image=$image"; echo "version=$version"; echo "push=$push"; } >> "$GITHUB_OUTPUT"
+          echo "Image: $image${version:+, version $version}"
+
+  # ─── test ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  # The integration and acceptance tests start PostgreSQL 18 and Redis 8 with Testcontainers
+  # (ProductManagement.Testing/TestInfrastructure.cs) on the runner's own Docker.
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: backend/global.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('backend/Directory.Packages.props', 'backend/global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - run: dotnet restore ProductManagement.sln
+      - run: dotnet format ProductManagement.sln --verify-no-changes --no-restore
+      - run: dotnet build ProductManagement.sln --configuration Release --no-restore
+      - run: >-
+          dotnet test --solution ProductManagement.sln --configuration Release --no-build
+          --report-xunit-junit --results-directory "$GITHUB_WORKSPACE/backend/TestResults"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: backend-test-results
+          path: backend/TestResults/*.junit.xml
+          retention-days: 30
+
+  # ─── build ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  # BuildKit (docker buildx) with the same Dockerfile as a local build, and a layer cache in GitHub's cache service
+  # (fast rebuilds on fresh runners). For a version tag the commit was normally built already by its run on main: that
+  # image is reused (the version is then exactly the bits that were tested on main), and it is built only if missing.
+  build:
+    needs: meta
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ${{ needs.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/login-action@v3
+        if: needs.meta.outputs.push == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: existing
+        if: needs.meta.outputs.version != ''
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "$IMAGE exists (built by the run on main): reusing it"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/setup-buildx-action@v3
+        if: steps.existing.outputs.found != 'true'
+      - uses: docker/build-push-action@v6
+        if: steps.existing.outputs.found != 'true'
+        with:
+          context: backend
+          platforms: ${{ env.PLATFORMS }}
+          pull: true
+          push: ${{ needs.meta.outputs.push == 'true' }}
+          tags: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+
+  # The exact SQL the migrations will run, for review in the pull request before it reaches production. Idempotent:
+  # each migration is guarded by the history table. Review artifact only: the API applies the migrations itself when
+  # it starts (EF Core's MigrateAsync, as the schema owner), which also runs the CREATE INDEX CONCURRENTLY statements
+  # outside a transaction (in this script they sit in DO blocks, where PostgreSQL does not allow them).
+  migrations-sql:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: backend/global.json
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('backend/Directory.Packages.props', 'backend/global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - run: dotnet tool restore
+      # `dotnet ef` builds the two projects without restoring them: a fresh clone has no obj/project.assets.json.
+      - run: dotnet restore ProductManagement.sln
+      - run: >-
+          dotnet ef migrations script --idempotent
+          --project ProductManagement.Infrastructure --startup-project ProductManagement.Api
+          --output migrations.sql
+      - uses: actions/upload-artifact@v4
+        with:
+          name: migrations-sql
+          path: backend/migrations.sql
+          retention-days: 90
+
+  # ─── scan ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  # Every vulnerability goes to the code scanning report (Security → Code scanning); the job fails on CRITICAL ones
+  # that have a fix (upgrade the base image or the package, or record an accepted risk in backend/.trivyignore with a
+  # reason and an expiry).
+  scan:
+    needs: [meta, build]
+    if: needs.meta.outputs.push == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    env:
+      IMAGE: ${{ needs.meta.outputs.image }}
+      TRIVY_USERNAME: ${{ github.actor }}
+      TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-${{ github.run_id }}
+          restore-keys: trivy-
+      - name: Trivy
+        run: |
+          mkdir -p ~/.cache/trivy
+          trivy() {
+            docker run --rm -e TRIVY_USERNAME -e TRIVY_PASSWORD -e TRIVY_NO_PROGRESS=true -e TRIVY_SCANNERS=vuln \
+              -v "$HOME/.cache/trivy:/root/.cache/trivy" -v "$PWD:/work" -w /work "$TRIVY_IMAGE" "$@"
+          }
+          trivy image --format sarif --output trivy.sarif "$IMAGE"
+          trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed "$IMAGE"
+      - uses: github/codeql-action/upload-sarif@v4
+        if: ${{ !cancelled() && hashFiles('backend/trivy.sarif') != '' }}
+        with:
+          sarif_file: backend/trivy.sarif
+          category: trivy-api
+
+  # ─── publish (version tags only) ──────────────────────────────────────────────────────────────────────────────────
+
+  # Publishes the version: the tag <MAJOR>.<MINOR>.<PATCH>[-rc.<N>] (the git tag without backend/v, SemVer as Argo CD
+  # Image Updater's semver strategy and deploy/scripts/versions.sh expect it) on the image this run tested and scanned.
+  # `crane tag` adds a tag in the registry without pulling or pushing the image, so the version has the same digest as
+  # the commit's build. The digest goes to the release job.
+  publish:
+    needs: [meta, test, build, scan]
+    if: needs.meta.outputs.version != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+    env:
+      IMAGE: ${{ needs.meta.outputs.image }}
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - name: Install crane
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -sSfL "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/go-containerregistry_Linux_x86_64.tar.gz" \
+            | tar -xzf - crane
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - id: publish
+        working-directory: .
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GITHUB_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          # A version is never overwritten: if X.Y.Z already exists it must already be this very image (a re-run of
+          # this job); anything else stops the release.
+          if existing="$(crane digest "${IMAGE%:*}:$VERSION" 2>/dev/null)"; then
+            if [[ "$existing" != "$(crane digest "$IMAGE")" ]]; then
+              echo "::error::${IMAGE%:*}:$VERSION already exists as another image ($existing): versions are never overwritten, release a new one"
+              exit 1
+            fi
+            echo "${IMAGE%:*}:$VERSION already points at this image: nothing to do"
+          else
+            crane tag "$IMAGE" "$VERSION"
+          fi
+          digest="$(crane digest "${IMAGE%:*}:$VERSION")"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Published ${IMAGE%:*}:$VERSION ($digest)"
+
+  # ─── release (version tags only) ──────────────────────────────────────────────────────────────────────────────────
+
+  # A GitHub Release named after the tag (Releases), with the gh CLI of the runner. Its description
+  # (ci/release-notes.sh) lists the published image with its digest and the commits since the previous backend version.
+  release:
+    needs: [meta, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      IMAGE: ${{ needs.meta.outputs.image }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      DIGEST: ${{ needs.publish.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: |
+          ci/release-notes.sh "$GITHUB_REF_NAME" "${IMAGE%:*}:$VERSION@$DIGEST" > release-notes.md
+          cat release-notes.md
+          prerelease=()
+          [[ "$VERSION" != *-rc.* ]] || prerelease=(--prerelease)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md "${prerelease[@]}"
+          fi

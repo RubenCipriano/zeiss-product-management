@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Checks every environment and the shared infrastructure without touching a cluster. The pipeline's validate job runs
-# it on every merge request and commit (scripts/ci/: run by the pipeline; by hand before you push, if you like); it
-# works anywhere kubectl (with Kustomize), kubeconform, yq and jq are installed, e.g. in the pipeline's image:
+# Checks every environment and the shared infrastructure without touching a cluster. The Deploy workflow's job
+# validate-manifests runs it on every pull request and commit (scripts/ci/: run by the workflows; by hand before you
+# push, if you like); it works anywhere kubectl (with Kustomize), kubeconform, yq and jq are installed, e.g. in the
+# workflow's image:
 #
 #   scripts/ci/validate.sh
-#   docker run --rm -v "$PWD:/work:ro" -w /work alpine/k8s:1.34.11 scripts/ci/validate.sh
+#   docker run --rm -v "$PWD/..:/work:ro" -w /work/deploy alpine/k8s:1.34.11 scripts/ci/validate.sh   # the whole repository
 #
 # environments/local, environments/staging, environments/production:
 #   1. it renders (kubectl kustomize);
@@ -13,17 +14,17 @@
 #   4. the API has both connection strings and applies its migrations at startup as the migrator (user and password
 #      from the Secret database-credentials), with a sample-data setting (never on in production); the gateway knows
 #      where the API, its keys and the log collector are;
-#   5. staging and production: no Secret (scripts/deploy.sh creates them from CI/CD variables, the repository never
-#      holds their values), every Deployment pulls with the Secret gitlab-registry, and every image is a registry
-#      image with a tag; local: the only Secret is api-secrets, generated from files that are never committed.
+#   5. staging and production: no Secret (scripts/deploy.sh creates them from the environment's secrets, the
+#      repository never holds their values), every Deployment pulls with the Secret registry-credentials, and every
+#      image is a registry image with a tag; local: the only Secret is api-secrets, generated from files that are never committed.
 #   local is rendered twice, once per image source of scripts/deploy.sh local: images built on this machine, and
-#   published images (registry names, a version, the pull Secret gitlab-registry: the checks of staging in 5).
+#   published images (registry names, a version, the pull Secret registry-credentials: the checks of staging in 5).
 # infra/:
 #   6. postgres.yaml, redis.yaml, logs.yaml and the dashboards' ConfigMap (as scripts/infra.sh renders it) are valid;
 #      every dashboard is valid JSON;
 #   7. every object is labelled app.kubernetes.io/part-of=infra and, but the Namespace, app.kubernetes.io/component
 #      postgres, redis or logs (scripts/infra.sh down selects by it); no Secret (infra.sh makes them in the cluster).
-# argocd/ (prepared for Argo CD, not used by the pipeline yet):
+# argocd/ (prepared for Argo CD, not used by the workflows yet):
 #   8. the Applications and the ImageUpdater are valid against the custom resource definitions of the Argo CD and
 #      Argo CD Image Updater versions the README installs (downloaded from their release tags, -strict), and each
 #      Application points at an environment folder that exists.
@@ -86,20 +87,20 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 images:
   - name: product-management/api
-    newName: registry.gitlab.com/zeiss/backend/api
+    newName: ghcr.io/rubencipriano/zeiss-product-management/api
     newTag: "1.0.0"
   - name: product-management/web
-    newName: registry.gitlab.com/zeiss/frontend/web
+    newName: ghcr.io/rubencipriano/zeiss-product-management/web
     newTag: "1.0.0"
   - name: product-management/gateway
-    newName: registry.gitlab.com/zeiss/frontend/gateway
+    newName: ghcr.io/rubencipriano/zeiss-product-management/gateway
     newTag: "1.0.0"
 patches:
   - target: { kind: Deployment }
     patch: |-
       - op: add
         path: /spec/template/spec/imagePullSecrets
-        value: [{ name: gitlab-registry }]
+        value: [{ name: registry-credentials }]
 EOF
 }
 [[ -f "$generated/build/kustomization.yaml" ]] || built_images > "$generated/build/kustomization.yaml"
@@ -154,8 +155,8 @@ for environment in local local-published staging production; do
 
   for deployment in api web gateway; do
     pull="$(query "select(.kind == \"Deployment\" and .metadata.name == \"$deployment\") | .spec.template.spec.imagePullSecrets[].name")"
-    [[ "$pull" == gitlab-registry ]] \
-      || fail "$deployment does not pull with imagePullSecrets gitlab-registry (environments/$folder/*.yaml)"
+    [[ "$pull" == registry-credentials ]] \
+      || fail "$deployment does not pull with imagePullSecrets registry-credentials (environments/$folder/*.yaml)"
   done
   while read -r image; do
     [[ "$image" == */*/*:* ]] \
@@ -203,7 +204,8 @@ if crd_schema "https://raw.githubusercontent.com/argoproj/argo-cd/$ARGOCD_VERSIO
   kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" -schema-location default \
     -schema-location "$work/schemas/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" - < "$rendered" || failed=1
   while read -r path; do
-    [[ -f "$ROOT/$path/kustomization.yaml" ]] || fail "an Application points at $path, which is not an environment"
+    # The path is relative to the repository's root, which holds this folder as deploy/.
+    [[ -f "$ROOT/../$path/kustomization.yaml" ]] || fail "an Application points at $path, which is not an environment"
   done < <(query 'select(.kind == "Application") | .spec.source.path')
 else
   fail "could not download the Argo CD / Image Updater CRDs (network?)"

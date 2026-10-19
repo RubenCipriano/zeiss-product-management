@@ -219,7 +219,7 @@ open http://localhost:3000                               # anonymous admin local
 * **Alerting → Alert rules**: the twelve rules below, in the folder *Product Management*.
 * **Explore** (data source *Loki*): any LogQL query.
 
-Everything in Grafana comes from files in the deploy repository, mounted from ConfigMaps and loaded at start-up: the Loki
+Everything in Grafana comes from files in `deploy/`, mounted from ConfigMaps and loaded at start-up: the Loki
 data source (`grafana-datasources`), the dashboard provider (`grafana-dashboard-provider`) and the alert rules,
 contact point and policy (`grafana-alerting`), all in [`deploy/infra/logs.yaml`](../../deploy/infra/logs.yaml); the dashboards are
 JSON files of their own in [`deploy/infra/dashboards/`](../../deploy/infra/dashboards/)
@@ -339,8 +339,8 @@ sum by (status) (count_over_time({namespace="product-management", app="gateway"}
 replicas, the API down, PostgreSQL unreachable); `500`/`503` = the API failed (its error lines have the exception and
 the `trace_id`); a bad release (do the errors start at an *API replica started* mark?).
 
-**Do:** if it started with a rollout, roll back: set the previous version in the deploy repository
-(`scripts/set-version.sh <env> api <previous version>`, committed; its pipeline applies it), or at once `kubectl -n product-management rollout undo deployment/api` until the
+**Do:** if it started with a rollout, roll back: set the previous version in `deploy/`
+(`scripts/set-version.sh <env> api <previous version>`, committed; the Deploy workflow applies it), or at once `kubectl -n product-management rollout undo deployment/api` until the
 revert is applied. If the
 database is the cause, see [DatabaseUnreachable](#databaseunreachable). Otherwise take one failing request's
 `trace_id` and read its API lines.
@@ -564,7 +564,7 @@ outdated tab) rather than everyone; `console.error: …` lines: an error the cod
 time and user).
 
 **Do:** if it started with a release and affects many users, roll the web app back (`scripts/set-version.sh <env> frontend
-<previous version>` in the deploy repository, or at once `kubectl -n product-management rollout undo deployment/web`) and fix it; otherwise reproduce it with the browser and
+<previous version>` in `deploy/`, or at once `kubectl -n product-management rollout undo deployment/web`) and fix it; otherwise reproduce it with the browser and
 page from the report (the stack trace points at the minified bundle of that release).
 
 ## Following one request

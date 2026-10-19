@@ -14,22 +14,21 @@
 # --platforms tells whether a version can run on a machine at all: a node pulls only an image built for its own
 # platform (an ARM server, or a VM on Apple silicon, is linux/arm64). scripts/deploy.sh checks it before it deploys.
 #
-# A version is a tag X.Y.Z or X.Y.Z-rc.N (SemVer): the backend and frontend pipelines publish it when someone tags a
+# A version is a tag X.Y.Z or X.Y.Z-rc.N (SemVer): the Backend and Frontend workflows publish it when someone tags a
 # commit vX.Y.Z. Every other tag (the commit builds, the build cache) is not a version. Sorting follows SemVer:
 # 1.10.0 > 1.9.0, and 1.4.0 > 1.4.0-rc.2 > 1.4.0-rc.1.
 #
 # Where: the repositories named in environments/staging/kustomization.yaml (images[].newName), e.g.
-# registry.gitlab.com/zeiss/backend/api. --registry (or REGISTRY) replaces their registry host, e.g. a mirror or a
-# test registry: --registry localhost:5050 (plain http for localhost and 127.0.0.1; or give the scheme:
+# ghcr.io/rubencipriano/zeiss-product-management/api. --registry (or REGISTRY) replaces their registry host, e.g. a
+# mirror or a test registry: --registry localhost:5050 (plain http for localhost and 127.0.0.1; or give the scheme:
 # --registry http://host:port).
 #
 # How: the registry's HTTP API (the Docker Registry v2 / OCI distribution API that every registry has), with curl:
 # GET /v2/<repository>/tags/list, following its pages; for --platforms, the version's manifest (an index lists one
-# image per platform) or, for a single image, its configuration. When the registry asks for a token (GitLab's does), the script
-# gets one from the registry's token service for "pull" only, with these credentials, the first that is set:
-#   REGISTRY_USER, REGISTRY_PASSWORD     any registry login, e.g. a personal or deploy token with read_registry
-#   CI_DEPLOY_USER, CI_DEPLOY_PASSWORD   in GitLab CI: the group deploy token named gitlab-deploy-token
-#                                        (read_registry), which GitLab passes to every job by itself
+# image per platform) or, for a single image, its configuration. When the registry asks for a token (ghcr.io does), the
+# script gets one from the registry's token service for "pull" only, with these credentials, the first that is set:
+#   REGISTRY_USER, REGISTRY_PASSWORD     any registry login, e.g. a GitHub user and a token with read:packages (in
+#                                        the GitHub workflows: the environment's secrets of the same names)
 #   your `docker login`                  ~/.docker/config.json, including a credential helper (macOS keychain)
 # No credential is printed or put on a command line (curl reads it from stdin).
 # Needs: bash, curl, jq (all in the pipeline's alpine/k8s image; setup-ubuntu.sh installs them on a server).
@@ -69,7 +68,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # The repository of an image (api, web, gateway), from staging's kustomization.yaml, with --registry applied.
-# Prints "<scheme>://<host> <path>", e.g. "https://registry.gitlab.com zeiss/backend/api".
+# Prints "<scheme>://<host> <path>", e.g. "https://ghcr.io rubencipriano/zeiss-product-management/api".
 # The newName is the line after the image's "- name:" (the file's own layout; read without yq).
 repository() {
   local name host path scheme
@@ -91,13 +90,11 @@ repository() {
   echo "$scheme://$host $path"
 }
 
-# "user:password" for a registry host, or nothing (anonymous): REGISTRY_*, then CI_DEPLOY_*, then docker login.
+# "user:password" for a registry host, or nothing (anonymous): REGISTRY_*, then docker login.
 credentials() {
   local host="$1" config="${DOCKER_CONFIG:-$HOME/.docker}/config.json" helper auth
   if [[ -n "${REGISTRY_USER:-}" && -n "${REGISTRY_PASSWORD:-}" ]]; then
     echo "$REGISTRY_USER:$REGISTRY_PASSWORD"
-  elif [[ -n "${CI_DEPLOY_USER:-}" && -n "${CI_DEPLOY_PASSWORD:-}" ]]; then
-    echo "$CI_DEPLOY_USER:$CI_DEPLOY_PASSWORD"
   elif [[ -f "$config" ]]; then
     helper="$(HOST="$host" jq -r '.credHelpers[env.HOST] // .credsStore // empty' "$config")"
     if [[ -n "$helper" ]] && command -v "docker-credential-$helper" >/dev/null; then
@@ -149,11 +146,11 @@ registry_get() {
       --data-urlencode "scope=repository:$path:pull" | token_of)"
   fi
   if [[ -z "$token" && -z "$login" ]]; then
-    echo "$host/$path is private and no credentials are set: REGISTRY_USER and REGISTRY_PASSWORD (a deploy" >&2
-    echo "token with read_registry), or docker login $host" >&2
+    echo "$host/$path is private and no credentials are set: REGISTRY_USER and REGISTRY_PASSWORD (a GitHub" >&2
+    echo "user and a token with read:packages), or docker login $host" >&2
     exit 1
   fi
-  [[ -n "$token" ]] || { echo "No registry token for $host/$path: check the credentials (read_registry)" >&2; exit 1; }
+  [[ -n "$token" ]] || { echo "No registry token for $host/$path: check the credentials (read:packages)" >&2; exit 1; }
   (umask 077; printf '%s' "$token" > "$token_file")
   registry_get "$@"
 }
@@ -162,7 +159,7 @@ registry_get() {
 refused() {
   local host="${1#*://}" path="$2" status="$3"
   case "$status" in
-    401 | 403) echo "Not allowed to read $host/$path ($status): check the credentials (read_registry)" >&2 ;;
+    401 | 403) echo "Not allowed to read $host/$path ($status): check the credentials (read:packages)" >&2 ;;
     *) echo "$host answered $status for $path" >&2 ;;
   esac
   exit 1

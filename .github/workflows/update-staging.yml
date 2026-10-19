@@ -1,0 +1,85 @@
+# Pulls the newest released versions into staging: deploy/scripts/ci/update-versions.sh staging sets every image to its
+# newest X.Y.Z in the registry (scripts/set-version.sh staging all latest; pre-releases and older versions are never
+# picked) and, if anything changed, commits "staging: api 1.4.0, ..." to main with the workflow's own GITHUB_TOKEN. A
+# push made with that token starts no workflow, so this job then deploys that commit itself (scripts/deploy.sh staging
+# apps and scripts/ci/smoke.sh, as deploy-staging does for people's commits); nothing changed, nothing deployed.
+#
+# Starts after every successful Backend or Frontend run of a version tag (a new release is published), or by hand
+# (Run workflow). To poll the registry as well, add a schedule (e.g. cron "*/15 * * * *"). To hold staging on an older
+# version, set the repository variable STAGING_HOLD to "true" first: this workflow then does nothing, while
+# deploy-staging still applies people's commits (the rollback itself); remove it to follow the releases again.
+#
+# Needs: the variable STAGING_ENABLED = "true", the environment staging and its secrets (deploy.yml), and permission
+# for github-actions[bot] to push to main (no branch protection on main, or a ruleset that lets GitHub Actions bypass;
+# or a secret DEPLOY_PUSH_TOKEN with contents: write).
+name: Update staging
+
+on:
+  workflow_run:
+    workflows: [Backend, Frontend]
+    types: [completed]
+  workflow_dispatch:
+
+# Never at the same time as deploy-staging (deploy.yml): the same concurrency group.
+concurrency:
+  group: staging
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: deploy
+
+jobs:
+  update-staging:
+    if: >-
+      vars.STAGING_ENABLED == 'true' && vars.STAGING_HOLD != 'true' && (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' &&
+      (startsWith(github.event.workflow_run.head_branch, 'backend/v') ||
+      startsWith(github.event.workflow_run.head_branch, 'frontend/v'))))
+    runs-on: ubuntu-24.04
+    container: alpine/k8s:1.34.11
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+      # Reads the registry with the job's own token and pushes the commit with it (or with DEPLOY_PUSH_TOKEN).
+      - run: scripts/ci/update-versions.sh staging
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_PUSH_TOKEN: ${{ secrets.DEPLOY_PUSH_TOKEN }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      - id: updated
+        run: |
+          if [[ -f .updated ]]; then
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Nothing new to deploy"
+          fi
+      - if: steps.updated.outputs.updated == 'true'
+        run: git fetch --quiet origin main && git checkout --quiet FETCH_HEAD
+      - if: steps.updated.outputs.updated == 'true'
+        uses: ./.github/actions/environment-secrets
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+          api-signing-key: ${{ secrets.API_SIGNING_KEY }}
+          api-consumers: ${{ secrets.API_CONSUMERS }}
+      - if: steps.updated.outputs.updated == 'true'
+        run: scripts/deploy.sh staging apps
+        env:
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      - if: steps.updated.outputs.updated == 'true'
+        run: scripts/ci/smoke.sh "${{ vars.STAGING_URL || 'https://staging.products.example.com' }}"
+        env:
+          SMOKE_CLIENT_ID: ${{ secrets.SMOKE_CLIENT_ID }}
+          SMOKE_CLIENT_SECRET: ${{ secrets.SMOKE_CLIENT_SECRET }}

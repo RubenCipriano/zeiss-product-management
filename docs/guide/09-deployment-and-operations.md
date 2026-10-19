@@ -1,12 +1,12 @@
 # 9. Deployment and operations
 
 **After this chapter you will know** what runs where (everything in Kubernetes: the application in its namespace,
-the shared PostgreSQL, Redis and logs in the namespace `infra`), how the system is split into three repositories
-(backend, frontend, and deploy, which describes every environment), how the manifests are split into the apps and
+the shared PostgreSQL, Redis and logs in the namespace `infra`), how the system is split into three folders of one
+repository (backend, frontend, and deploy, which describes every environment), how the manifests are split into the apps and
 one folder per environment, where the configuration and the passwords come from, what each script does step by step,
 how and why the API applies its own migrations when it starts (as which database user, and safely with several
 replicas), how releases work
-(the app pipelines publish SemVer versions, the deploy repository pulls them in: GitOps with a pull model), how Argo
+(the Backend and Frontend workflows publish SemVer versions, `deploy/` pulls them in: GitOps with a pull model), how Argo
 CD would take over, and the commands for day-to-day operation: rollouts,
 rollbacks, secret rotation, scaling, backups and restores, troubleshooting, resetting data and
 running load tests.
@@ -17,13 +17,15 @@ running load tests.
 
 ## The layout: three parts
 
-The system is in three GitLab repositories, each with its own pipeline: backend, frontend and deploy
-([ADR 0021](../adr/0021-deployment-layout.md), revision of 2026-10-10). The backend and the frontend hold only code,
-tests, Dockerfiles and the scripts their pipelines run; everything that describes what runs in a cluster is in the
-deploy repository (GitOps):
+The system is one GitHub repository,
+[RubenCipriano/zeiss-product-management](https://github.com/RubenCipriano/zeiss-product-management), with three
+folders, each with its own GitHub Actions workflows: backend, frontend and deploy
+([ADR 0021](../adr/0021-deployment-layout.md), revisions of 2026-10-10 and 2026-10-19). The backend and the frontend
+hold only code, tests, Dockerfiles and the scripts their workflows run; everything that describes what runs in a
+cluster is in `deploy/` (GitOps):
 
 ```text
-deploy/                             gitlab.com/zeiss/deploy: every environment, and the only pipeline that applies
+deploy/                             every environment; the Deploy workflow is the only one that applies it
 ├── apps/backend/                   the API, the same everywhere: namespace, deployment.yaml (configuration as env keys),
 │                                   service.yaml (`api`, headless), hpa.yaml, pdb.yaml, network-policy.yaml
 ├── apps/frontend/                  web.yaml, gateway.yaml (the namespace object is only in apps/backend)
@@ -46,24 +48,25 @@ deploy/                             gitlab.com/zeiss/deploy: every environment, 
 │   ├── versions.sh                 versions.sh <api|web|gateway|all>: the versions published in the registry
 │   ├── set-version.sh              set-version.sh <env> <image|frontend|all> <version|latest>: choose a version
 │   ├── add-node.sh                 joins a machine to a k3s cluster as a database, cache or apps node
-│   ├── ci/                         what only the pipeline runs:
+│   ├── ci/                         what only the workflows run:
 │   │   ├── validate.sh             renders and checks every environment, infra/ and argocd/ (the validate job)
-│   │   ├── update-versions.sh      the pipeline's commits: staging to the newest versions, production as a merge request
+│   │   ├── update-versions.sh      the workflows' commits: staging to the newest versions, production as a pull request
 │   │   └── smoke.sh                the smoke check of a deployed environment, through its public URL (by hand too)
 │   └── lib/                        what the other scripts call:
 │       ├── local-secrets.sh        the local signing key and demo consumers, generated once per machine
 │       └── create-database.sh      one database per service, its two users, the Secret database-credentials
-└── .gitlab-ci.yml
 
-backend/                            gitlab.com/zeiss/backend: the API; ci/release-notes.sh, .gitlab-ci.yml
-frontend/                           gitlab.com/zeiss/frontend: the web app, gateway/ (the gateway image), e2e/,
-                                    ci/release-notes.sh, .gitlab-ci.yml
+backend/                            the API; ci/release-notes.sh
+frontend/                           the web app, gateway/ (the gateway image), e2e/, ci/release-notes.sh
+.github/workflows/                  backend.yml, frontend.yml, deploy.yml, update-staging.yml, propose-production.yml,
+                                    codeql.yml; .github/actions/environment-secrets (the environments' files)
 ```
 
-Locally the three sit side by side (the monorepo, or three clones), and `deploy/scripts/deploy.sh local` builds the
-images from `../backend` and `../frontend` (`BACKEND_DIR`, `FRONTEND_DIR` to point elsewhere): what a developer wants
-to see their changes in a cluster. With only the deploy repository (a server, a demo) it runs a **published version**
-from the registry instead (`--version 1.0.0`, default `latest`), with a deploy token that may read the registry;
+Locally the three sit side by side in one clone, and `deploy/scripts/deploy.sh local` builds the images from
+`../backend` and `../frontend` (`BACKEND_DIR`, `FRONTEND_DIR` to point elsewhere): what a developer wants to see their
+changes in a cluster. With `--version` (a server, a demo), or with only `deploy/`, it runs a **published version**
+from the registry instead (`--version 1.0.0`, default `latest`), with a token that may read the packages
+(`read:packages`);
 `--build` and `--version` force one or the other, and staging and production never use the checkouts
 ([the deploy README](../../deploy/README.md#where-the-images-come-from-backend-frontend-or-the-registry)). `deploy/menu.sh` offers all of it as a numbered menu. Deploy in this order; each step
 only needs what the one before it started:
@@ -112,23 +115,24 @@ template, changing one rolls the pods like a code change, and `kubectl rollout u
 with the old code. The gateway works the same way (`GATEWAY_RATE_LIMIT_*`, `GATEWAY_TRUSTED_PROXIES`, `JWT_*` in
 `apps/frontend`; the addresses in the environments).
 
-**Three Secrets, no password in a connection string or a pipeline variable.** The API reads:
+**Three Secrets, no password in a connection string or a workflow secret.** The API reads:
 
 | Secret | Key | Becomes in the API | Made by |
 | --- | --- | --- | --- |
 | `database-credentials` | `app-password` | `PGPASSWORD`: Npgsql uses it when the connection string has no password (the readiness check's own connection too) | `deploy/scripts/lib/create-database.sh`, once per environment: a random password, kept on every re-run |
 | `redis-credentials` | `password` | `Redis__Password`: the API sets it on the Redis connection, over any password in the connection string | `deploy/scripts/deploy.sh` on every deploy: a copy of `infra/redis-auth`, because a pod can only read Secrets of its own namespace |
-| `api-secrets` | `signing-key` | `Authentication__SigningKey`: the ES256 private key that signs tokens | locally `generated/signing-key.pem`; staging and production the deploy project's CI/CD variable `API_SIGNING_KEY` (File) |
-| `api-secrets` | `consumers.json` | the file `/app/config/consumers.json`: client ids, PBKDF2 hashes, roles | locally `generated/consumers.json`; staging and production `API_CONSUMERS` (File) |
+| `api-secrets` | `signing-key` | `Authentication__SigningKey`: the ES256 private key that signs tokens | locally `generated/signing-key.pem`; staging and production the GitHub environment's secret `API_SIGNING_KEY` (the PEM's content) |
+| `api-secrets` | `consumers.json` | the file `/app/config/consumers.json`: client ids, PBKDF2 hashes, roles | locally `generated/consumers.json`; staging and production the secret `API_CONSUMERS` (the JSON's content) |
 
 The database and Redis passwords are random, created in the cluster (`infra.sh` makes `postgres-admin` and
-`redis-auth`, `create-database.sh` the users' passwords) and never leave it: no file, no pipeline variable holds
-them. `api-secrets` holds only the API's own keys. Locally `deploy/scripts/lib/local-secrets.sh` writes the two files into
+`redis-auth`, `create-database.sh` the users' passwords) and never leave it: no file, no secret of the repository
+holds them. `api-secrets` holds only the API's own keys. Locally `deploy/scripts/lib/local-secrets.sh` writes the two files into
 `deploy/environments/local/generated/` (gitignored, mode 600) once per machine, and the environment's
 `secretGenerator` makes `api-secrets-<hash>` from them: a changed file gives the Secret a new name, which changes the
 Deployment and rolls the pods. In staging and production the repository contains no Secret; `deploy/scripts/deploy.sh`
-creates `api-secrets` from the deploy project's CI/CD variables, and the registry credential `gitlab-registry` from
-the group deploy token.
+creates `api-secrets` from the secrets of the GitHub environment (which the action `environment-secrets` writes to
+files), and the registry credential `registry-credentials` from its `REGISTRY_USER` / `REGISTRY_PASSWORD` (a GitHub
+user and a classic personal access token with `read:packages`).
 
 **The shared infrastructure runs in the cluster.** PostgreSQL, Redis and the logs (Loki, Grafana, Alloy) run in
 Kubernetes like the application, in one namespace, `infra`, shared by every service on the cluster: one PostgreSQL
@@ -155,12 +159,12 @@ behave the same in their GNU and BSD versions; `.gitattributes` keeps the script
 | --- | --- | --- | --- |
 | Kubernetes | Docker Desktop's (context `docker-desktop`) | Docker Desktop's, WSL 2 backend (context `docker-desktop`) | k3s v1.34.1+k3s1, one node (context `default`) |
 | Prepared by | enabling Kubernetes in Docker Desktop | the same, plus WSL integration for Ubuntu; the scripts run in the Ubuntu shell | `deploy/scripts/setup-ubuntu.sh`: Docker Engine 29.9.0, kubectl v1.34.1, k3s, `git`/`openssl`/`python3`/`curl`/`jq` (about 1.5 minutes) |
-| How the images reach the cluster | built: the cluster runs on the Docker engine that built them; published: pulled with the Secret `gitlab-registry` | the same | built: `docker save … \| sudo k3s ctr images import -` (k3s has a containerd of its own; tags kept, `imagePullPolicy: IfNotPresent`); published: k3s pulls them itself |
+| How the images reach the cluster | built: the cluster runs on the Docker engine that built them; published: pulled with the Secret `registry-credentials` | the same | built: `docker save … \| sudo k3s ctr images import -` (k3s has a containerd of its own; tags kept, `imagePullPolicy: IfNotPresent`); published: k3s pulls them itself |
 | Gateway (`LoadBalancer`) | http://localhost:8080 | http://localhost:8080 | k3s' ServiceLB on the node's address: http://&lt;server-ip&gt;:8080 (and localhost on the server) |
 | Volumes | `hostpath` | `hostpath` | `local-path` (a directory on the server; `postgres-backups` binds at the first backup) |
 | metrics-server | installed by `infra.sh up` | the same | k3s' own (`infra.sh up` waits for it instead of installing a second) |
 | NetworkPolicies | not enforced | not enforced | enforced (k3s' network policy controller) |
-| Verified | every change | not run (scripts checked for macOS-only commands) | a fresh Ubuntu 24.04 VM (Multipass, 4 CPUs, 8 GB): setup, `infra.sh up`, `deploy.sh local`, smoke check, 14/14 requirement checks and 22/22 Playwright tests from the Mac, a start over from nothing; with only the deploy repository and `deploy.sh local --version 1.0.0`, the published path up to the pull: login, version check, `gitlab-registry`, k3s authenticated to the registry, but the 1.0.0 images are `linux/amd64` only and this VM is arm64, which `deploy.sh` now checks before it applies |
+| Verified | every change | not run (scripts checked for macOS-only commands) | a fresh Ubuntu 24.04 VM (Multipass, 4 CPUs, 8 GB): setup, `infra.sh up`, `deploy.sh local`, smoke check, 14/14 requirement checks and 22/22 Playwright tests from the Mac, a start over from nothing; with only `deploy/` and `deploy.sh local --version 1.0.0`, the published path up to the pull (against the registry used before the move to GitHub): login, version check, the pull Secret, k3s authenticated to the registry, but those 1.0.0 images were `linux/amd64` only and this VM is arm64, which `deploy.sh` now checks before it applies; not yet repeated against ghcr.io |
 
 For images it builds, `deploy.sh local` decides how to deliver them from the context (`docker-desktop`) or from a
 node that reports k3s (`v1.34.1+k3s1`) and is named like the machine it runs on; `LOCAL_CLUSTER=docker-desktop|k3s`
@@ -174,7 +178,7 @@ Two things the Ubuntu run brought to light and that are fixed for every platform
 
 ## What runs where
 
-**Namespace `infra`** (the deploy repository's `infra/`, applied by `deploy/scripts/infra.sh up`):
+**Namespace `infra`** (`deploy/infra/`, applied by `deploy/scripts/infra.sh up`):
 
 | Object | Kind | Component | What it does |
 | --- | --- | --- | --- |
@@ -204,8 +208,8 @@ idle after 60 s. The superuser `postgres` is used by the infra scripts and by pe
 | --- | --- | --- | --- |
 | `database-credentials` | Secret | platform (`create-database.sh`) | `host`, `port`, `database`, `app-user`, `app-password`, `migrator-user`, `migrator-password`. The API reads `app-password` (`PGPASSWORD`, its requests) and `migrator-user` / `migrator-password` (its migrations at startup). |
 | `redis-credentials` | Secret | platform (`deploy.sh`) | The shared Redis' password, copied from `infra/redis-auth` on every deploy. |
-| `api-secrets` (locally `api-secrets-<hash>`) | Secret | backend (local `secretGenerator` / `deploy.sh` from CI/CD variables) | The signing key and the consumers (above). |
-| `gitlab-registry` | Secret (staging, production) | platform (`deploy.sh`) | The registry credential every pod pulls with: the group deploy token `gitlab-deploy-token` (`read_registry`), which reads both projects' registries. |
+| `api-secrets` (locally `api-secrets-<hash>`) | Secret | backend (local `secretGenerator` / `deploy.sh` from the environment's secrets) | The signing key and the consumers (above). |
+| `registry-credentials` | Secret (staging, production; local with published images) | platform (`deploy.sh`) | The registry credential every pod pulls from ghcr.io with: `REGISTRY_USER` / `REGISTRY_PASSWORD`, a GitHub user and a classic personal access token with `read:packages`. |
 | `api` | Deployment (no fixed count) | backend | The API pods, with their configuration as env keys. Each new pod first applies the database migrations (below), then serves. Rolling update with `maxUnavailable: 0`, a 5 s `preStop` pause, a startup probe of up to 10 minutes (for a long migration), readiness and liveness probes, 5 old ReplicaSets kept. Pool of 10 database connections per pod, plus one for the readiness check. |
 | `api` | Service (headless, `clusterIP: None`) | backend | **The API's only Service.** `api.product-management.svc.cluster.local` lists every ready API pod; the gateway balances over them per request and downloads the public signing key from it ([chapter 2](02-request-journey.md#why-the-apis-service-is-headless)). |
 | `api` | HorizontalPodAutoscaler | backend | 2–8 pods at 60 % CPU ([chapter 6](06-scaling-and-capacity.md)). |
@@ -225,15 +229,15 @@ The application namespace holds no data: everything that must survive is in `inf
 
 ## The deploy scripts, step by step
 
-The deploy repository keeps few files in view: `menu.sh` (a numbered menu that shows each command before it runs it),
-six scripts a person runs in `scripts/`, the three only the pipeline runs in `scripts/ci/`, and the two the others call
+`deploy/` keeps few files in view: `menu.sh` (a numbered menu that shows each command before it runs it),
+six scripts a person runs in `scripts/`, the three only the workflows run in `scripts/ci/`, and the two the others call
 in `scripts/lib/` (`create-database.sh` is still run by hand for another service, or with `--rotate`).
 
 ### `deploy/scripts/infra.sh`
 
 `deploy/scripts/infra.sh up|down|status [postgres] [redis] [logs] [--delete-data]`; no component means all three, in
 that order. It applies the files in `deploy/infra/` to the current `kubectl` context. `deploy.sh <env> infra` runs
-`infra.sh up` (the deploy pipeline's manual `infra:<env>` jobs).
+`infra.sh up` (the Deploy workflow's `infra-staging` / `infra-production` jobs, started by hand).
 
 `up` first creates the namespace `infra` and, when the cluster has no metrics API, installs metrics-server (on Docker
 Desktop with `--kubelet-insecure-tls`, because its kubelet's certificate does not name the node). Then, per component:
@@ -293,10 +297,10 @@ them (only Docker Desktop's and a k3s on this machine can) and staging or produc
 shared PostgreSQL and Redis running.
 
 **`local`** builds and applies what is in the sibling checkouts, or applies a published version. It prints which
-(`Images: built from ../backend and ../frontend`, or `Images: published 1.0.0 from registry.gitlab.com`):
+(`Images: built from ../backend and ../frontend`, or `Images: published 1.0.0 from ghcr.io`):
 
 0. **Published only, before anything changes:** the registry login (`REGISTRY_USER` / `REGISTRY_PASSWORD`, else
-   `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD`, else `docker login registry.gitlab.com`), and `versions.sh` to check the
+   `docker login ghcr.io`), and `versions.sh` to check the
    version exists for api, web and gateway (`latest`: the newest `X.Y.Z` all three have). Missing: it stops and lists
    what is published.
 
@@ -308,9 +312,9 @@ shared PostgreSQL and Redis running.
    `product-management/gateway:<tag>` with Docker; on k3s copies them into its containerd
    (`docker save | sudo k3s ctr images import -`). Either way it writes the images into the Kustomize Component
    `deploy/environments/local/generated/build/` (not committed): the built tags, or the registry names, the version
-   and `imagePullSecrets: gitlab-registry` of a published version. The committed overlay stays the same for both, and
+   and `imagePullSecrets: registry-credentials` of a published version. The committed overlay stays the same for both, and
    `kubectl diff -k deploy/environments/local` compares with exactly what was applied.
-3. **The shared Secrets:** published only: the pull Secret `gitlab-registry` from the login (the cluster pulls the
+3. **The shared Secrets:** published only: the pull Secret `registry-credentials` from the login (the cluster pulls the
    images itself, Docker Desktop and k3s alike). Creates the database the first time (`create-database.sh`, when
    `database-credentials` is missing in `product-management`), and copies the password of `infra/redis-auth` into
    `redis-credentials`.
@@ -318,14 +322,16 @@ shared PostgreSQL and Redis running.
    `gateway`; restarts the API when one of its Secrets changed. The first new API pod applies the migrations as
    `pm_migrator` before it serves (below).
 
-**`staging`, `production`** apply what is committed, nothing else (the deploy pipeline's `deploy:<env>` jobs):
+**`staging`, `production`** apply what is committed, nothing else (the Deploy workflow's `deploy-staging` /
+`deploy-production` jobs, and Update staging):
 
 1. renders `deploy/environments/<env>` and **refuses** it while an image still has `newTag: unreleased` (the
    placeholder until a version is chosen): release a version in backend and frontend and set it
-   (`set-version.sh`, or `update:staging`) first;
-2. checks that `database-credentials` exists (if not, it stops and prints the `create-database.sh` command);
-3. creates the Secret `gitlab-registry` from `CI_DEPLOY_USER` / `CI_DEPLOY_PASSWORD` (the group deploy token) and
-   `api-secrets` from the files `API_SIGNING_KEY` and `API_CONSUMERS`, when they are set (otherwise it keeps the
+   (`set-version.sh`, or the workflow Update staging) first;
+2. creates the service's database and users on the first deploy to that cluster (`create-database.sh`, when
+   `database-credentials` is missing);
+3. creates the Secret `registry-credentials` from `REGISTRY_USER` / `REGISTRY_PASSWORD` (the environment's secrets)
+   and `api-secrets` from the files `API_SIGNING_KEY` and `API_CONSUMERS`, when they are set (otherwise it keeps the
    existing ones, and stops if there are none);
 4. copies `infra/redis-auth` into `redis-credentials`;
 5. applies the rendered environment, waits for the three rollouts and restarts the API when one of its Secrets
@@ -334,12 +340,11 @@ shared PostgreSQL and Redis running.
 
 | Variable | Effect |
 | --- | --- |
-| `KUBE_CONTEXT` | the kubectl context (the GitLab agent's `<project>:<agent>`); default: the current context |
+| `KUBE_CONTEXT` | the kubectl context; default: the current context (in the workflows: of the kubeconfig written from the environment's secret `KUBECONFIG`) |
 | `BACKEND_DIR`, `FRONTEND_DIR` | local: the checkouts to build (default `../backend`, `../frontend`); when both exist, `local` builds |
-| `REGISTRY_USER`, `REGISTRY_PASSWORD` | local, published: a deploy token with `read_registry` (a server: a group deploy token of its own, e.g. `server-pull`) → Secret `gitlab-registry`. The images must be built for the nodes' platform (`versions.sh all --platforms <version>`; 1.0.0 is `linux/amd64` only; every later release is built for `linux/amd64` and `linux/arm64`) |
+| `REGISTRY_USER`, `REGISTRY_PASSWORD` | local (published), staging, production: a GitHub user and a classic personal access token with `read:packages` (a server: a token of its own; staging and production: the environment's secrets) → Secret `registry-credentials`. The images must be built for the nodes' platform (`versions.sh all --platforms <version>`; the workflows build every image for `linux/amd64` and `linux/arm64`) |
 | `LOCAL_CLUSTER` | local: `docker-desktop` or `k3s`, when the detection is wrong |
 | `LOGS=off` | local: a patch that sets the gateway's `COLLECTOR_UPSTREAM` to `""`: its `collector.sh` then makes `/collect` answer 204 and drop the reports instead of proxying to a collector that is not there |
-| `CI_DEPLOY_USER`, `CI_DEPLOY_PASSWORD`, `CI_REGISTRY` | staging, production: the registry credential (GitLab passes the group deploy token by itself) |
 | `API_SIGNING_KEY`, `API_CONSUMERS` | staging, production: files with the API's ES256 private key (PEM) and `consumers.json` |
 
 ### `deploy/scripts/ci/validate.sh` and `deploy/scripts/ci/smoke.sh`
@@ -375,15 +380,16 @@ deploy/scripts/ci/smoke.sh http://localhost:8080
 ```
 
 Keeping the data and rebuilding only the application is just the last two commands. On the Ubuntu VM the whole block
-took 103 s. With only the deploy repository, the deploy line is
+took 103 s. For a published version, the deploy line is
 `REGISTRY_USER=… REGISTRY_PASSWORD=… deploy/scripts/deploy.sh local --version 1.0.0`; the menu's item 9 runs the whole
 block after you type `delete everything`.
 
-**A new environment, the first time:** cluster (k3s, nodes joined with `add-node.sh`), the GitLab variables and the
-group deploy token, `infra:<environment>` (the first deploy creates the database), `STAGING_ENABLED` / `PRODUCTION_ENABLED` and the
-`update:staging` schedule, then a first version tag in backend and in frontend; the deploy pipeline refuses the
-`unreleased` placeholders until every image has a version. The
-step-by-step list is in the deploy repository's README ("A new environment, the first time") and, with every variable, in
+**A new environment, the first time:** cluster (k3s, nodes joined with `add-node.sh`), the GitHub environment with
+its secrets (production with required reviewers) and the repository variables, `STAGING_ENABLED` /
+`PRODUCTION_ENABLED`, Deploy → Run workflow → "<environment> infra" (the first deploy creates the database), then a
+first version tag of backend and of frontend (`backend/v1.0.0`, `frontend/v1.0.0`), which Update staging follows; the
+Deploy workflow refuses the `unreleased` placeholders until every image has a version. The step-by-step list is in
+the deploy README ("A new environment, the first time") and, with every secret and variable, in
 [chapter 12](12-from-zero.md).
 
 ## Image tags
@@ -395,14 +401,14 @@ step-by-step list is in the deploy repository's README ("A new environment, the 
   those two. The tags are written quoted (`newTag: "1186184"`): a hash made only of digits is otherwise a YAML
   number. A folder that is not a git checkout gets `dev-<timestamp>`. A published version (`deploy.sh local
   --version 1.0.0`) runs the release tags of the registry instead, like staging.
-* **Builds:** every app pipeline tags its images with the commit's short SHA and pushes them to the project's
-  registry (`registry.gitlab.com/zeiss/backend/api`, `.../frontend/web`, `.../frontend/gateway`). These are candidates:
-  no environment runs a commit build by itself.
-* **Versions (staging and production):** a git tag `vX.Y.Z` (SemVer, optionally `-rc.N`) on a commit of `main` makes
-  the tag pipeline add the tag `X.Y.Z` (without the `v`) to the same image after its tests and scan passed
-  (`crane tag`: same digest), and create a GitLab Release. The version that runs is the `newTag` in
-  `deploy/environments/<env>/kustomization.yaml`, set by `deploy/scripts/set-version.sh` (for staging by the scheduled
-  `update:staging`); nothing else decides it. A version is never overwritten: the publish jobs refuse to retag an existing `X.Y.Z` with another image.
+* **Builds:** the Backend and Frontend workflows tag their images with the first 8 characters of the commit's SHA
+  and push them to the repository's registry (`ghcr.io/rubencipriano/zeiss-product-management/api`, `.../web`,
+  `.../gateway`). These are candidates: no environment runs a commit build by itself.
+* **Versions (staging and production):** a git tag `backend/vX.Y.Z` or `frontend/vX.Y.Z` (SemVer, optionally `-rc.N`)
+  on a commit of `main` makes the tag's run add the tag `X.Y.Z` (without the prefix) to the same image after its tests
+  and scan passed (`crane tag`: same digest), and create a GitHub Release. The version that runs is the `newTag` in
+  `deploy/environments/<env>/kustomization.yaml`, set by `deploy/scripts/set-version.sh` (for staging by the workflow
+  Update staging, after every release); nothing else decides it. A version is never overwritten: the publish jobs refuse to retag an existing `X.Y.Z` with another image.
 
 ## The API applies its own migrations when it starts
 
@@ -441,7 +447,7 @@ new api pod starts
   (`periodSeconds: 5`, `failureThreshold: 120`) for a long migration or the wait for another pod's; the migration's
   statements and the wait are bounded by the same 10 minutes.
 * **A failed migration stops the rollout, not the service.** The new pod exits and restarts (`CrashLoopBackOff`),
-  never becomes ready, and with `maxUnavailable: 0` every old pod keeps serving. `deploy.sh` (and the `deploy:<env>`
+  never becomes ready, and with `maxUnavailable: 0` every old pod keeps serving. `deploy.sh` (and the `deploy-<env>`
   job) fails at the rollout wait; `kubectl -n product-management logs deployment/api` shows the error.
 * **Large indexes are built `CONCURRENTLY`** by the migrations that add them, and storage parameters (the per-table
   autovacuum settings of [ADR 0022](../adr/0022-database-at-scale.md)) are instant `ALTER TABLE … SET`, so the tables
@@ -452,8 +458,8 @@ new api pod starts
   Testcontainers database).
 * **Expand/contract.** During the rollout the old and the new pods run side by side on the new schema. A migration
   must therefore keep working with the version still running (add first, remove in a later release). A rollback never
-  undoes a migration; a bad one is fixed forward. The SQL of each version is the backend pipeline's `migrations:sql`
-  artifact, reviewed in the merge request.
+  undoes a migration; a bad one is fixed forward. The SQL of each version is the Backend workflow's `migrations-sql`
+  artifact, reviewed in the pull request.
 
 Why at startup and not as a separate step (what this project did before, a one-off `migrate` pod that `deploy.sh`
 ran before applying): one path for every environment and every way of running the image, nothing to forget or to keep
@@ -461,102 +467,114 @@ in step with the image tag, and no Argo CD hook to maintain. The two reasons a s
 replicas racing and the app needing schema rights, are handled by the advisory lock and the separate migrator
 credentials ([ADR 0021](../adr/0021-deployment-layout.md), revision of 2026-10-11).
 
-## CI/CD pipelines
+## CI/CD workflows
 
-One GitLab pipeline per repository (backend, frontend, deploy), the only CI/CD. The flow is GitOps with a **pull**
-release model: the backend and frontend pipelines test, build and scan their images and, for a version tag, *publish*
-the version (`X.Y.Z`) and a GitLab Release; they never touch the deploy repository or a cluster. The deploy
-repository's pipeline pulls versions in (a schedule for staging, a merge request for production), applies what its
-`main` holds (the new API pods migrate the database as they start), and smoke-checks it.
+GitHub Actions in the one repository (`.github/workflows/`), the only CI/CD: each folder has its own workflows,
+started only by changes to that folder. The flow is GitOps with a **pull** release model: the Backend and Frontend
+workflows test, build and scan their images and, for a version tag, *publish* the version (`X.Y.Z`) and a GitHub
+Release; they never touch `deploy/` or a cluster. `deploy/`'s workflows pull versions in (Update staging after every
+release, a pull request for production), apply what `main` holds (the new API pods migrate the database as they
+start), and smoke-check it.
 
 ```text
-backend   tag v1.4.0 → test → build → scan → publish:api (api:1.4.0) → release (GitLab Release v1.4.0)
-frontend  tag v2.1.0 → test → build → scan → publish:web, publish:gateway (2.1.0) → release
-                                               │ the registry
+Backend    tag backend/v1.4.0 → test → build → scan → publish (api:1.4.0) → release (GitHub Release backend/v1.4.0)
+Frontend   tag frontend/v2.1.0 → test → build → scan → publish (web, gateway 2.1.0) → release
+                                               │ ghcr.io, and the run's success
                                                ▼
-deploy    schedule: update:staging (newest X.Y.Z) ── commit "staging: api 1.4.0, web 2.1.0, gateway 2.1.0" to main
-          main: environments/staging changed → deploy:staging (apply; the API migrates) → smoke:staging
+Update staging (newest X.Y.Z) ── commit "staging: api 1.4.0, web 2.1.0, gateway 2.1.0" to main, then deploy + smoke
+Deploy     main: environments/staging changed (a person's commit) → deploy-staging (apply; the API migrates; smoke)
 
-deploy    propose:production (manual) or set-version.sh production … ── merge request "production: api 1.4.0, …"
+Propose production (Run workflow) or set-version.sh production … ── pull request "production: api 1.4.0, …"
                                                                           ▼  (merged by a person)
-          main: environments/production changed → deploy:production (manual: apply; the API migrates) → smoke:production
+Deploy     main: environments/production changed → deploy-production (after a required reviewer approves:
+           apply; the API migrates; smoke)
 ```
 
 Why pull and not push (the previous design, where each app pipeline committed its new tag into the deploy repository
-with a write token of it): the app repositories need no credential of the deploy repository or of any cluster, so a
-compromised or mistaken app pipeline cannot change an environment; an environment runs named versions with release
+with a write token of it): the Backend and Frontend workflows need no credential of `deploy/` or of any cluster, so a
+compromised or mistaken app build cannot change an environment; an environment runs named versions with release
 notes, not commit hashes; upgrade and downgrade are one command; and it is the model Argo CD Image Updater implements,
 so moving to Argo CD changes who does each step, not the flow ([ADR 0021](../adr/0021-deployment-layout.md)).
 
-Every step a pipeline runs is a script in that repository that also runs on a laptop. The jobs that touch a cluster
-(the deploy repository's deploy and infra jobs) reach it through the GitLab agent for Kubernetes (`KUBE_CONTEXT`), so
-no cluster API is exposed to the runners, or with a kubeconfig (a File variable `KUBECONFIG`). The staging and
-production jobs exist only once the environment is switched on (deploy project or group variables `STAGING_ENABLED` /
-`PRODUCTION_ENABLED` = `true`); until then a pipeline on `main` stops, green, after validate. The pods pull the
-private images with the Secret `gitlab-registry`, made from the zeiss group's deploy token `gitlab-deploy-token`
-(`read_registry`), which reads both registries; `versions.sh` lists the published versions with the same token.
+Every step a workflow runs is a script in that folder that also runs on a laptop. The jobs that touch a cluster
+(Deploy's deploy and infra jobs, Update staging) reach it with the kubeconfig in the GitHub environment's secret
+`KUBECONFIG`, which the composite action `.github/actions/environment-secrets` writes to a file (with the API's key and
+consumers). The staging and production jobs run only once the environment is switched on (repository variables
+`STAGING_ENABLED` / `PRODUCTION_ENABLED` = `true`); until then a Deploy run on `main` stops, green, after validate.
+The pods pull the images from ghcr.io with the Secret `registry-credentials`, made from the environment's
+`REGISTRY_USER` / `REGISTRY_PASSWORD` (a GitHub user and a classic personal access token with `read:packages`); the
+workflows themselves read the registry with their own `GITHUB_TOKEN`.
 
-*Backend* ([`backend/.gitlab-ci.yml`](../../backend/.gitlab-ci.yml)):
+*Backend* ([`.github/workflows/backend.yml`](../../.github/workflows/backend.yml)):
 
-| Stage | Jobs | Runs on |
+| Job | Does | Runs on |
 | --- | --- | --- |
-| test | `test:backend` (`dotnet format --verify-no-changes`, Release build with warnings as errors, every test suite, the integration and acceptance tests with PostgreSQL and Redis from Testcontainers on Docker-in-Docker, JUnit), GitLab SAST and secret detection | merge requests, `main`, version tags |
-| build | `build:api` → `$CI_REGISTRY_IMAGE/api:<short sha>` (a tag pipeline reuses the image `main` built); `migrations:sql` (`dotnet restore`, then the idempotent SQL of every migration, for review in the merge request) | merge requests, `main`, version tags |
-| scan | `scan:api`: Trivy, fails on fixable critical vulnerabilities | merge requests, `main`, version tags |
-| publish | `publish:api` (`crane tag` in the `crane/debug` image: `api:<short sha>` also becomes `api:X.Y.Z`; the digest goes to `release` as a dotenv variable) | tags `vX.Y.Z[-rc.N]` only |
-| release | `release` (GitLab's `release:` keyword, `release-cli` image: the Release `vX.Y.Z` with the image and digest and `git log` since the previous version, `ci/release-notes.sh`) | tags `vX.Y.Z[-rc.N]` only |
+| `test` | `dotnet format --verify-no-changes`, Release build with warnings as errors, every test suite (the integration and acceptance tests with PostgreSQL and Redis from Testcontainers on the runner's Docker); JUnit as the artifact `backend-test-results` | pull requests and pushes to `main` that change `backend/`, version tags |
+| `build` | `ghcr.io/rubencipriano/zeiss-product-management/api:<short sha>` for amd64 and arm64 (buildx, cache `type=gha`; a tag's run reuses the image `main` built) | the same |
+| `migrations-sql` | `dotnet restore`, then the idempotent SQL of every migration, as the artifact `migrations-sql` for review in the pull request | the same |
+| `scan` | Trivy: SARIF to Security → Code scanning (`trivy-api`), fails on fixable critical vulnerabilities | the same (not for pull requests from forks) |
+| `publish` | `crane tag`: `api:<short sha>` also becomes `api:X.Y.Z`; the digest goes to `release` | tags `backend/vX.Y.Z[-rc.N]` only |
+| `release` | `gh release create`: the GitHub Release `backend/vX.Y.Z` with the image and digest and `git log` of `backend/` since the previous backend version (`ci/release-notes.sh`) | tags `backend/vX.Y.Z[-rc.N]` only |
 
-*Frontend* ([`frontend/.gitlab-ci.yml`](../../frontend/.gitlab-ci.yml)):
+*Frontend* ([`.github/workflows/frontend.yml`](../../.github/workflows/frontend.yml)):
 
-| Stage | Jobs | Runs on |
+| Job | Does | Runs on |
 | --- | --- | --- |
-| test | `test:frontend` (`npm run lint`, `format:check`, `test:ci`, `build`), SAST and secret detection | merge requests, `main`, version tags |
-| build | `build:web`, `build:gateway` → `$CI_REGISTRY_IMAGE/{web,gateway}:<short sha>` | merge requests, `main`, version tags |
-| scan | `scan:web`, `scan:gateway` (Trivy) | merge requests, `main`, version tags |
-| publish | `publish:web`, `publish:gateway` (both need every test and scan: a version is published for both or for none) | tags `vX.Y.Z[-rc.N]` only |
-| release | `release` (both images and digests, the commits since the previous version) | tags `vX.Y.Z[-rc.N]` only |
+| `test` | `npm run lint`, `format:check`, `test:ci` (JUnit as the artifact `frontend-test-results`), `build` | pull requests and pushes to `main` that change `frontend/`, version tags |
+| `build` (web, gateway) | `ghcr.io/rubencipriano/zeiss-product-management/{web,gateway}:<short sha>` | the same |
+| `scan` (web, gateway) | Trivy (`trivy-web`, `trivy-gateway`) | the same |
+| `publish` | one job for both images, after every test and scan: a version is published for both or for none | tags `frontend/vX.Y.Z[-rc.N]` only |
+| `release` | both images and digests, the commits of `frontend/` since the previous frontend version | tags `frontend/vX.Y.Z[-rc.N]` only |
 
-The end-to-end tests (Playwright, `frontend/e2e/`) are not a pipeline job: they need the whole running system. Run
-them by hand against an environment (`BASE_URL=<environment url> npm run e2e`, [`frontend/README.md`](../../frontend/README.md)).
+Static analysis is the workflow CodeQL (`codeql.yml`: C#, TypeScript and the workflows, on every pull request, push to
+`main` and weekly); secrets are caught by GitHub's secret scanning and push protection. The end-to-end tests
+(Playwright, `frontend/e2e/`) are not a workflow job: they need the whole running system. Run them by hand against an
+environment (`BASE_URL=<environment url> npm run e2e`, [`frontend/README.md`](../../frontend/README.md)).
 
-*Deploy* ([`deploy/.gitlab-ci.yml`](../../deploy/.gitlab-ci.yml)):
+*Deploy* ([`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml),
+[`update-staging.yml`](../../.github/workflows/update-staging.yml),
+[`propose-production.yml`](../../.github/workflows/propose-production.yml)):
 
-| Stage | Jobs | Runs on |
+| Workflow → job | Does | Runs on |
 | --- | --- | --- |
-| validate | `validate:manifests` (`scripts/ci/validate.sh`: every environment, `infra/` and `argocd/`; extracts the inline Alloy configuration), `validate:scripts` (`shellcheck` on `menu.sh` and `scripts/`, `scripts/ci/`, `scripts/lib/`), `validate:alloy` (`alloy validate` and `alloy fmt` on that configuration) | merge requests, `main` (not schedules) |
-| staging | `update:staging` (`scripts/ci/update-versions.sh staging`: the newest `X.Y.Z` of each image, committed to `main` with the job's own token, then applied and smoke-checked in the same job, since a job-token push starts no pipeline); `deploy:staging` (`scripts/deploy.sh staging apps`: apply, wait for the rollouts) → `smoke:staging` (`scripts/ci/smoke.sh $STAGING_URL`), automatic when a commit changes `environments/staging`, `apps/`, `infra/`, `scripts/deploy.sh` or `scripts/lib/`; `infra:staging` (**manual**, `scripts/deploy.sh staging infra`) | `update:staging`: the pipeline schedule (or manual on `main`); the others `main` with `STAGING_ENABLED` |
-| production | `propose:production` (**manual**: the merge request with staging's versions); `deploy:production` (**manual**, protected environment) → `smoke:production`, when a commit changes `environments/production`, `apps/` or `scripts/deploy.sh`; `infra:production` (**manual**) | `main` with `PRODUCTION_ENABLED` |
+| Deploy → `validate-manifests`, `validate-scripts`, `validate-alloy` | `scripts/ci/validate.sh` (every environment, `infra/` and `argocd/`); `shellcheck` on `menu.sh` and `scripts/`, `scripts/ci/`, `scripts/lib/`; `alloy validate` and `alloy fmt` on the configuration inside `infra/logs.yaml` | pull requests and pushes that change `deploy/`, Run workflow |
+| Deploy → `deploy-staging` | `scripts/deploy.sh staging apps` (apply, wait for the rollouts), then `scripts/ci/smoke.sh $STAGING_URL` | `main` with `STAGING_ENABLED`, when a commit changes `deploy/environments/staging`, `apps/`, `infra/`, `scripts/deploy.sh` or `scripts/lib/`; Run workflow → "staging apps" |
+| Deploy → `deploy-production` | the same for production, after a **required reviewer** of the environment `production` approves | `main` with `PRODUCTION_ENABLED`, when a commit changes `deploy/environments/production`, `apps/`, `scripts/deploy.sh` or `scripts/lib/`; Run workflow → "production apps" |
+| Deploy → `infra-staging`, `infra-production` | `scripts/deploy.sh <env> infra` (production after approval) | **Run workflow** only: "staging infra", "production infra" |
+| Update staging → `update-staging` | `scripts/ci/update-versions.sh staging`: the newest `X.Y.Z` of each image, committed to `main` with `GITHUB_TOKEN`, then applied and smoke-checked in the same job, since a push made with `GITHUB_TOKEN` starts no workflow | after every successful Backend or Frontend run of a version tag, with `STAGING_ENABLED`; Run workflow |
+| Propose production → `propose-production` | `scripts/ci/update-versions.sh production`: a branch and the pull request with staging's versions (REST API) | Run workflow on `main`, with `PRODUCTION_ENABLED` |
 
-With the environment-scoped `LOKI_URL` (and `LOKI_USERNAME` / `LOKI_PASSWORD`) the infra jobs make Alloy push to that
-Loki. No pipeline creates a database: `create-database.sh` is a separate, deliberate step, once per service and
-environment, run by an operator with access to the cluster.
+The jobs of one environment share a concurrency group (`staging`, `production`), so two never run at once. With the
+environment's `LOKI_URL` (and `LOKI_USERNAME` / `LOKI_PASSWORD`) the infra jobs make Alloy push to that Loki. The first
+deploy to a cluster creates the service's database (`create-database.sh`, when `database-credentials` is missing);
+for another service it is a separate, deliberate step, run by an operator with access to the cluster.
 
-**Version changes and rollbacks are commits.** `git log environments/staging` in the deploy repository is staging's
-deployment history (one commit per change: "staging: api 1.4.0"); production changes only through merged merge requests,
-so merging is the release decision. A rollback is the same command with an older version (`scripts/set-version.sh
-production api 1.3.2`, through a merge request; or `git revert` of the version commit): the pipeline applies the older
-images (their migrations are already applied: nothing to do). For staging, deactivate the schedule first, or
-`update:staging` moves it forward again. Migrations are never rolled back (expand/contract, above).
+**Version changes and rollbacks are commits.** `git log deploy/environments/staging` is staging's deployment history
+(one commit per change: "staging: api 1.4.0"); production changes only through merged pull requests, so merging (and
+the reviewer's approval of `deploy-production`) is the release decision. A rollback is the same command with an older
+version (`scripts/set-version.sh production api 1.3.2`, through a pull request; or `git revert` of the version
+commit): the Deploy workflow applies the older images (their migrations are already applied: nothing to do). In
+staging the next release moves it forward again; to hold it longer, set the repository variable `STAGING_HOLD`
+to `true` (`update-staging` pauses; `deploy-staging` still applies commits). Migrations are never rolled back (expand/contract, above).
 
-**Argo CD, prepared.** `deploy/argocd/` holds what takes over from the pipeline once Argo CD runs in the cluster, and
-`validate.sh` checks it on every change: an Application per environment (staging: automated sync with prune and
-selfHeal; production: manual sync), Argo CD Image Updater's annotations on the staging Application (semver strategy,
-only `X.Y.Z`, git write-back of the new `newTag` to `main`: exactly what `update:staging` does). No migration hook is
-needed: the pods Argo CD rolls out migrate the database themselves. Production gets no
-Image Updater on purpose: its versions stay a reviewed decision. The switch is a short procedure (install pinned Argo
-CD and Image Updater, register the repository with a read token, create the credentials, switch off `deploy:*` and
-`update:staging`): the deploy README, "Moving to Argo CD".
+**Argo CD, prepared.** `deploy/argocd/` holds what takes over from the workflows once Argo CD runs in the cluster,
+and `validate.sh` checks it on every change: an Application per environment (paths `deploy/environments/staging` and
+`deploy/environments/production`; staging: automated sync with prune and selfHeal; production: manual sync), Argo CD
+Image Updater's annotations on the staging Application (semver strategy, only `X.Y.Z`, git write-back of the new
+`newTag` to `main`: exactly what Update staging does). No migration hook is needed: the pods Argo CD rolls out migrate
+the database themselves. Production gets no Image Updater on purpose: its versions stay a reviewed decision. The
+switch is a short procedure (install pinned Argo CD and Image Updater, register the repository with a read-only
+deploy key, create the credentials, turn `STAGING_ENABLED` and `PRODUCTION_ENABLED` off): the deploy README, "Moving
+to Argo CD".
 
-Runners: every job of the three pipelines runs on gitlab.com's shared runners. None needs to reach the database: the
-API migrates it from inside the cluster, and the jobs reach the cluster only through `kubectl`. The pipelines run on
-gitlab.com; the staging and production jobs have not yet run against real clusters. Setting them up (the agent or a
-kubeconfig, environments, every variable per project, the tokens, or one machine of our own) is
-[chapter 12](12-from-zero.md).
+Runners: every job runs on GitHub-hosted `ubuntu-24.04` runners. None needs to reach the database: the API migrates
+it from inside the cluster, and the jobs reach the cluster only through `kubectl`. The workflows pass `actionlint`;
+the staging and production jobs have not yet run against real clusters. Setting them up (the environments and their
+secrets, the repository variables and settings) is [chapter 12](12-from-zero.md).
 
 ## Day-2 operations
 
-All commands run from the folder that holds the three repositories (`backend/`, `frontend/`, `deploy/`) and the local
-`tools/`, and assume `kubectl config use-context docker-desktop`.
+All commands run from the root of the clone, which holds `backend/`, `frontend/`, `deploy/` and `tools/`, and assume `kubectl config use-context docker-desktop`.
 
 **See what is running**
 
@@ -599,29 +617,30 @@ kubectl diff -k deploy/environments/local                    # what differs from
 kubectl -n product-management rollout status deployment/api
 ```
 
-In staging and production a change is a commit: code goes through a version tag in its repository (published by its
-pipeline, pulled into staging by `update:staging`, into production by a merge request), a manifest or setting through
-a merge request in the deploy repository, whose pipeline applies it (`infra/` through the manual `infra:<env>` jobs).
+In staging and production a change is a commit: code goes through a version tag (`backend/vX.Y.Z`,
+`frontend/vX.Y.Z`; published by its workflow, pulled into staging by Update staging, into production by a pull
+request), a manifest or setting through a pull request that changes `deploy/`, which the Deploy workflow applies
+(`infra/` through Run workflow → "<env> infra").
 
-**Choose a version.** From a clone of the deploy repository (needs `curl`, `jq`, `yq` and a token with
-`read_registry`, or a `docker login registry.gitlab.com`):
+**Choose a version.** From a clone (needs `curl`, `jq`, `yq` and, while the packages are private, a GitHub user and a
+token with `read:packages` in `REGISTRY_USER` / `REGISTRY_PASSWORD`, or a `docker login ghcr.io`):
 
 ```bash
 deploy/scripts/versions.sh all                         # what is published, newest first
 deploy/scripts/set-version.sh production api 1.4.0     # edits environments/production/kustomization.yaml, prints the diff
-git switch -c production/api-1.4.0 && git commit -am "production: api 1.4.0" && git push -u origin HEAD   # then the merge request
+git switch -c production/api-1.4.0 && git commit -am "production: api 1.4.0" && git push -u origin HEAD   # then the pull request
 ```
 
 **Change a setting.** Edit the env entry in `deploy/apps/backend/deployment.yaml` (every environment) or in
 `deploy/environments/<env>/api.yaml` (one environment), then deploy (locally `deploy.sh local`; elsewhere merge it
-into the deploy repository's `main`). To try a value without a deploy,
+into `main`). To try a value without a deploy,
 `kubectl -n product-management set env deployment/api RateLimiting__RequestsPerSecond=100` rolls the pods with it;
 the next deploy puts the file's value back.
 
-**Roll back.** In staging and production, set the older version in the deploy repository:
-`deploy/scripts/set-version.sh production api 1.3.2` (or `git revert` the version commit), through a merge request
-(staging: pause the `update:staging` schedule first, or it moves forward again); the pipeline applies the older images
-and smoke-checks them, and the repository still says what runs. Locally, or in an emergency before the revert lands (each
+**Roll back.** In staging and production, set the older version in `deploy/`:
+`deploy/scripts/set-version.sh production api 1.3.2` (or `git revert` the version commit), through a pull request
+(staging: the next release moves it forward again; to hold it, set the repository variable `STAGING_HOLD=true`, which
+pauses `update-staging` only); the Deploy workflow applies the older images and smoke-checks them, and the repository still says what runs. Locally, or in an emergency before the revert lands (each
 Deployment keeps 5 old ReplicaSets, each with its own image and configuration):
 
 ```bash
@@ -637,8 +656,8 @@ with the revert.
 **Rotate a secret.** Secrets are read when a pod starts, so every rotation ends with a restart of the pods that read
 it.
 
-* *The API's own keys* (`API_SIGNING_KEY`, `API_CONSUMERS`), staging and production: change the deploy project's
-  CI/CD variable and re-run its last `deploy:<env>` job. `deploy.sh` updates `api-secrets` and, as its content
+* *The API's own keys* (`API_SIGNING_KEY`, `API_CONSUMERS`), staging and production: change the GitHub
+  environment's secret, then Deploy → Run workflow → "<env> apps". `deploy.sh` updates `api-secrets` and, as its content
   changed, runs `kubectl rollout restart deployment/api`. Locally: `FORCE=1 deploy/scripts/lib/local-secrets.sh` (a new
   signing key and consumer hashes: everyone signs in again), then `deploy/scripts/deploy.sh local`.
 * *The database users' passwords* (any environment, from a machine with access to the cluster):
@@ -658,7 +677,7 @@ it.
   kubectl -n infra delete secret redis-auth
   deploy/scripts/infra.sh up redis     # a new redis-auth, and restarts Redis with it (the cache starts empty)
   deploy/scripts/deploy.sh local       # copies it into redis-credentials and, as it changed, restarts the API
-                                       # (staging, production: re-run the deploy repository's deploy:<env> job)
+                                       # (staging, production: Deploy → Run workflow → "<env> infra", then "<env> apps")
   ```
 
   Between the Redis restart and the API's, the API cannot reach Redis: the cache and the shared rate limits fall
@@ -775,7 +794,7 @@ with `kubectl -n infra exec -i deployment/redis -- redis-cli` (override with `PS
 `PG_DATABASE`). `run.sh` raises the API's rate limits (and, for some scenarios, the gateway's) with `kubectl set env`
 for the run, after saving the deployed values, and always sets those values back at the end. The autoscalers need
 metrics-server, which `deploy/scripts/infra.sh up` installs where it is missing. The load tests and
-`tools/check-requirements.py` are local tools, in no GitLab repository and no pipeline.
+`tools/check-requirements.py` are tools run by hand, in no workflow.
 
 **Troubleshooting**
 
@@ -783,12 +802,12 @@ metrics-server, which `deploy/scripts/infra.sh up` installs where it is missing.
 | --- | --- |
 | API pods not ready | `kubectl -n product-management describe pod -l app.kubernetes.io/name=api`, then `kubectl -n product-management logs deployment/api`; readiness includes the database (`SELECT 1`), so check it: `deploy/scripts/infra.sh status`, `kubectl -n infra logs statefulset/postgres --tail 50` |
 | `deploy.sh` stops: "No Secret database-credentials" | the database was not created in this cluster: `deploy/scripts/lib/create-database.sh product-management product_management pm_app pm_migrator` |
-| `deploy.sh` stops: "No Secret infra/redis-auth" | the shared Redis is not running: `deploy/scripts/infra.sh up redis` (or the `infra:<env>` job) |
-| `deploy.sh` stops: "names no version yet for some images (newTag: unreleased)" | no version chosen for an image yet: tag a version in that app (`v1.0.0`), then `update:staging` (staging) or `set-version.sh production …` in a merge request (production) |
-| `set-version.sh`: "… is not in the registry" | the version was not published (its tag pipeline failed before `publish:*`) or is mistyped: `deploy/scripts/versions.sh <image>` |
-| `update:staging` does nothing | no newer plain `X.Y.Z` (release candidates are skipped; web and gateway need the same version), or the schedule is inactive |
-| `deploy.sh` stops: "No Secret gitlab-registry" or "No Secret api-secrets" | the deploy project's variables: the group deploy token `gitlab-deploy-token`, `API_SIGNING_KEY` / `API_CONSUMERS` for that environment ([chapter 12](12-from-zero.md)) |
-| `update:staging` / `propose:production` fails to push | the deploy project does not allow job-token pushes, or the job's user cannot push to the protected `main` | Settings → CI/CD → Job token permissions → "Allow Git push requests to the repository"; the schedule's owner (or whoever runs the job) is a Maintainer and Maintainers may push to `main` |
+| `deploy.sh` stops: "No Secret infra/redis-auth" | the shared Redis is not running: `deploy/scripts/infra.sh up redis` (or Run workflow → "<env> infra") |
+| `deploy.sh` stops: "names no version yet for some images (newTag: unreleased)" | no version chosen for an image yet: tag a version of that app (`backend/v1.0.0`, `frontend/v1.0.0`), which Update staging follows (staging), or `set-version.sh production …` in a pull request (production) |
+| `set-version.sh`: "… is not in the registry" | the version was not published (its tag's run failed before `publish`) or is mistyped: `deploy/scripts/versions.sh <image>` |
+| Update staging does nothing | no newer plain `X.Y.Z` (release candidates are skipped; web and gateway need the same version), `STAGING_ENABLED` is not `true`, or the triggering run was not a successful run of a version tag |
+| `deploy.sh` stops: "No Secret registry-credentials" or "No Secret api-secrets" | the GitHub environment's secrets: `REGISTRY_USER` / `REGISTRY_PASSWORD`, `API_SIGNING_KEY` / `API_CONSUMERS` ([chapter 12](12-from-zero.md)) |
+| Update staging / Propose production fails to push or to open the pull request | `github-actions[bot]` may not push to `main` (branch protection or a ruleset without a bypass for GitHub Actions), or GitHub Actions may not open pull requests | let GitHub Actions bypass the ruleset (or leave `main` unprotected) and turn on Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"; or set `DEPLOY_PUSH_TOKEN` |
 | The API cannot reach the database or Redis | the connection strings it runs with: `kubectl -n product-management get deployment api -o jsonpath='{.spec.template.spec.containers[0].env}'`; whether the Services answer: `kubectl -n product-management run nettest --rm -it --restart=Never --image=busybox:1.37 -- nc -zv postgres.infra.svc.cluster.local 5432` (and `redis.infra.svc.cluster.local 6379`) |
 | Password authentication failed | the users' passwords no longer match `database-credentials` (e.g. after `down postgres --delete-data`): `deploy/scripts/lib/create-database.sh …` again (it sets the Secret's passwords on the users), then `kubectl -n product-management rollout restart deployment/api`. Redis `WRONGPASS`: `deploy/scripts/deploy.sh <env>` copies `redis-auth` again and restarts the API |
 | A migration fails | the new api pod is in `CrashLoopBackOff` and the deploy fails at the rollout wait; the previous version's pods keep serving. `kubectl -n product-management logs deployment/api` (or `logs <pod> --previous`) shows the error after "Applying N database migrations". A pod that never starts: `kubectl -n product-management get events --sort-by=.lastTimestamp` (image pull, missing Secret) |
@@ -796,8 +815,8 @@ metrics-server, which `deploy/scripts/infra.sh up` installs where it is missing.
 | `postgres-0` Pending | `kubectl -n infra describe pod postgres-0`: its volume lives on one node, so the pod can only start there (the node is down, or tainted for another role) |
 | `502` on `/api` | no ready API pod: `kubectl -n product-management get endpointslices -l kubernetes.io/service-name=api` |
 | `502` on `/collect` in the browser console | no log collector: `deploy/scripts/infra.sh up logs`, or deploy with `LOGS=off` |
-| `ImagePullBackOff` | staging, production: the tag in `deploy/environments/<env>/kustomization.yaml` must exist in the registry, and the Secret `gitlab-registry` must hold the group deploy token (`read_registry`) |
-| `smoke:*` fails | its log says which step: `/healthz` (gateway, Ingress, TLS), `/` (web), the `invalid_client` 401 (the API behind the gateway), the signed-in read (`SMOKE_CLIENT_ID` / `SMOKE_CLIENT_SECRET`, the database). Run `deploy/scripts/ci/smoke.sh <url>` from a laptop to repeat it |
+| `ImagePullBackOff` | staging, production: the tag in `deploy/environments/<env>/kustomization.yaml` must exist in the registry, and the Secret `registry-credentials` must hold a valid token with `read:packages` |
+| the smoke step of a deploy job fails | its log says which step: `/healthz` (gateway, Ingress, TLS), `/` (web), the `invalid_client` 401 (the API behind the gateway), the signed-in read (`SMOKE_CLIENT_ID` / `SMOKE_CLIENT_SECRET`, the database). Run `deploy/scripts/ci/smoke.sh <url>` from a laptop to repeat it |
 | HPA shows `<unknown>` | metrics-server: `deploy/scripts/infra.sh up` installs it where missing, then `kubectl top pods` |
 
 ## Where to look
@@ -823,10 +842,13 @@ metrics-server, which `deploy/scripts/infra.sh up` installs where it is missing.
   [`Persistence/Migrations`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations)
   (the app user's rights: [`GrantAppPermissions`](../../backend/ProductManagement.Infrastructure/Persistence/Migrations/20261010164241_GrantAppPermissions.cs)),
   the test [`MigrationsAtStartupTests.cs`](../../backend/ProductManagement.Api.IntegrationTests/Persistence/MigrationsAtStartupTests.cs)
-* CI/CD: [`backend/.gitlab-ci.yml`](../../backend/.gitlab-ci.yml), [`frontend/.gitlab-ci.yml`](../../frontend/.gitlab-ci.yml),
-  [`deploy/.gitlab-ci.yml`](../../deploy/.gitlab-ci.yml); the release notes
+* CI/CD: [`backend.yml`](../../.github/workflows/backend.yml), [`frontend.yml`](../../.github/workflows/frontend.yml),
+  [`deploy.yml`](../../.github/workflows/deploy.yml), [`update-staging.yml`](../../.github/workflows/update-staging.yml),
+  [`propose-production.yml`](../../.github/workflows/propose-production.yml),
+  [`codeql.yml`](../../.github/workflows/codeql.yml), the action
+  [`environment-secrets`](../../.github/actions/environment-secrets/action.yml); the release notes
   [`backend/ci/release-notes.sh`](../../backend/ci/release-notes.sh) (the same in [`frontend/ci`](../../frontend/ci/release-notes.sh))
-* Each repository on its own: [`backend/README.md`](../../backend/README.md), [`frontend/README.md`](../../frontend/README.md),
+* Each folder on its own: [`backend/README.md`](../../backend/README.md), [`frontend/README.md`](../../frontend/README.md),
   [`deploy/README.md`](../../deploy/README.md)
 * Decisions: [ADR 0021 deployment layout](../adr/0021-deployment-layout.md) (which supersedes most of
   [ADR 0011](../adr/0011-kubernetes-deployment.md)), [ADR 0006 PostgreSQL](../adr/0006-postgresql.md)
@@ -852,17 +874,18 @@ kubectl -n product-management get secret database-credentials -o go-template='{{
   | kubectl -n infra exec -i statefulset/postgres -- sh -c 'PGPASSWORD="$(cat)" psql -h localhost -U pm_app -d product_management \
       -c "BEGIN" -c "DROP TABLE products" -c "ROLLBACK"'          # ERROR: must be owner of table products
 
-# Every environment, infra/ and argocd/ render and are valid (what the deploy pipeline's validate job runs)
-docker run --rm -v "$PWD/deploy:/work:ro" -w /work alpine/k8s:1.34.11 scripts/ci/validate.sh
+# Every environment, infra/ and argocd/ render and are valid (what Deploy's validate-manifests job runs; the whole
+# clone is mounted: the Argo CD Applications' paths are relative to the repository's root)
+docker run --rm -v "$PWD:/work:ro" -w /work/deploy alpine/k8s:1.34.11 scripts/ci/validate.sh
 
 # The migrations at startup: every API pod logs them ("Database is up to date (0 migrations applied as pm_migrator ...)")
 kubectl -n product-management rollout restart deployment/api && kubectl -n product-management rollout status deployment/api
 kubectl -n product-management logs deployment/api | grep -E 'migrations|up to date' 
 
-# The published versions (a token with read_registry in REGISTRY_USER / REGISTRY_PASSWORD, or docker login)
+# The published versions (a GitHub user and a token with read:packages in REGISTRY_USER / REGISTRY_PASSWORD)
 docker run --rm -v "$PWD/deploy:/work" -w /work -e REGISTRY_USER -e REGISTRY_PASSWORD alpine/k8s:1.34.11 scripts/versions.sh all
 
-# The smoke check the pipeline runs after a deployment, here against the local one
+# The smoke check the deploy jobs run after a deployment, here against the local one
 deploy/scripts/ci/smoke.sh http://localhost:8080
 
 # Without logs: /collect answers 204

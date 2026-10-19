@@ -18,8 +18,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE" || exit 1
 NAMESPACE=product-management
 # The registry login for published images: the environment's, or what is typed in item 3, 4 or 5.
-registry_user="${REGISTRY_USER:-${CI_DEPLOY_USER:-}}"
-registry_password="${REGISTRY_PASSWORD:-${CI_DEPLOY_PASSWORD:-}}"
+registry_user="${REGISTRY_USER:-}"
+registry_password="${REGISTRY_PASSWORD:-}"
 answer=""
 
 usage() {
@@ -32,7 +32,7 @@ The deploy repository's menu, on the current kubectl context. Each item shows th
   2  Shared infrastructure             scripts/infra.sh up | status | down [--delete-data]
   3  Deploy the application            scripts/deploy.sh local --version <X.Y.Z|latest> (published images)
                                        scripts/deploy.sh local --build                  (from ../backend, ../frontend)
-                                       staging, production: the pipeline (item 5 changes their versions)
+                                       staging, production: the GitHub workflow (item 5 changes their versions)
   4  Published versions                scripts/versions.sh all
   5  Change an environment's version   scripts/set-version.sh <staging|production> <image> <version|latest>
   6  Add a node                        scripts/add-node.sh <user@host> <database|cache|apps> [--dry-run]
@@ -43,8 +43,8 @@ The deploy repository's menu, on the current kubectl context. Each item shows th
 
 The status line above the items shows the kubectl context and its kind, whether the infrastructure runs, the api, web
 and gateway versions in product-management and the application's URL.
-Published images need a registry login: REGISTRY_USER and REGISTRY_PASSWORD (a deploy token with read_registry), or
-CI_DEPLOY_USER and CI_DEPLOY_PASSWORD, or docker login registry.gitlab.com; otherwise the menu asks for it.
+Published images need a registry login: REGISTRY_USER and REGISTRY_PASSWORD (a GitHub user and a token with
+read:packages), or docker login ghcr.io; otherwise the menu asks for it.
 EOF
 }
 
@@ -149,14 +149,14 @@ ask_registry_login() {
   if [[ -n "$registry_user" && -n "$registry_password" ]]; then
     return 0
   fi
-  say "The registry (registry.gitlab.com) is private: a deploy token with the scope read_registry is needed"
-  say "(GitLab: group zeiss → Settings → Repository → Deploy tokens, e.g. one named server-pull)."
-  ask "Registry user, the deploy token's username (empty: this machine's docker login)"
+  say "The registry (ghcr.io) may be private: a GitHub user and a token with the scope read:packages are needed"
+  say "(GitHub: Settings → Developer settings → Personal access tokens → Tokens (classic))."
+  ask "Registry user, your GitHub user name (empty: this machine's docker login)"
   if [[ -z "$answer" ]]; then
     return 0
   fi
   registry_user="$answer"
-  ask_hidden "Deploy token (not shown)"
+  ask_hidden "Token (not shown)"
   registry_password="$answer"
   if [[ -z "$registry_password" ]]; then
     say "No token given."
@@ -332,7 +332,7 @@ deploy_published() {
 
 item_deploy() {
   say "Deploy the application (namespace product-management) to context ${context:-?}:"
-  say "  1) local, a published version   the released images from registry.gitlab.com (a deploy token is needed)"
+  say "  1) local, a published version   the released images from ghcr.io (a read:packages token may be needed)"
   if has_checkouts; then
     say "  2) local, built from source     images built from your checkouts ../backend and ../frontend"
   else
@@ -356,10 +356,10 @@ item_deploy() {
 }
 
 explain_remote() {
-  say "staging and production are deployed by this repository's pipeline (gitlab.com/zeiss/deploy), not from here:"
+  say "staging and production are deployed by this repository's GitHub workflow (Deploy), not from here:"
   say "they run the versions committed in environments/<staging|production>/kustomization.yaml. To change them,"
-  say "change the version (item 5) and commit it: staging on main, production through a merge request. The pipeline"
-  say "then deploys (deploy:staging by itself, deploy:production when a person starts it)."
+  say "change the version (item 5) and commit it: staging on main, production through a pull request. The workflow"
+  say "then deploys (staging by itself, production once a reviewer approves the environment)."
   confirm_default "Change a version now (item 5)?" && item_set_version
 }
 
@@ -386,12 +386,12 @@ item_set_version() {
   run with_registry scripts/set-version.sh "$environment" "$image" "$version" || return
   echo
   if [[ "$environment" == staging ]]; then
-    say "Next: commit environments/staging/kustomization.yaml and push it to main (or open a merge request);"
-    say "the pipeline deploys it (deploy:staging). While update:staging's schedule runs, it moves staging to the"
-    say "newest version again: pause the schedule to hold an older one."
+    say "Next: commit environments/staging/kustomization.yaml and push it to main (or open a pull request);"
+    say "the Deploy workflow deploys it (deploy-staging). The next release moves staging to the newest version"
+    say "again (update-staging): set the variable STAGING_HOLD=true to hold an older one."
   else
-    say "Next: commit environments/production/kustomization.yaml on a branch and open a merge request. Merging it"
-    say "is the release decision; then start deploy:production in the pipeline."
+    say "Next: commit environments/production/kustomization.yaml on a branch and open a pull request. Merging it"
+    say "is the release decision; then approve deploy-production in the Deploy workflow."
   fi
 }
 

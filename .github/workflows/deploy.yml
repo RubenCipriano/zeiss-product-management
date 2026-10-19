@@ -1,0 +1,257 @@
+# CI/CD of deploy/: the only place that changes the clusters, and the place that decides which versions run. What
+# runs in an environment is what this repository holds (GitOps): deploy/environments/<env> for the application (the
+# `images:` versions in its kustomization.yaml), deploy/infra/ for the shared infrastructure.
+#
+# Pull model: the Backend and Frontend workflows only build and publish images (a tag backend/vX.Y.Z or
+# frontend/vX.Y.Z publishes <image>:X.Y.Z); they never touch deploy/. Versions are pulled in:
+#   staging      update-staging.yml (after every release, or by hand) sets every image to its newest released version
+#                and, if anything changed, commits "staging: api 1.4.0, ..." to main, then deploys and smoke-tests it.
+#   production   a pull request that changes deploy/environments/production (a person runs scripts/set-version.sh, or
+#                starts propose-production.yml, which proposes the versions staging runs). Merging it is the release
+#                decision.
+#
+#   validate (every pull request and commit) ──► staging (main) ─────────► production (main, after approval)
+#   manifests (scripts/ci/validate.sh),          deploy-staging: apply,     deploy-production: apply, smoke
+#   scripts (shellcheck),                        smoke                      infra-production (by hand)
+#   Alloy configuration                          infra-staging (by hand)
+#
+# deploy-staging runs on main when a commit changes deploy/environments/staging, apps/, infra/ or the deploy script
+# (scripts/deploy.sh and the scripts/lib/ it calls); deploy-production when it changes deploy/environments/production
+# (a merged pull request), apps/ or the deploy script, and waits for a reviewer of the environment production. Both
+# apply the manifests and wait for the rollouts; the database migrations need no job: the new API pods apply them when
+# they start, before they serve. Rollback: scripts/set-version.sh <env> <image> <older version> (or `git revert` the
+# version commit) and commit; the workflow applies it. infra/ is applied only by hand (Run workflow → infra staging or
+# infra production): it holds the data of every service. Run workflow can also deploy an environment's apps again.
+#
+# Repository variables (Settings → Secrets and variables → Actions → Variables):
+#   STAGING_ENABLED, PRODUCTION_ENABLED   "true" turns that environment's jobs on; without them the workflow only
+#                                         validates
+#   STAGING_URL, PRODUCTION_URL           the environments' public URLs (the hosts in environments/*/ingress.yaml)
+#   STAGING_HOLD                          "true" keeps staging on the versions committed (update-staging.yml pauses;
+#                                         this workflow still deploys)
+# Environments (Settings → Environments): staging and production, production with "Required reviewers" (the release
+# approval). Secrets of each environment:
+#   KUBECONFIG                      a kubeconfig whose current context is the environment's cluster
+#   REGISTRY_USER, REGISTRY_PASSWORD   a GitHub user and a token with read:packages: the cluster pulls the images with
+#                                   it (Secret registry-credentials), long after the job's own token has expired
+#   API_SIGNING_KEY                 the API's ES256 private key (PEM)                           → Secret api-secrets
+#   API_CONSUMERS                   consumers.json                                              → Secret api-secrets
+#   SMOKE_CLIENT_ID, SMOKE_CLIENT_SECRET   optional: a viewer consumer, for the signed-in smoke check
+#   LOKI_URL, LOKI_USERNAME, LOKI_PASSWORD optional, infra jobs: another Loki (scripts/infra.sh)
+#
+# Argo CD instead of these jobs (prepared in deploy/argocd/, deploy/README.md "Moving to Argo CD"): Argo CD applies
+# main (automated for staging, manual sync for production), and Argo CD Image Updater replaces update-staging.yml. Then
+# the deploy jobs below are switched off (STAGING_ENABLED, PRODUCTION_ENABLED) and this workflow keeps validate.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths: ["deploy/**", ".github/workflows/deploy.yml", ".github/actions/environment-secrets/**"]
+  pull_request:
+    paths: ["deploy/**", ".github/workflows/deploy.yml", ".github/actions/environment-secrets/**"]
+  workflow_dispatch:
+    inputs:
+      run:
+        description: What to apply (on main, to an enabled environment)
+        type: choice
+        options: [validate only, staging apps, production apps, staging infra, production infra]
+        default: validate only
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Tool images, pinned (bump them with Dependabot or by hand).
+  SHELLCHECK_IMAGE: koalaman/shellcheck-alpine:v0.10.0
+  ALLOY_IMAGE: grafana/alloy:v1.10.2              # = the image in infra/logs.yaml
+  KUBERNETES_VERSION: "1.34.0"
+
+defaults:
+  run:
+    shell: bash
+    working-directory: deploy
+
+jobs:
+  # ─── validate (every pull request and commit) ─────────────────────────────────────────────────────────────────────
+
+  # Every environment and infra/ render and are valid (scripts/ci/validate.sh), in the image that has bash, kubectl
+  # (Kustomize), kubeconform, yq and jq.
+  validate-manifests:
+    runs-on: ubuntu-24.04
+    container: alpine/k8s:1.34.11
+    steps:
+      - uses: actions/checkout@v5
+      - run: scripts/ci/validate.sh
+
+  # The scripts and the menu: shellcheck finds quoting mistakes, unset variables and the like. scripts/ holds what a
+  # person runs, scripts/ci/ what only the workflows run, scripts/lib/ what the others call.
+  validate-scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: >-
+          docker run --rm -v "$PWD:/mnt" -w /mnt "$SHELLCHECK_IMAGE"
+          shellcheck menu.sh scripts/*.sh scripts/ci/*.sh scripts/lib/*.sh
+
+  # The Alloy configuration (inline in infra/logs.yaml): its components and arguments are valid, and it parses.
+  validate-alloy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          yq 'select(.kind == "ConfigMap" and .metadata.name == "alloy-config") | .data["config.alloy"]' infra/logs.yaml \
+            > config.alloy
+          test -s config.alloy
+          docker run --rm -v "$PWD:/work" -w /work "$ALLOY_IMAGE" validate config.alloy
+          docker run --rm -v "$PWD:/work" -w /work "$ALLOY_IMAGE" fmt config.alloy > /dev/null
+
+  # What this run applies: on a push to main, the environments whose files changed; on Run workflow, what was chosen.
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      staging: ${{ steps.plan.outputs.staging }}
+      production: ${{ steps.plan.outputs.production }}
+      infra: ${{ steps.plan.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: plan
+        working-directory: .
+        env:
+          BEFORE: ${{ github.event.before }}
+          CHOICE: ${{ inputs.run }}
+        run: |
+          staging=false production=false infra=""
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            :
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            case "$CHOICE" in
+              "staging apps") staging=true ;;
+              "production apps") production=true ;;
+              "staging infra") infra=staging ;;
+              "production infra") infra=production ;;
+            esac
+          elif [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            # The files this push changed; a push whose previous commit is unknown (a new branch, a force push)
+            # counts as a change of everything.
+            if [[ "$BEFORE" =~ ^0+$ ]] || ! changed="$(git diff --name-only "$BEFORE" "$GITHUB_SHA" 2>/dev/null)"; then
+              changed="deploy/environments/staging/ deploy/environments/production/"
+            fi
+            shared='^deploy/(apps/|scripts/deploy\.sh$|scripts/lib/)'
+            grep -Eq "^deploy/(environments/staging/|infra/)|$shared" <<<"$changed" && staging=true
+            grep -Eq "^deploy/environments/production/|$shared" <<<"$changed" && production=true
+          fi
+          { echo "staging=$staging"; echo "production=$production"; echo "infra=$infra"; } >> "$GITHUB_OUTPUT"
+          echo "staging apps: $staging, production apps: $production, infra: ${infra:-none}"
+
+  # ─── staging ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  # Applies environments/staging exactly as committed (scripts/deploy.sh staging apps): creates the Secrets
+  # registry-credentials and api-secrets from the environment's secrets, copies the shared Redis' password, applies,
+  # waits for the rollouts. The new API pods apply the database migrations when they start; a failed migration keeps
+  # them from becoming ready, so the rollout stops with the old pods still serving and the job fails at the wait
+  # (kubectl logs deployment/api shows why). Then the smoke check, from outside, through the public URL.
+  deploy-staging:
+    needs: [validate-manifests, plan]
+    if: vars.STAGING_ENABLED == 'true' && needs.plan.outputs.staging == 'true'
+    runs-on: ubuntu-24.04
+    container: alpine/k8s:1.34.11
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    concurrency:
+      group: staging
+      cancel-in-progress: false
+    env:
+      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      SMOKE_CLIENT_ID: ${{ secrets.SMOKE_CLIENT_ID }}
+      SMOKE_CLIENT_SECRET: ${{ secrets.SMOKE_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/environment-secrets
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+          api-signing-key: ${{ secrets.API_SIGNING_KEY }}
+          api-consumers: ${{ secrets.API_CONSUMERS }}
+      - run: scripts/deploy.sh staging apps
+      - run: scripts/ci/smoke.sh "${{ vars.STAGING_URL || 'https://staging.products.example.com' }}"
+
+  # The shared infrastructure (scripts/deploy.sh staging infra → scripts/infra.sh up). Only by hand: it holds the data
+  # of every service and changes rarely and deliberately. Volumes and passwords are never touched by `up`; a new
+  # service's database is a separate, one-time step (scripts/lib/create-database.sh).
+  infra-staging:
+    needs: [validate-manifests, plan]
+    if: vars.STAGING_ENABLED == 'true' && needs.plan.outputs.infra == 'staging'
+    runs-on: ubuntu-24.04
+    container: alpine/k8s:1.34.11
+    environment: staging
+    concurrency:
+      group: staging
+      cancel-in-progress: false
+    env:
+      LOKI_URL: ${{ secrets.LOKI_URL }}
+      LOKI_USERNAME: ${{ secrets.LOKI_USERNAME }}
+      LOKI_PASSWORD: ${{ secrets.LOKI_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/environment-secrets
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+      - run: scripts/deploy.sh staging infra
+
+  # ─── production (after approval) ──────────────────────────────────────────────────────────────────────────────────
+
+  # After a pull request that changes environments/production is merged: the job waits until a required reviewer of
+  # the environment production approves it (Settings → Environments → production → Required reviewers).
+  deploy-production:
+    needs: [validate-manifests, plan]
+    if: vars.PRODUCTION_ENABLED == 'true' && needs.plan.outputs.production == 'true'
+    runs-on: ubuntu-24.04
+    container: alpine/k8s:1.34.11
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    env:
+      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      SMOKE_CLIENT_ID: ${{ secrets.SMOKE_CLIENT_ID }}
+      SMOKE_CLIENT_SECRET: ${{ secrets.SMOKE_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/environment-secrets
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+          api-signing-key: ${{ secrets.API_SIGNING_KEY }}
+          api-consumers: ${{ secrets.API_CONSUMERS }}
+      - run: scripts/deploy.sh production apps
+      - run: scripts/ci/smoke.sh "${{ vars.PRODUCTION_URL || 'https://products.example.com' }}"
+
+  infra-production:
+    needs: [validate-manifests, plan]
+    if: vars.PRODUCTION_ENABLED == 'true' && needs.plan.outputs.infra == 'production'
+    runs-on: ubuntu-24.04
+    container: alpine/k8s:1.34.11
+    environment: production
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    env:
+      LOKI_URL: ${{ secrets.LOKI_URL }}
+      LOKI_USERNAME: ${{ secrets.LOKI_USERNAME }}
+      LOKI_PASSWORD: ${{ secrets.LOKI_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/environment-secrets
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+      - run: scripts/deploy.sh production infra

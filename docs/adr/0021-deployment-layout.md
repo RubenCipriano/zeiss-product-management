@@ -1,17 +1,21 @@
 # 0021 — Deployment layout: Kustomize overlays, servers outside the cluster, migrations in the pipeline
 
 **Status:** accepted (supersedes the per-project manifests and the migration Job of [0011](0011-kubernetes-deployment.md)),
-amended five times. **Current state:** where things run is
+amended six times. **Current state:** where things run is
 [Update (2026-10-10): the infrastructure moves into Kubernetes](#update-2026-10-10-the-infrastructure-moves-into-kubernetes)
 (PostgreSQL, Redis and the logs in the cluster, in the shared namespace `infra`); the layout is
 [Revision (2026-10-10): GitOps with a deploy repository](#revision-2026-10-10-gitops-with-a-deploy-repository)
-(every manifest and environment in the deploy repository, whose pipeline is the only one that applies); the release
+(every manifest and environment in `deploy/`, whose workflow is the only one that applies); the release
 flow is [Revision (2026-10-10): pull model with SemVer releases](#revision-2026-10-10-pull-model-with-semver-releases)
-(the app pipelines only publish versions; the deploy repository pulls them in); the migrations are
+(the app pipelines only publish versions; `deploy/` pulls them in); the migrations are
 [Revision (2026-10-11): the API applies its migrations at startup](#revision-2026-10-11-the-api-applies-its-migrations-at-startup)
-(no migration job, pod or hook any more). The servers outside the cluster, the Docker Compose files, the private
-runner for migrations, the migration pod (`migrate.sh`, the `migrate` command, the PreSync hook), the password
-variables and the per-repository deploy scripts and manifests described below are history.
+(no migration job, pod or hook any more); where the code lives and what runs the CI/CD is
+[Revision (2026-10-19): one GitHub repository, GitHub Actions](#revision-2026-10-19-one-github-repository-github-actions)
+(the three GitLab projects became folders of one GitHub repository; the pipelines became workflows). The servers
+outside the cluster, the Docker Compose files, the private runner for migrations, the migration pod (`migrate.sh`, the
+`migrate` command, the PreSync hook), the password variables, the per-repository deploy scripts and manifests, and
+every GitLab detail (projects, `.gitlab-ci.yml` jobs, CI/CD variables, deploy tokens, the job token, the pipeline
+schedule, the pull Secret `gitlab-registry`) described below are history.
 
 ## Context
 
@@ -539,3 +543,86 @@ explicitly in `deploy/apps/backend/deployment.yaml`. One path for every environm
   become ready.
 * **A failed migration is seen in the pod's log** (`kubectl logs deployment/api`), not in the deploy job's own output;
   the job still fails, at the rollout wait.
+
+## Revision (2026-10-19): one GitHub repository, GitHub Actions
+
+**Status:** accepted. Replaces where the code lives and what runs the CI/CD in every earlier section: the three GitLab
+projects, their `.gitlab-ci.yml` pipelines, the GitLab registry, CI/CD variables, deploy tokens, the job token and the
+pipeline schedule. The layout of `deploy/`, GitOps with `deploy/` as the only writer to the clusters, the pull model
+with SemVer versions, the migrations at startup, the shared infrastructure and the prepared Argo CD objects are
+unchanged.
+
+### Context
+
+The system lived in three GitLab projects (`zeiss/backend`, `zeiss/frontend`, `zeiss/deploy`), each with its own
+pipeline and container registry; locally they were already three folders side by side. It moved to one public GitHub
+repository, [RubenCipriano/zeiss-product-management](https://github.com/RubenCipriano/zeiss-product-management), with
+the same three folders. This revision records what changed with the move; the move itself was the owner's choice.
+
+### Decision
+
+**One repository, three folders.** `backend/`, `frontend/` and `deploy/` (and `docs/`, `tools/`) are folders of one
+clone, so `deploy/scripts/deploy.sh local` finds `../backend` and `../frontend` without cloning anything else. The
+Argo CD Applications point at `git@github.com:RubenCipriano/zeiss-product-management.git`, paths
+`deploy/environments/staging` and `deploy/environments/production`.
+
+**GitHub Actions instead of GitLab CI** (`.github/workflows/`, GitHub-hosted `ubuntu-24.04` runners, each workflow
+filtered to its folder's paths):
+
+| Before (GitLab) | Now (GitHub Actions) |
+| --- | --- |
+| `backend/.gitlab-ci.yml`: `test:backend`, `build:api`, `migrations:sql`, `scan:api`, `publish:api`, `release` | workflow Backend (`backend.yml`): `test`, `build`, `migrations-sql` (artifact `migrations-sql`, 90 days), `scan`, `publish`, `release` |
+| `frontend/.gitlab-ci.yml`: `test:frontend`, `build:web`, `build:gateway`, `scan:web`, `scan:gateway`, `publish:web`, `publish:gateway`, `release` | workflow Frontend (`frontend.yml`): `test`, `build` and `scan` (a matrix over web and gateway), one `publish` for both images, `release` |
+| `deploy/.gitlab-ci.yml`: `validate:manifests`, `validate:scripts`, `validate:alloy` | workflow Deploy (`deploy.yml`): `validate-manifests`, `validate-scripts`, `validate-alloy` |
+| `deploy:staging` + `smoke:staging` | `deploy-staging`: deploy, then the smoke check, in one job |
+| `deploy:production` (manual) + `smoke:production` | `deploy-production`: waits for a required reviewer of the GitHub environment `production` |
+| `infra:staging`, `infra:production` (manual) | `infra-staging`, `infra-production`: Run workflow on Deploy, input "staging infra" / "production infra" (also "staging apps" / "production apps" to redeploy) |
+| `update:staging` on a pipeline schedule (every 15 minutes) | workflow Update staging (`update-staging.yml`): after every successful Backend or Frontend run of a version tag, or by hand; no schedule (one can be added) |
+| `propose:production` (manual, merge request through git push options) | workflow Propose production (`propose-production.yml`): pushes a branch and opens a pull request through the REST API |
+| GitLab SAST and Secret Detection templates | workflow CodeQL (`codeql.yml`: C#, TypeScript, the workflows); GitHub secret scanning and push protection |
+| Trivy report in GitLab's security widget | Trivy SARIF in Security → Code scanning (categories `trivy-api`, `trivy-web`, `trivy-gateway`); still fails on fixable critical vulnerabilities |
+| JUnit reports in the merge request | artifacts `backend-test-results`, `frontend-test-results` |
+| Docker-in-Docker service for Testcontainers and builds (with an MTU workaround) | the runner's own Docker; buildx builds `linux/amd64` and `linux/arm64` without emulation |
+
+**Two release lines in one repository.** Tags `backend/vX.Y.Z[-rc.N]` and `frontend/vX.Y.Z[-rc.N]` (were `vX.Y.Z` in
+each project); the image tags stay `X.Y.Z`, so `deploy/` and Argo CD Image Updater see no difference. Releases are
+GitHub Releases (the `gh` CLI; a pre-release for `-rc.N`), whose notes list only the commits that changed that
+folder since the previous tag of the same line. Tag rulesets (Settings → Rules → Rulesets) replace protected tags.
+
+**Registry ghcr.io.** `ghcr.io/rubencipriano/zeiss-product-management/{api,web,gateway}`; commit builds are tagged with
+the first 8 characters of the commit; the layer cache is GitHub Actions' cache (`type=gha`) instead of a `buildcache`
+tag in the registry. The Backend and Frontend workflows publish with their own `GITHUB_TOKEN`: they still need no
+secret, and still hold no credential of a cluster.
+
+**Pulling images: a token of a user.** The pull Secret is now `registry-credentials`, made from `REGISTRY_USER` and
+`REGISTRY_PASSWORD`, a GitHub user and a classic personal access token with `read:packages`, stored as secrets of the
+GitHub environments `staging` and `production` (the GitLab group deploy token and `CI_DEPLOY_USER` /
+`CI_DEPLOY_PASSWORD` are gone). The run's `GITHUB_TOKEN` cannot be used: it expires with the run, and the nodes pull
+long after.
+
+**Configuration: repository variables and environment secrets.** `STAGING_ENABLED`, `PRODUCTION_ENABLED`,
+`STAGING_URL`, `PRODUCTION_URL` are repository variables; `KUBECONFIG`, `REGISTRY_USER`, `REGISTRY_PASSWORD`,
+`API_SIGNING_KEY`, `API_CONSUMERS` (and optionally `SMOKE_CLIENT_*`, `LOKI_*`) are secrets of each environment. A
+composite action (`.github/actions/environment-secrets`) writes the kubeconfig, key and consumers to files under the
+runner's temporary directory, as `deploy.sh` expects them. The GitLab agent for Kubernetes (and `KUBE_CONTEXT` as its
+path) no longer applies: a job reaches its cluster only through `KUBECONFIG`.
+
+**Pushes from the workflows.** Update staging pushes its version commit to `main` with `GITHUB_TOKEN` as
+`github-actions[bot]`, which needs `main` unprotected or a ruleset bypass for GitHub Actions (or a repository secret
+`DEPLOY_PUSH_TOKEN`). As with GitLab's job token, a push made with `GITHUB_TOKEN` starts no workflow, so Update staging
+deploys its own commit (under the same concurrency group `staging` as `deploy-staging`). Propose production needs
+"Allow GitHub Actions to create and approve pull requests"; a pull request it opens starts no workflow either.
+
+### Consequences
+
+* **Staging follows a release at once** (the tag's run ends, Update staging starts) instead of within the schedule's
+  15 minutes; a version published any other way is noticed only by a manual run, or a schedule if one is added.
+* **Holding staging on an older version** is the repository variable `STAGING_HOLD=true`: `update-staging` then does
+  nothing while `deploy-staging` keeps applying commits; without it, the next release moves staging forward.
+* **The production approval is the environment's required reviewers**, the same for `deploy-production` and
+  `infra-production`, instead of who may start a manual job.
+* **A user's token pulls the images.** The classic personal access token in `REGISTRY_PASSWORD` belongs to a person
+  and expires; it must be rotated (and replaced when that person leaves), where the group deploy token was the group's.
+* **One clone, one history.** A change to the API and the deploy manifests can be one pull request; the path filters
+  keep each workflow to its folder, and the release notes to their folder's commits.
+* **Not yet run end to end.** The workflows pass `actionlint`; the deploy jobs need clusters, which do not exist yet.

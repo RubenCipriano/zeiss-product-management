@@ -140,7 +140,7 @@ echo "  scripts/infra.sh up"
 if [[ -d "$deploy_dir/../backend" && -d "$deploy_dir/../frontend" ]]; then
   echo "  scripts/deploy.sh local                  # builds the images from ../backend and ../frontend"
 else
-  echo "  REGISTRY_USER=<deploy token user> REGISTRY_PASSWORD=<deploy token> \\"
+  echo "  REGISTRY_USER=<GitHub user> REGISTRY_PASSWORD=<token with read:packages> \\"
   echo "    scripts/deploy.sh local --version latest   # the published images (no ../backend, ../frontend here)"
 fi
 echo "  scripts/ci/smoke.sh http://localhost:8080"

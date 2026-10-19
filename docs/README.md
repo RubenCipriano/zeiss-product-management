@@ -4,12 +4,12 @@ This is the documentation of the Product Management system: a .NET 10 API (clean
 Redis), an Angular 22 front end and an nginx gateway that verifies tokens and caches reads. Everything runs on
 Kubernetes: the application in the namespace `product-management`, and PostgreSQL, Redis and the logs (Loki, Grafana
 and Alloy, optional) in the namespace `infra`, shared infrastructure that any service on the cluster can use. The
-system is in three GitLab repositories: [backend](https://gitlab.com/zeiss/backend) (the API),
-[frontend](https://gitlab.com/zeiss/frontend) (the web app and the gateway) and [deploy](https://gitlab.com/zeiss/deploy)
-(the Kubernetes manifests of every environment and the shared infrastructure, applied by its own pipeline: GitOps),
-used here as the folders `backend/`, `frontend/` and `deploy/`. This documentation (`docs/`) and the local tools
-(`tools/`: the load tests and the requirements check) are in no repository; they live only next to the three. With
-load tests, end-to-end tests and a CI/CD pipeline per repository.
+system is one GitHub repository, [zeiss-product-management](https://github.com/RubenCipriano/zeiss-product-management),
+with the folders [backend/](../backend/README.md) (the API), [frontend/](../frontend/README.md) (the web app and the
+gateway) and [deploy/](../deploy/README.md) (the Kubernetes manifests of every environment and the shared
+infrastructure, applied by its own workflow: GitOps), next to this documentation (`docs/`) and the tools (`tools/`:
+the load tests and the requirements check). With load tests, end-to-end tests and GitHub Actions workflows for each
+of the three folders.
 
 It is organised as a **guide in thirteen chapters**, meant to be read calmly, one at a time. Each chapter stands on its
 own, takes 5 to 10 minutes, starts with what it will explain and an illustration, and ends with the source files to
@@ -45,10 +45,10 @@ than read.
 | 6 | [Scaling and capacity](guide/06-scaling-and-capacity.md) | Autoscaling, why the database is the ceiling, the eight load-test scenarios, what each run found and fixed. |
 | 7 | [Front end](guide/07-frontend.md) | Angular layers and rules, the product page's data flow, loading UX, accessibility, what Lighthouse and Playwright found. |
 | 8 | [Logs, dashboards and alerts](guide/08-observability.md) | Logs only, and why: what is collected (the browser's errors included) and how it reaches Grafana, where it is kept and for how long, the two dashboards, twelve alerts with runbooks, one request followed by its trace id. |
-| 9 | [Deployment and operations](guide/09-deployment-and-operations.md) | What runs where (the namespaces `product-management` and `infra`), the three repositories and the deploy scripts, one Kustomize folder per environment, configuration as env keys and the Secrets, migrations applied by the API itself at startup (as `pm_migrator`, one replica at a time), logs as an option, the GitLab pipelines (releases as commits to the deploy repository, rollback as `git revert`), day-2 commands. |
+| 9 | [Deployment and operations](guide/09-deployment-and-operations.md) | What runs where (the namespaces `product-management` and `infra`), the three folders and the deploy scripts, one Kustomize folder per environment, configuration as env keys and the Secrets, migrations applied by the API itself at startup (as `pm_migrator`, one replica at a time), logs as an option, the GitHub Actions workflows (releases pulled into `deploy/` as commits, rollback as `git revert`), day-2 commands. |
 | 10 | [Testing and quality](guide/10-testing-and-quality.md) | The test pyramid with counts (390 back end, 187 front end, 22 E2E), what each kind proves, the project agents. |
 | 11 | [Production readiness](guide/11-production-readiness.md) | An honest ✅ / ⚠️ / ❌ assessment and the work left for go-live. |
-| 12 | [From zero to production](guide/12-from-zero.md) | A runbook from an empty GitLab group and fresh machines: k3s nodes and their roles, firewall, TLS, backups, one GitLab project per part, the agent, environments, every CI/CD variable per project, first deployment, day 2, go-live checklist. |
+| 12 | [From zero to production](guide/12-from-zero.md) | A runbook from an empty GitHub repository and fresh machines: k3s nodes and their roles, firewall, TLS, backups, the repository's settings, the GitHub environments and every secret and variable, first deployment, day 2, go-live checklist. |
 | 13 | [Reading the code](guide/13-reading-the-code.md) | Where to open the code for any question, one click followed file by file, and a plain-words glossary of the C#, Angular and nginx constructs used (`record`, `Result`, dependency injection, signals, interceptors, ETag…). |
 
 ## How to verify each claim
@@ -90,5 +90,5 @@ The guide explains; these documents are the precise record it links to.
 | [flows.md](flows.md) | Every important flow as a precise Mermaid sequence or flow diagram: caching, sign-in, the token check, the read path, stock changes, create/update, rate limiting, the product screen, deployment and CI/CD, autoscaling, load tests, logs. |
 | [architecture.md](architecture.md) | The component catalogue: what runs in each namespace of the cluster, every Service, workload, Secret and policy, and the data model with its indexes. |
 | [load-test-results.md](load-test-results.md) | Every load-test run, with environment, numbers, findings and the commands to reproduce them. |
-| [backend/README.md](../backend/README.md), [frontend/README.md](../frontend/README.md), [deploy/README.md](../deploy/README.md) | Each repository on its own: structure, scripts, configuration, how to run, release or deploy it, its CI/CD variables. |
+| [backend/README.md](../backend/README.md), [frontend/README.md](../frontend/README.md), [deploy/README.md](../deploy/README.md) | Each folder on its own: structure, scripts, configuration, how to run, release or deploy it, its workflows, secrets and variables. |
 | [images/](images) | The illustrations used by the guide. |

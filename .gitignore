@@ -1,4 +1,4 @@
-# OS / editor noise (backend/, frontend/ and deploy/ have their own .gitignore files: each is its own GitLab repository)
+# OS / editor noise (backend/, frontend/ and deploy/ have their own .gitignore files for what is theirs)
 .DS_Store
 Thumbs.db
 .idea/

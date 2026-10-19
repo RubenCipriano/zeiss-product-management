@@ -17,7 +17,7 @@ backend/
   ProductManagement.UnitTests/       Core/ · Infrastructure/ · Api/  (fast, no database)
   ProductManagement.Api.IntegrationTests/  real HTTP against real PostgreSQL and Redis (Testcontainers)
   ProductManagement.Api.AcceptanceTests/   the user outcomes, in Gherkin (Given / When / Then)
-  ci/                                pipeline helper: release-notes.sh (the GitLab Release's description)
+  ci/                                workflow helper: release-notes.sh (the GitHub Release's description)
 frontend/
   src/app/core/          once per app: sign-in, HTTP interceptors, browser cache, error reporting
   src/app/features/products/
@@ -33,9 +33,11 @@ deploy/
   infra/                 the shared infrastructure (namespace infra): PostgreSQL, Redis, Loki + Grafana, Alloy
   menu.sh                a numbered menu over the scripts, for people
   scripts/               what people run: deploy.sh, infra.sh, versions.sh, set-version.sh, setup-ubuntu.sh,
-                         add-node.sh; ci/ what the pipeline runs (validate.sh, update-versions.sh, smoke.sh);
+                         add-node.sh; ci/ what the workflows run (validate.sh, update-versions.sh, smoke.sh);
                          lib/ what the others call (local-secrets.sh, create-database.sh)
-tools/                   local only: load-tests/ (k6 scenarios run inside the cluster), check-requirements.py
+tools/                   load-tests/ (k6 scenarios run inside the cluster), check-requirements.py
+.github/                 workflows/ (Backend, Frontend, Deploy, Update staging, Propose production, CodeQL) and
+                         actions/environment-secrets
 ```
 
 One rule holds the backend together: **Api → Infrastructure → Core**, never the other way. Core has no reference to

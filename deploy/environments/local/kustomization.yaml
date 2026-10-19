@@ -10,8 +10,8 @@
 # generated/ is made on this machine and never committed:
 #   signing-key.pem, consumers.json   the API's own keys (scripts/lib/local-secrets.sh)
 #   build/kustomization.yaml          the images of the last deploy: the tags scripts/deploy.sh built, or a published
-#                                     version's registry names, tag and pull Secret (gitlab-registry); with LOGS=off,
-#                                     the gateway without a log collector
+#                                     version's registry names, tag and pull Secret (registry-credentials); with
+#                                     LOGS=off, the gateway without a log collector
 # so `kubectl diff -k environments/local` compares the cluster with exactly what the last deploy applied.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
